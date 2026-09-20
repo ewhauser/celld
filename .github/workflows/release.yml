@@ -174,10 +174,17 @@ jobs:
           set -euo pipefail
           version=$(sed -n 's/^version = "\(.*\)"$/\1/p' crates/celld/Cargo.toml | head -1)
           tag="v$version"
-          tag_sha=$(gh api "repos/$GITHUB_REPOSITORY/commits/$tag" --jq .sha 2>/dev/null || echo "absent")
-          if [ "$tag_sha" != "absent" ] && [ "$tag_sha" != "$GITHUB_SHA" ]; then
-            echo "tag $tag already names another commit; bump the fork version" >&2
-            exit 1
+          # The matching-refs endpoint returns [] for an absent tag. API
+          # failures must remain failures, not be mistaken for absence.
+          tag_ref=$(gh api "repos/$GITHUB_REPOSITORY/git/matching-refs/tags/$tag" \
+            --jq ".[] | select(.ref == \"refs/tags/$tag\") | .ref")
+          if [ -n "$tag_ref" ]; then
+            # Resolve annotated tags to their commit before comparing.
+            tag_sha=$(gh api "repos/$GITHUB_REPOSITORY/commits/$tag_ref" --jq .sha)
+            if [ "$tag_sha" != "$GITHUB_SHA" ]; then
+              echo "tag $tag already names another commit; bump the fork version" >&2
+              exit 1
+            fi
           fi
           existing=$(gh release view "$tag" --json isDraft \
             --jq .isDraft 2>/dev/null || echo "absent")
