@@ -78,6 +78,8 @@ def main():
     parser.add_argument("--outage", action="store_true", help="hold MinIO unavailable across the shutdown deadline and verify no success")
     parser.add_argument("--ordinary", action="store_true", help="check preserve, ordinary shutdown and SIGTERM across restarts")
     parser.add_argument("--deadline", action="store_true", help="force a one-millisecond strict deadline and verify immutable failure")
+    parser.add_argument("--full-stop", choices=("sequential", "concurrent"), help="delete every disk, including a populated last member, then recover all acknowledged writes")
+    parser.add_argument("--durability", choices=("fleet", "bucket"), default="fleet")
     args = parser.parse_args()
     binary = str(args.binary.resolve())
     output = (
@@ -133,9 +135,9 @@ def main():
             CELLD_INTERNAL_ADDR=f"127.0.0.1:{internal}",
             CELLD_ADVERTISE=f"127.0.0.1:{internal}",
             CELLD_UNSAFE_PUBLIC_ADVERTISE="1",
-            CELLD_DURABILITY="fleet",
+            CELLD_DURABILITY=args.durability,
             CELLD_TOKIO_THREADS="2",
-            CELLD_SHUTDOWN_TOTAL_MS="1" if args.deadline else "30000",
+            CELLD_SHUTDOWN_TOTAL_MS="1" if args.deadline else "20000",
             CELLD_REBALANCE_INTERVAL_MS="0",
         )
         log = open(output / f"{node}-{time.time_ns()}.log", "w")
@@ -228,7 +230,7 @@ def main():
                 stderr=subprocess.DEVNULL,
             )
 
-    def retire(node, operation):
+    def begin_retire(node, operation):
         before = status(node)
         assert before["schema_version"] == 1 and before["capabilities"]["strict_disk_removal"]
         request = {"operation_id": operation, "expected_generation": before["runtime_generation"]}
@@ -239,6 +241,10 @@ def main():
         assert http(endpoint, "POST", request)[0] == 202
         assert http(endpoint, "POST", request | {"operation_id": "conflict"})[0] == 409
         event("Strict shutdown accepted, not complete", node=node, operation=operation)
+        return request
+
+    def finish_retire(node, request):
+        operation = request["operation_id"]
         last_status = None
         def completed():
             nonlocal last_status
@@ -247,7 +253,9 @@ def main():
             if current != last_status:
                 event("Strict shutdown progress", node=node, status=state)
                 last_status = current
-            assert current["phase"] != "failed", current
+            if current["phase"] == "failed":
+                event("FAIL strict proof; disk retained", node=node, result=current, disk_exists=(output / node).exists())
+                raise SystemExit(2)
             return state if current["phase"] == "data_safe" else None
         result = wait("strict completion " + node, completed, 90)
         assert result["control_only"]
@@ -256,11 +264,16 @@ def main():
         assert nodes[node]["process"].poll() is None
         assert status(node) == result
         (output / f"{operation}.json").write_text(json.dumps(result, indent=2) + "\n")
+        nodes[node]["process"].terminate()
+        assert nodes[node]["process"].wait(timeout=15) == 0
         stop(node)
         import shutil
         shutil.rmtree(output / node)
         event("Exact-generation data-safe result observed; process stopped and disk deleted", node=node)
         return request
+
+    def retire(node, operation):
+        return finish_retire(node, begin_retire(node, operation))
 
     try:
         subprocess.run(
@@ -268,6 +281,10 @@ def main():
                 "docker",
                 "run",
                 "-d",
+                # A tiny disposable object store must not inherit the Docker
+                # VM's unrelated disk-pressure threshold. Only the failed-
+                # leader schedule restarts MinIO and needs persistent data.
+                *(["--tmpfs", "/data:rw,size=1g"] if not args.failed_leader else []),
                 "--name",
                 name,
                 "-p",
@@ -310,6 +327,38 @@ def main():
         wait("healthy c", lambda: healthy("c"))
         event("Three native v0.5.1 nodes ready")
         write("initial", "c")
+        if args.full_stop:
+            if args.durability == "fleet":
+                peer_only_write()
+            if args.full_stop == "concurrent":
+                # All nodes have accepted shutdown before any is stopped. No
+                # successor can become available to rescue the last cohort.
+                requests = {node: begin_retire(node, "full-stop-" + node) for node in ("a", "b", "c")}
+                for node, request in requests.items():
+                    finish_retire(node, request)
+            else:
+                retire("c", "full-stop-c")
+                verify("a")
+                retire("b", "full-stop-b")
+                write("last-member", "a", 8)
+                code, snapshot = http(url("a", True) + "/state")
+                assert code == 200 and snapshot["occupied"] > 0, snapshot
+                (output / "populated-last-member.json").write_text(json.dumps(snapshot, indent=2) + "\n")
+                retire("a", "full-stop-a")
+            assert all(not (output / node).exists() for node in nodes)
+            event("Every process stopped and every disk deleted", acknowledgements=len(ledger))
+            for node in nodes:
+                start(node)
+            for node in nodes:
+                wait("fresh disk ready " + node, lambda node=node: healthy(node), 180)
+                verify(node)
+            write("after-full-stop", "c", 8)
+            for node in nodes:
+                verify(node)
+            losses = [obj["Key"] for page in s3.get_paginator("list_objects_v2").paginate(Bucket="retirement", Prefix="log/") for obj in page.get("Contents", []) if obj["Key"].endswith(".loss.json")]
+            assert not losses, losses
+            event("PASS full stop", mode=args.full_stop, durability=args.durability, acknowledgements=len(ledger))
+            return
         if args.ordinary:
             for mode in ("/shutdown?handoff=preserve", "/shutdown", "SIGTERM"):
                 if mode == "SIGTERM":

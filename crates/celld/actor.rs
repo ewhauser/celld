@@ -388,6 +388,8 @@ pub enum Message {
     /// bounded by the drain deadline, so a wedged store still cannot hold
     /// the exit hostage.
     ReleaseAll,
+    /// Use the existing release pipeline without waiting for a live successor.
+    ReleaseAllForDiskRemoval,
     /// Give up to `cells` idle cells to the fleet. The balancing loop sends
     /// this after it has confirmed from the leases that this node is the
     /// densest and a peer has room.
@@ -586,6 +588,9 @@ pub struct DrainStatus {
     /// Monotonic ownership acknowledgements. A progressing handoff can
     /// take longer than one stall interval when the node owns many cells.
     pub handed_off: u64,
+    /// Ordinary successor acknowledgements or strict completed owner releases.
+    /// A progress observation never substitutes for the final disk proof.
+    pub progress: u64,
 }
 
 #[derive(serde::Deserialize, serde::Serialize)]
@@ -2588,6 +2593,7 @@ impl Actor {
                 self.drive(Event::WorkerRequest { request }, out);
             }
             Message::ReleaseAll => self.drive(Event::ReleaseAll, out),
+            Message::ReleaseAllForDiskRemoval => self.drive(Event::ReleaseAllForDiskRemoval, out),
             Message::Rebalance { .. } if self.preserving => {}
             Message::Rebalance { cells } => self.drive(Event::Rebalance { cells }, out),
             Message::GenerationChanged {
@@ -2612,6 +2618,7 @@ impl Actor {
                     releasing: self.state.releasing(),
                     adopting: self.state.adopting(),
                     handed_off: self.state.handed_off(),
+                    progress: self.state.drain_progress(),
                 });
             }
             Message::ResidentEpoch { cell, reply } => {
