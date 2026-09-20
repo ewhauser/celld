@@ -29,7 +29,7 @@ concurrency:
 
 env:
   RUST_VERSION: 1.97.1
-  IMAGE: ghcr.io/denoland/celld
+  IMAGE: ghcr.io/${{ github.repository }}
 
 jobs:
   build-celld:
@@ -60,18 +60,28 @@ jobs:
           target/release/celld --version | grep -F "$version"
 
       - name: Package
+        env:
+          BUILD_TARGET: ${{ matrix.target }}
         run: |
           set -euo pipefail
           mkdir -p out
           # -n omits name and timestamp so the envelope is reproducible
           # whenever the binary is.
-          gzip -9 -n -c target/release/celld \
-            > "out/celld-${{ matrix.target }}.gz"
+          asset="celld-$BUILD_TARGET.gz"
+          gzip -9 -n -c target/release/celld > "out/$asset"
+          version=$(sed -n 's/^version = "\(.*\)"$/\1/p' crates/celld/Cargo.toml | head -1)
+          digest=$(shasum -a 256 "out/$asset" | cut -d ' ' -f 1)
+          jq -n --arg repository "$GITHUB_REPOSITORY" --arg commit "$GITHUB_SHA" \
+            --arg version "$version" --arg target "$BUILD_TARGET" \
+            --arg asset "$asset" --arg sha256 "$digest" \
+            '{repository: $repository, commit: $commit, version: $version,
+              target: $target, asset: $asset, sha256: $sha256}' \
+            > "out/celld-$BUILD_TARGET.build.json"
 
       - uses: actions/upload-artifact@v4
         with:
           name: celld-${{ matrix.target }}
-          path: out/celld-${{ matrix.target }}.gz
+          path: out/*
           if-no-files-found: error
 
   # The Dockerfile must build and its test stage pass before anything can
@@ -112,6 +122,7 @@ jobs:
     if: github.event_name != 'release'
     needs:
       - build-celld
+      - container-check
     runs-on: ubuntu-22.04
     timeout-minutes: 15
     permissions:
@@ -126,19 +137,27 @@ jobs:
           path: assets
           merge-multiple: true
 
-      # Assets are minimal: the binaries, nothing else. Integrity is the
-      # attestation plus GitHub's own immutable per-asset digests; gzip's
-      # CRC catches corruption in transit.
+      # Validate each native artifact's commit and checksum before collecting
+      # it into the release. Keep the build records beside the binaries.
       - name: Check assets
         run: |
           set -euo pipefail
+          version=$(sed -n 's/^version = "\(.*\)"$/\1/p' crates/celld/Cargo.toml | head -1)
           cd assets
           for target in \
             x86_64-unknown-linux-gnu \
             aarch64-unknown-linux-gnu \
             aarch64-apple-darwin; do
             test -f "celld-$target.gz"
+            jq -e --arg commit "$GITHUB_SHA" --arg repository "$GITHUB_REPOSITORY" \
+              --arg target "$target" --arg version "$version" \
+              '.commit == $commit and .repository == $repository and .target == $target
+                and .version == $version and .asset == ("celld-" + $target + ".gz")' \
+              "celld-$target.build.json"
+            expected=$(jq -r .sha256 "celld-$target.build.json")
+            printf '%s  %s\n' "$expected" "celld-$target.gz" | sha256sum --check --strict
           done
+          sha256sum celld-*.gz > SHA256SUMS
 
       # Attestations require a public repository. Other repository visibilities
       # skip this step and retain the release asset digests.
@@ -146,7 +165,7 @@ jobs:
         if: github.event.repository.visibility == 'public'
         uses: actions/attest-build-provenance@v2
         with:
-          subject-path: assets/*.gz
+          subject-path: assets/*
 
       - name: Create or refresh the draft release
         env:
@@ -155,6 +174,11 @@ jobs:
           set -euo pipefail
           version=$(sed -n 's/^version = "\(.*\)"$/\1/p' crates/celld/Cargo.toml | head -1)
           tag="v$version"
+          tag_sha=$(gh api "repos/$GITHUB_REPOSITORY/commits/$tag" --jq .sha 2>/dev/null || echo "absent")
+          if [ "$tag_sha" != "absent" ] && [ "$tag_sha" != "$GITHUB_SHA" ]; then
+            echo "tag $tag already names another commit; bump the fork version" >&2
+            exit 1
+          fi
           existing=$(gh release view "$tag" --json isDraft \
             --jq .isDraft 2>/dev/null || echo "absent")
           if [ "$existing" = "false" ]; then
@@ -177,7 +201,11 @@ jobs:
                       buf = (buf == "" ? $0 : buf " " $0) }
               END   { if (buf != "") print buf }
             ' | cat -s > /tmp/notes.md
-          gh release create "$tag" \
+          prerelease=()
+          if [[ "$version" == *-* ]]; then
+            prerelease=(--prerelease)
+          fi
+          gh release create "$tag" "${prerelease[@]}" \
             --draft \
             --target "$GITHUB_SHA" \
             --title "$tag" \
@@ -278,13 +306,17 @@ jobs:
             docker login ghcr.io --username "$GITHUB_ACTOR" --password-stdin
 
       - name: Publish immutable and release tags
+        env:
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+          PRERELEASE: ${{ github.event.release.prerelease }}
         run: |
           set -euo pipefail
-          docker buildx imagetools create \
-            --tag "$IMAGE:sha-$TAG_SHA" \
-            --tag "$IMAGE:${{ github.event.release.tag_name }}" \
-            --tag "$IMAGE:$CELLD_VERSION" \
-            --tag "$IMAGE:latest" \
+          tags=(--tag "$IMAGE:sha-$TAG_SHA" --tag "$IMAGE:$RELEASE_TAG" \
+            --tag "$IMAGE:$CELLD_VERSION")
+          if [ "$PRERELEASE" != "true" ]; then
+            tags+=(--tag "$IMAGE:latest")
+          fi
+          docker buildx imagetools create "${tags[@]}" \
             "$IMAGE:$TAG_SHA-amd64" \
             "$IMAGE:$TAG_SHA-arm64"
 
@@ -301,7 +333,7 @@ jobs:
         if: github.event.repository.visibility == 'public'
         uses: actions/attest-build-provenance@v2
         with:
-          subject-name: ghcr.io/denoland/celld
+          subject-name: ${{ env.IMAGE }}
           subject-digest: ${{ steps.digest.outputs.digest }}
           push-to-registry: true
 
