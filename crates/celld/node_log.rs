@@ -536,6 +536,7 @@ fn log_from_wire(log: &crate::ownership_store::NodeLogWire) -> anyhow::Result<lo
         epoch: log.epoch,
         ensemble: log.ensemble.iter().cloned().collect(),
         tiered: log.tiered,
+        bucket_complete: log.bucket_complete,
         state: match log.state.as_str() {
             "open" => LogState::Open,
             "recovering" => LogState::Recovering,
@@ -561,6 +562,7 @@ pub(crate) fn log_to_wire(
         epoch: record.epoch,
         ensemble: record.ensemble.iter().cloned().collect(),
         tiered: record.tiered,
+        bucket_complete: record.bucket_complete,
         active,
         claimant: record.claimant.clone(),
         claimed_ms: record.claimed_ms,
@@ -953,6 +955,9 @@ impl AppendBatch {
 
 #[derive(serde::Serialize, serde::Deserialize)]
 pub struct AppendResp {
+    /// This incarnation has permanently closed follower append admission.
+    #[serde(default)]
+    pub quiesced: bool,
     pub ok: bool,
     pub end: u64,
     /// The fragment epoch the reported `end` belongs to. A refusal whose
@@ -1137,6 +1142,7 @@ pub struct FollowerStore {
     /// floor the 2026-08-25 gate decomposition landed on. A restart
     /// starts empty and conservatively re-syncs each chain once.
     synced_namespaces: Mutex<std::collections::BTreeSet<String>>,
+    disk_removal_gate: tokio::sync::RwLock<bool>,
     #[cfg(celld_internal_tests)]
     directory_sync_for_test: Arc<DirectorySyncForTest>,
 }
@@ -1154,6 +1160,7 @@ impl FollowerStore {
             logs: Mutex::new(HashMap::new()),
             guards: Mutex::new(HashMap::new()),
             synced_namespaces: Mutex::new(std::collections::BTreeSet::new()),
+            disk_removal_gate: tokio::sync::RwLock::new(false),
             #[cfg(celld_internal_tests)]
             directory_sync_for_test: Arc::new(move |path| directory_filesystem.sync_all(path)),
         }
@@ -1550,11 +1557,20 @@ impl FollowerStore {
         fn refusals(count: usize, state: FollowerState) -> Vec<AppendResp> {
             (0..count)
                 .map(|_| AppendResp {
+                    quiesced: false,
                     ok: false,
                     end: state.end,
                     epoch: Some(state.fragment_epoch),
                 })
                 .collect()
+        }
+        let admitted = self.disk_removal_gate.read().await;
+        if *admitted {
+            let mut replies = refusals(batch.frames.len(), self.load(&batch.frames[0].leader));
+            for reply in &mut replies {
+                reply.quiesced = true;
+            }
+            return replies;
         }
         let frames = batch.frames;
         let leader = frames[0].leader.clone();
@@ -1783,6 +1799,7 @@ impl FollowerStore {
             .map(|last| {
                 let last = last.unwrap_or(new_state.end);
                 AppendResp {
+                    quiesced: false,
                     ok: new_state.end >= last,
                     end: new_state.end,
                     epoch: Some(new_state.fragment_epoch),
@@ -1906,6 +1923,53 @@ impl FollowerStore {
                 );
             }
         }
+    }
+
+    pub async fn freeze_for_disk_removal(&self) {
+        *self.disk_removal_gate.write().await = true;
+    }
+
+    /// Strict inventory for disk removal; ordinary GC's best-effort directory
+    /// traversal cannot be used as positive durability evidence.
+    pub fn disk_removal_obligations(&self) -> anyhow::Result<Vec<crate::disk_removal::Obligation>> {
+        let nodes = match self.filesystem.read_dir(&self.root) {
+            Ok(nodes) => nodes,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(error) => return Err(error.into()),
+        };
+        let mut obligations = Vec::new();
+        for node in nodes.into_iter().filter(|e| e.is_dir) {
+            let name = node
+                .file_name
+                .to_str()
+                .ok_or_else(|| anyhow!("non-UTF8 follower node"))?;
+            let entries = self.filesystem.read_dir(&node.path)?;
+            // Legacy flat fragments cannot be silently treated as generation-bound.
+            if entries.iter().any(|e| e.file_name == "state.json") {
+                anyhow::bail!("legacy unversioned follower fragment requires migration");
+            }
+            for generation in entries.into_iter().filter(|e| e.is_dir) {
+                let generation_name = generation
+                    .file_name
+                    .to_str()
+                    .ok_or_else(|| anyhow!("non-UTF8 follower generation"))?;
+                // Force directory-read errors to remain blockers, including for
+                // empty fragments, before load consults its in-memory cache.
+                self.filesystem.read_dir(&generation.path)?;
+                let _: FollowerState = serde_json::from_slice(
+                    &self.filesystem.read(&generation.path.join("state.json"))?,
+                )?;
+                let session = format!("{name}/{generation_name}");
+                let state = self.load(&session);
+                if state.fragment_epoch > 0 {
+                    obligations.push(crate::disk_removal::Obligation {
+                        session,
+                        epoch: state.fragment_epoch,
+                    });
+                }
+            }
+        }
+        Ok(obligations)
     }
 
     pub fn tail(&self, req: &TailReq) -> TailResp {
@@ -4275,8 +4339,16 @@ impl NodeLogManager {
                     // would — an idle ensemble must not keep a 0.2.x member
                     // recruit-eligible just because no writes arrive.
                     match outcome {
-                        AppendSend::Answered(_) => {
+                        AppendSend::Answered(response) => {
                             suspect_self.store(false, Ordering::SeqCst);
+                            if response.quiesced {
+                                shipper.degrade("follower closed append admission");
+                                health.lock().unwrap().append_incapable(
+                                    &shipper.policy,
+                                    &node,
+                                    done,
+                                );
+                            }
                         }
                         AppendSend::Incapable(error) => {
                             warn!(
@@ -4628,7 +4700,7 @@ impl NodeLogManager {
             // sweep (which, under the fold, judges the record's own
             // published expiry with no grace).
             let grace_ms = (self.ownership.lease_ttl_ms() * 3).max(20_000);
-            for member in &record.ensemble {
+            for member in record.ensemble.iter().filter(|_| !record.bucket_complete) {
                 self.beat_claim(dead, &mut beat).await?;
                 let lease = self.ownership.read_node_lease(member).await;
                 let lease_live = matches!(&lease, Ok(Some(lease)) if lease.expires_ms > now);
@@ -4736,7 +4808,11 @@ impl NodeLogManager {
             // verdict rests on the members alone, so it is reached before
             // the bundle drain: a pass that must refuse to seal refuses
             // before it reads the session, not after.
-            if complete_witnesses == 0 && active && !record.ensemble.is_empty() {
+            if complete_witnesses == 0
+                && active
+                && !record.ensemble.is_empty()
+                && !record.bucket_complete
+            {
                 anyhow::ensure!(
                     inconclusive == 0,
                     "node-log recovery for {dead}: no complete true witness among {:?} and \
@@ -5053,6 +5129,18 @@ impl NodeLogManager {
             return;
         };
         let active = current.active;
+        if current.epoch == shipper.epoch
+            && log_tier::may_reconfigure(
+                Self::shipper_batch_in_flight(&shipper),
+                self.ltx.disk_removal_shipped_tiered(),
+            )
+        {
+            let mut covered = current.clone();
+            covered.bucket_complete = true;
+            if let Err(error) = transition.write(Some(covered)).await {
+                tracing::warn!(%error, "could not publish disk removal coverage");
+            }
+        }
         // "Tiered" includes bundle coverage, but a sealed
         // record tells every future recovery there is nothing to gather —
         // so the seal requires every acked row as a per-cell object. The
@@ -5185,9 +5273,8 @@ impl NodeLogManager {
         if self.task_stop.is_stopped() {
             return Ok(());
         }
-        if self.healthy() {
-            return Ok(());
-        }
+        // Even a quiet healthy leader must release a draining follower's
+        // obligation; waiting for its next append would strand 2-to-1 removal.
         // Self-suspicion parks recruitment: opening epochs into our own
         // partition churns records and proves nothing. Any successful
         // peer response lifts it.
@@ -5195,6 +5282,17 @@ impl NodeLogManager {
             return Ok(());
         }
         let peers = self.ownership.read_capacity_peers().await?;
+        if let Some(current) = self.inner.lock().unwrap().clone() {
+            if current.members.iter().any(|member| {
+                peers
+                    .iter()
+                    .any(|peer| peer.node == member.node && peer.draining)
+            }) {
+                current.degrade("follower draining");
+            } else if current.is_active() {
+                return Ok(());
+            }
+        }
         let now = crate::ownership_store::now_ms();
         let mono = mono_ms();
         // Kept before the filters consume the vector: a fleet with no peer at
@@ -5202,11 +5300,11 @@ impl NodeLogManager {
         // ineligible, and an operator needs to be told which one they have.
         let live_peers = peers
             .iter()
-            .filter(|peer| peer.node != self.node && peer.expires_ms > now)
+            .filter(|peer| peer.node != self.node && peer.expires_ms > now && !peer.draining)
             .count();
         let members: Vec<Member> = peers
             .into_iter()
-            .filter(|peer| peer.node != self.node && peer.expires_ms > now)
+            .filter(|peer| peer.node != self.node && peer.expires_ms > now && !peer.draining)
             // Only a follower that cannot serve appends at all sits out a
             // term. A gray one is recruitable again at once, because the
             // latency rule can judge it again and the swap rate cap is what
@@ -5245,9 +5343,15 @@ impl NodeLogManager {
                 // abandonable. Wait it out; the next tick retries.
                 if !log_tier::may_reconfigure(
                     current.outstanding.load(Ordering::SeqCst) > 0,
-                    self.ltx.all_shipped_tiered(),
+                    self.ltx.disk_removal_shipped_tiered(),
                 ) {
                     return Ok(());
+                }
+                if let Some(mut record) = transition.current() {
+                    if record.epoch == current.epoch && !record.bucket_complete {
+                        record.bucket_complete = true;
+                        transition.write(Some(record)).await?;
+                    }
                 }
             }
         }
@@ -5286,6 +5390,7 @@ impl NodeLogManager {
                 epoch,
                 ensemble: ensemble.clone(),
                 tiered: 0,
+                bucket_complete: false,
                 state: LogState::Open,
                 claimant: None,
                 claimed_ms: None,
@@ -6256,7 +6361,9 @@ impl NodeLogManager {
             .await?
             .map(|folded| folded.record);
         if let Some(record) = record {
-            for member in &record.ensemble {
+            // The same native proof used by dead-session recovery also lets a
+            // live quiet-cell restore fold bundles after its last follower left.
+            for member in record.ensemble.iter().filter(|_| !record.bucket_complete) {
                 let lease = self.ownership.read_node_lease(member).await?;
                 let addr = lease
                     .map(|lease| lease.addr)

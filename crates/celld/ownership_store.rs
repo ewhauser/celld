@@ -220,6 +220,8 @@ pub(crate) struct NodeLogWire {
     pub(crate) ensemble: Vec<String>,
     pub(crate) tiered: u64,
     #[serde(default)]
+    pub(crate) bucket_complete: bool,
+    #[serde(default)]
     pub(crate) active: bool,
     /// The node recovering this log and its last heartbeat, while the state
     /// is `recovering`. Absent from records older than the claim.

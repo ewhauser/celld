@@ -891,6 +891,7 @@ pub struct LtxRepl {
     /// process death hands the same duty to boot recovery, which drains
     /// whole predecessor sessions.
     dirty_tails: Mutex<BTreeSet<String>>,
+    disk_removal_uncovered_tail: AtomicBool,
     registration: Arc<Mutex<RegistrationState>>,
     stop: StopToken,
     task_owner: Mutex<Option<LtxTaskOwner>>,
@@ -1182,6 +1183,7 @@ impl LtxRepl {
             preserved,
             dirty_ship,
             dirty_tails: Mutex::new(BTreeSet::new()),
+            disk_removal_uncovered_tail: AtomicBool::new(false),
             registration,
             stop: stop.clone(),
             task_owner: Mutex::new(Some(LtxTaskOwner {
@@ -1311,6 +1313,12 @@ impl LtxRepl {
     /// garbage exactly when this holds.
     pub fn all_shipped_tiered(&self) -> bool {
         Self::all_cells_shipped_tiered(&self.cells.lock().unwrap())
+    }
+
+    pub(crate) fn disk_removal_shipped_tiered(&self) -> bool {
+        let cells = self.cells.lock().unwrap();
+        Self::all_cells_shipped_tiered(&cells)
+            && !self.disk_removal_uncovered_tail.load(Ordering::SeqCst)
     }
 
     fn all_cells_shipped_tiered(cells: &BTreeMap<(String, u64), CellHandle>) -> bool {
@@ -2731,6 +2739,10 @@ impl LtxRepl {
     /// `compacted_txid` marks a cell whose fold then finds nothing,
     /// which costs one bundle-prefix scan, never a lost row.
     fn note_undrained_tail(&self, cell: &str, handle: &Cell) {
+        if handle.shipped_txid.load(Ordering::SeqCst) > handle.durable_txid.load(Ordering::SeqCst) {
+            self.disk_removal_uncovered_tail
+                .store(true, Ordering::SeqCst);
+        }
         let acked = handle
             .shipped_txid
             .load(Ordering::SeqCst)

@@ -1231,6 +1231,7 @@ pub struct SwapCensus {
 
 #[derive(Clone)]
 pub struct AppHandle {
+    pub disk_removal: Arc<crate::disk_removal::State>,
     pub tx: mpsc::UnboundedSender<Message>,
     pub runtime: Option<RuntimeManager>,
     #[cfg(all(test, celld_internal_tests))]
