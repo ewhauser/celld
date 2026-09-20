@@ -45,6 +45,9 @@ pub struct LogRecord {
     pub ensemble: BTreeSet<NodeId>,
     /// Offsets at or below this are durable in the bucket.
     pub tiered: Offset,
+    /// Entire epoch is bucket covered after permanent shipper degradation.
+    /// Recovery must still fold retained bundles before sealing.
+    pub bucket_complete: bool,
     pub state: LogState,
     /// The node recovering this log while `state` is `Recovering`, and the
     /// last instant it said so. A recovery reads every retained bundle of
@@ -68,6 +71,7 @@ pub fn create_record(ensemble: BTreeSet<NodeId>, bucket_end: Offset) -> Option<L
         epoch: 1,
         ensemble,
         tiered: bucket_end,
+        bucket_complete: false,
         state: LogState::Open,
         claimant: None,
         claimed_ms: None,
@@ -170,6 +174,7 @@ pub fn plan_reconfigure(
             epoch: current.epoch + 1,
             ensemble,
             tiered: log_end,
+            bucket_complete: false,
             state: LogState::Open,
             claimant: None,
             claimed_ms: None,
