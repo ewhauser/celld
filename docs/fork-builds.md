@@ -33,3 +33,24 @@ All members and potential recovery processes must use a compatible fork build
 before removing a last follower: recovery must understand the `bucket_complete`
 proof. Artifact publication alone does not qualify EKS/EBS removal. Validate the
 strict API and launcher handshake against the exact binary/image being used.
+
+## 0.5.1-ewhauser.3: unavailable recovery witnesses
+
+Fleet recovery no longer treats an unreachable follower as conclusively lost
+because its lease expired more than three lease lifetimes ago. This could seal
+a predecessor log and declare permanent loss while acknowledged writes still
+existed on a retained disk whose process was starting later than its peer.
+
+A missing address or failed seal request now keeps that member undecided.
+Without another complete witness or an existing `bucket_complete` proof,
+recovery refuses to seal, write a loss record, or replace the predecessor lease.
+Startup keeps serving authenticated follower seal/tail requests during its
+existing bounded retry ladder. A witness that returns within that ladder can
+complete recovery; a permanently unreachable witness prevents startup instead
+of turning an unknown disk state into data loss. Retry counts and deadlines
+are unchanged.
+
+The existing explicit-loss policy for reachable members reporting missing or
+incomplete fragments is unchanged. This fix does not repair a predecessor
+already sealed with a loss record by an older build. All potential recovering
+members must run the corrected build before relying on the new behavior.

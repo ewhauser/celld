@@ -222,6 +222,24 @@ together can recover acknowledged writes from their surviving follower disks.
 The node accepts application requests and new follower appends only after
 startup completes.
 
+An expired lease proves that a writer is fenced, not that its follower disk
+is lost. If recovery lacks a complete witness and the log has no
+`bucket_complete` proof, a missing member address or failed seal request leaves
+recovery undecided. It cannot seal the log or declare loss because a member is
+slow to restart. Startup serves follower recovery requests during all four
+attempts and their backoffs; each attempt is bounded by fifteen minutes, with
+backoffs of one, two, and three times the larger of the lease TTL and one
+second. Exhaustion fails startup while preserving the predecessor record and
+retained recovery data. Returning peers can make a later supervised restart
+succeed; permanent unavailability does not provide a lossless recovery path.
+
+The existing bounded-loss policy still applies when every ensemble member's
+response conclusively reports a missing or incomplete fragment and no complete
+witness survives. Recovery writes a permanent `log/<session>.e<epoch>.loss.json`
+record before sealing and recovering the data that remains. That outcome can
+lose acknowledged writes whose durable copies were destroyed or corrupted;
+temporary unreachability is not evidence of either condition.
+
 A large dead node can hold this recovery open for minutes. The recovery
 reads the retained bundles in windows of at most 512 MiB. It uploads the
 rows of one window and releases them before it reads the next window, so
