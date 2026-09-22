@@ -1,0 +1,15 @@
+[package]
+name = "agentfs-wasmer-probe"
+version = "0.1.0"
+edition = "2024"
+publish = false
+[workspace]
+[dependencies]
+wasmer = { version = "=7.4.0", default-features = false, features = ["sys", "cranelift", "wat"] }
+wasmer-wasix = { version = "=0.704.0", default-features = false, features = ["sys-minimal"] }
+virtual-fs = { version = "=0.704.0", default-features = false }
+tokio = { version = "1", features = ["full"] }
+futures = "0.3"
+serde_json = "1"
+ureq = { version = "2.12", default-features = false, features = ["json"] }
+anyhow = "1"

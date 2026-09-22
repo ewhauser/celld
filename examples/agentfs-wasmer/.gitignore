@@ -1,0 +1,12 @@
+node_modules/
+.celld/
+native/target/
+guest.wasm
+results-local.json
+
+.celld-probe.log
+package-results-local.json
+__pycache__/
+
+!package-lock.json
+*.rcgu.o

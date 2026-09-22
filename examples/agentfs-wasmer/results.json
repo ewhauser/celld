@@ -1,0 +1,253 @@
+{
+  "date": "2026-09-22T18:39:02.938Z",
+  "platform": "darwin",
+  "arch": "arm64",
+  "runs": [
+    {
+      "code": 0,
+      "signal": null,
+      "killed": false,
+      "stdout": "metadata_100_us=70741\nio_256k_read_write_us=275009\nguest_total_us=446164\n",
+      "stderr": "compile_ms=282\ninstantiate_ms=6\ndo_read_mid_guest=Ok(Object {\"text\": String(\"hello from Wasmer\\n\")})\ndo_read_mid_guest=Ok(Object {\"text\": String(\"HELLO from Wasmer\\n\")})\nfilesystem error: {\"code\":\"ENOENT\",\"error\":\"ENOENT: no such file or directory, stat '/workspace/rename-from.txt'\"}\nfilesystem error: {\"code\":\"ENOENT\",\"error\":\"ENOENT: no such file or directory, stat '/workspace/rename-from.txt'\"}\nfilesystem error: {\"code\":\"ENOENT\",\"error\":\"ENOENT: no such file or directory, stat '/workspace/rename-to.txt'\"}\nexecute_ms=448; calls={\"do-read\": 2, \"fstat\": 3, \"list\": 1, \"open\": 8, \"read\": 9, \"rename\": 1, \"stat\": 113, \"sync\": 9, \"unlink\": 1, \"write\": 8}\ndo_read_during_exec=Ok(Object {\"text\": String(\"HELLO from Wasmer\\nappend\\n\")})\n",
+      "elapsedMs": 752.5457499999999
+    },
+    {
+      "code": 0,
+      "signal": null,
+      "killed": false,
+      "stdout": "metadata_100_us=68805\nio_256k_read_write_us=286355\nguest_total_us=447149\n",
+      "stderr": "compile_ms=282\ninstantiate_ms=7\ndo_read_mid_guest=Ok(Object {\"text\": String(\"hello from Wasmer\\n\")})\ndo_read_mid_guest=Ok(Object {\"text\": String(\"HELLO from Wasmer\\n\")})\nfilesystem error: {\"code\":\"ENOENT\",\"error\":\"ENOENT: no such file or directory, stat '/workspace/rename-from.txt'\"}\nfilesystem error: {\"code\":\"ENOENT\",\"error\":\"ENOENT: no such file or directory, stat '/workspace/rename-from.txt'\"}\nfilesystem error: {\"code\":\"ENOENT\",\"error\":\"ENOENT: no such file or directory, stat '/workspace/rename-to.txt'\"}\nexecute_ms=448; calls={\"do-read\": 2, \"fstat\": 3, \"list\": 1, \"open\": 8, \"read\": 9, \"rename\": 1, \"stat\": 113, \"sync\": 9, \"unlink\": 1, \"write\": 8}\ndo_read_during_exec=Ok(Object {\"text\": String(\"HELLO from Wasmer\\nappend\\n\")})\n",
+      "elapsedMs": 752.3008749999999
+    },
+    {
+      "code": 0,
+      "signal": null,
+      "killed": false,
+      "stdout": "metadata_100_us=68657\nio_256k_read_write_us=290115\nguest_total_us=450470\n",
+      "stderr": "compile_ms=284\ninstantiate_ms=6\ndo_read_mid_guest=Ok(Object {\"text\": String(\"hello from Wasmer\\n\")})\ndo_read_mid_guest=Ok(Object {\"text\": String(\"HELLO from Wasmer\\n\")})\nfilesystem error: {\"code\":\"ENOENT\",\"error\":\"ENOENT: no such file or directory, stat '/workspace/rename-from.txt'\"}\nfilesystem error: {\"code\":\"ENOENT\",\"error\":\"ENOENT: no such file or directory, stat '/workspace/rename-from.txt'\"}\nfilesystem error: {\"code\":\"ENOENT\",\"error\":\"ENOENT: no such file or directory, stat '/workspace/rename-to.txt'\"}\nexecute_ms=452; calls={\"do-read\": 2, \"fstat\": 3, \"list\": 1, \"open\": 8, \"read\": 9, \"rename\": 1, \"stat\": 113, \"sync\": 9, \"unlink\": 1, \"write\": 8}\ndo_read_during_exec=Ok(Object {\"text\": String(\"HELLO from Wasmer\\nappend\\n\")})\n",
+      "elapsedMs": 755.1971669999998
+    }
+  ],
+  "activationMs": 425.56237500000003,
+  "payloadConflictStatus": 409,
+  "replay": {
+    "recovered": true,
+    "id": "1790102343391-basic-0",
+    "payload": "basic",
+    "status": "succeeded",
+    "result": "{\"code\":0,\"signal\":null,\"killed\":false,\"stdout\":\"metadata_100_us=70741\\nio_256k_read_write_us=275009\\nguest_total_us=446164\\n\",\"stderr\":\"compile_ms=282\\ninstantiate_ms=6\\ndo_read_mid_guest=Ok(Object {\\\"text\\\": String(\\\"hello from Wasmer\\\\n\\\")})\\ndo_read_mid_guest=Ok(Object {\\\"text\\\": String(\\\"HELLO from Wasmer\\\\n\\\")})\\nfilesystem error: {\\\"code\\\":\\\"ENOENT\\\",\\\"error\\\":\\\"ENOENT: no such file or directory, stat '/workspace/rename-from.txt'\\\"}\\nfilesystem error: {\\\"code\\\":\\\"ENOENT\\\",\\\"error\\\":\\\"ENOENT: no such file or directory, stat '/workspace/rename-from.txt'\\\"}\\nfilesystem error: {\\\"code\\\":\\\"ENOENT\\\",\\\"error\\\":\\\"ENOENT: no such file or directory, stat '/workspace/rename-to.txt'\\\"}\\nexecute_ms=448; calls={\\\"do-read\\\": 2, \\\"fstat\\\": 3, \\\"list\\\": 1, \\\"open\\\": 8, \\\"read\\\": 9, \\\"rename\\\": 1, \\\"stat\\\": 113, \\\"sync\\\": 9, \\\"unlink\\\": 1, \\\"write\\\": 8}\\ndo_read_during_exec=Ok(Object {\\\"text\\\": String(\\\"HELLO from Wasmer\\\\nappend\\\\n\\\")})\\n\",\"elapsedMs\":752.5457499999999}"
+  },
+  "edge": {
+    "code": 1,
+    "signal": null,
+    "killed": false,
+    "stdout": "",
+    "stderr": "compile_ms=286\ninstantiate_ms=6\ndo_read_mid_guest=Ok(Object {\"text\": String(\"hello from Wasmer\\n\")})\ndo_read_mid_guest=Ok(Object {\"text\": String(\"HELLO from Wasmer\\n\")})\n\nthread 'main' (1) panicked at examples/agentfs-wasmer/guest.rs:45:9:\nassertion `left == right` failed: truncate growth must read as zeros\n  left: 25\n right: 32\nnote: run with `RUST_BACKTRACE=1` environment variable to display a backtrace\nexecute_ms=59; calls={\"do-read\": 2, \"fstat\": 1, \"list\": 1, \"open\": 4, \"read\": 4, \"stat\": 6, \"sync\": 4, \"truncate\": 1, \"write\": 3}\ndo_read_during_exec=Ok(Object {\"text\": String(\"HELLO from Wasmer\\nappend\\n\")})\nError: RuntimeError: unreachable\n    at abort (guest.wasm[227]:0x92a6)\n    at _RNvNtNtNtCs7EG80emN7Vk_3std3sys3pal4wasi14abort_internal (guest.wasm[114]:0x5ae7)\n    at _RNvNtCs7EG80emN7Vk_3std7process5abort (guest.wasm[78]:0x40d4)\n    at _RNvCs9wFQrvczXsK_7___rustc12___rust_abort (guest.wasm[87]:0x4714)\n    at _RNvCs9wFQrvczXsK_7___rustc18___rust_start_panic (guest.wasm[42]:0x1dcf)\n    at _RNvCs9wFQrvczXsK_7___rustc10rust_panic (guest.wasm[84]:0x4559)\n    at _RNvNtCs7EG80emN7Vk_3std9panicking15panic_with_hook (guest.wasm[70]:0x36ed)\n    at _RNCNvNtCs7EG80emN7Vk_3std9panicking13panic_handler0B5_ (guest.wasm[66]:0x3203)\n    at _RINvNtNtCs7EG80emN7Vk_3std3sys9backtrace26___rust_end_short_backtraceNCNvNtB6_9panicking13panic_handler0zEB6_ (guest.wasm[65]:0x316b)\n    at _RNvCs9wFQrvczXsK_7___rustc17rust_begin_unwind (guest.wasm[90]:0x47f7)\n    at _RNvNtCsdBWa9hlvTBY_4core9panicking9panic_fmt (guest.wasm[279]:0xd85d)\n    at _RNvNtCsdBWa9hlvTBY_4core9panicking19assert_failed_inner (guest.wasm[276]:0xd768)\n    at _RINvNtCsdBWa9hlvTBY_4core9panicking13assert_failedjjEB4_ (guest.wasm[277]:0xd7ff)\n    at _RNvCscrbR1WpGxe0_5guest4main (guest.wasm[29]:0xf36)\n    at _RINvNtNtCs7EG80emN7Vk_3std3sys9backtrace28___rust_begin_short_backtraceFEuuECscrbR1WpGxe0_5guest (guest.wasm[26]:0x7e0)\n    at _RNCINvNtCs7EG80emN7Vk_3std2rt10lang_startuE0CscrbR1WpGxe0_5guest (guest.wasm[27]:0x7f3)\n    at _RNvNtCs7EG80emN7Vk_3std2rt19lang_start_internal (guest.wasm[109]:0x552e)\n    at __main_void (guest.wasm[37]:0x1d83)\n    at _start (guest.wasm[21]:0x65f)\n",
+    "elapsedMs": 359.9971660000001
+  },
+  "edgeState": {
+    "files": {
+      "input.txt": {
+        "size": 22,
+        "bytes": 22,
+        "text": "hello from TypeScript\n"
+      },
+      "large-out.bin": {
+        "size": 262144,
+        "bytes": 262144
+      },
+      "large.bin": {
+        "size": 262144,
+        "bytes": 262144
+      },
+      "output.txt": {
+        "size": 32,
+        "bytes": 25,
+        "text": "HELLO from Wasmer\nappend\n"
+      }
+    },
+    "active": false,
+    "commands": [
+      {
+        "id": "1790102343391-basic-0",
+        "payload": "basic",
+        "status": "succeeded",
+        "result": "{\"code\":0,\"signal\":null,\"killed\":false,\"stdout\":\"metadata_100_us=70741\\nio_256k_read_write_us=275009\\nguest_total_us=446164\\n\",\"stderr\":\"compile_ms=282\\ninstantiate_ms=6\\ndo_read_mid_guest=Ok(Object {\\\"text\\\": String(\\\"hello from Wasmer\\\\n\\\")})\\ndo_read_mid_guest=Ok(Object {\\\"text\\\": String(\\\"HELLO from Wasmer\\\\n\\\")})\\nfilesystem error: {\\\"code\\\":\\\"ENOENT\\\",\\\"error\\\":\\\"ENOENT: no such file or directory, stat '/workspace/rename-from.txt'\\\"}\\nfilesystem error: {\\\"code\\\":\\\"ENOENT\\\",\\\"error\\\":\\\"ENOENT: no such file or directory, stat '/workspace/rename-from.txt'\\\"}\\nfilesystem error: {\\\"code\\\":\\\"ENOENT\\\",\\\"error\\\":\\\"ENOENT: no such file or directory, stat '/workspace/rename-to.txt'\\\"}\\nexecute_ms=448; calls={\\\"do-read\\\": 2, \\\"fstat\\\": 3, \\\"list\\\": 1, \\\"open\\\": 8, \\\"read\\\": 9, \\\"rename\\\": 1, \\\"stat\\\": 113, \\\"sync\\\": 9, \\\"unlink\\\": 1, \\\"write\\\": 8}\\ndo_read_during_exec=Ok(Object {\\\"text\\\": String(\\\"HELLO from Wasmer\\\\nappend\\\\n\\\")})\\n\",\"elapsedMs\":752.5457499999999}"
+      },
+      {
+        "id": "1790102343391-basic-1",
+        "payload": "basic",
+        "status": "succeeded",
+        "result": "{\"code\":0,\"signal\":null,\"killed\":false,\"stdout\":\"metadata_100_us=68805\\nio_256k_read_write_us=286355\\nguest_total_us=447149\\n\",\"stderr\":\"compile_ms=282\\ninstantiate_ms=7\\ndo_read_mid_guest=Ok(Object {\\\"text\\\": String(\\\"hello from Wasmer\\\\n\\\")})\\ndo_read_mid_guest=Ok(Object {\\\"text\\\": String(\\\"HELLO from Wasmer\\\\n\\\")})\\nfilesystem error: {\\\"code\\\":\\\"ENOENT\\\",\\\"error\\\":\\\"ENOENT: no such file or directory, stat '/workspace/rename-from.txt'\\\"}\\nfilesystem error: {\\\"code\\\":\\\"ENOENT\\\",\\\"error\\\":\\\"ENOENT: no such file or directory, stat '/workspace/rename-from.txt'\\\"}\\nfilesystem error: {\\\"code\\\":\\\"ENOENT\\\",\\\"error\\\":\\\"ENOENT: no such file or directory, stat '/workspace/rename-to.txt'\\\"}\\nexecute_ms=448; calls={\\\"do-read\\\": 2, \\\"fstat\\\": 3, \\\"list\\\": 1, \\\"open\\\": 8, \\\"read\\\": 9, \\\"rename\\\": 1, \\\"stat\\\": 113, \\\"sync\\\": 9, \\\"unlink\\\": 1, \\\"write\\\": 8}\\ndo_read_during_exec=Ok(Object {\\\"text\\\": String(\\\"HELLO from Wasmer\\\\nappend\\\\n\\\")})\\n\",\"elapsedMs\":752.3008749999999}"
+      },
+      {
+        "id": "1790102343391-basic-2",
+        "payload": "basic",
+        "status": "succeeded",
+        "result": "{\"code\":0,\"signal\":null,\"killed\":false,\"stdout\":\"metadata_100_us=68657\\nio_256k_read_write_us=290115\\nguest_total_us=450470\\n\",\"stderr\":\"compile_ms=284\\ninstantiate_ms=6\\ndo_read_mid_guest=Ok(Object {\\\"text\\\": String(\\\"hello from Wasmer\\\\n\\\")})\\ndo_read_mid_guest=Ok(Object {\\\"text\\\": String(\\\"HELLO from Wasmer\\\\n\\\")})\\nfilesystem error: {\\\"code\\\":\\\"ENOENT\\\",\\\"error\\\":\\\"ENOENT: no such file or directory, stat '/workspace/rename-from.txt'\\\"}\\nfilesystem error: {\\\"code\\\":\\\"ENOENT\\\",\\\"error\\\":\\\"ENOENT: no such file or directory, stat '/workspace/rename-from.txt'\\\"}\\nfilesystem error: {\\\"code\\\":\\\"ENOENT\\\",\\\"error\\\":\\\"ENOENT: no such file or directory, stat '/workspace/rename-to.txt'\\\"}\\nexecute_ms=452; calls={\\\"do-read\\\": 2, \\\"fstat\\\": 3, \\\"list\\\": 1, \\\"open\\\": 8, \\\"read\\\": 9, \\\"rename\\\": 1, \\\"stat\\\": 113, \\\"sync\\\": 9, \\\"unlink\\\": 1, \\\"write\\\": 8}\\ndo_read_during_exec=Ok(Object {\\\"text\\\": String(\\\"HELLO from Wasmer\\\\nappend\\\\n\\\")})\\n\",\"elapsedMs\":755.1971669999998}"
+      },
+      {
+        "id": "1790102343391-edge",
+        "payload": "edge",
+        "status": "failed",
+        "result": "{\"code\":1,\"signal\":null,\"killed\":false,\"stdout\":\"\",\"stderr\":\"compile_ms=286\\ninstantiate_ms=6\\ndo_read_mid_guest=Ok(Object {\\\"text\\\": String(\\\"hello from Wasmer\\\\n\\\")})\\ndo_read_mid_guest=Ok(Object {\\\"text\\\": String(\\\"HELLO from Wasmer\\\\n\\\")})\\n\\nthread 'main' (1) panicked at examples/agentfs-wasmer/guest.rs:45:9:\\nassertion `left == right` failed: truncate growth must read as zeros\\n  left: 25\\n right: 32\\nnote: run with `RUST_BACKTRACE=1` environment variable to display a backtrace\\nexecute_ms=59; calls={\\\"do-read\\\": 2, \\\"fstat\\\": 1, \\\"list\\\": 1, \\\"open\\\": 4, \\\"read\\\": 4, \\\"stat\\\": 6, \\\"sync\\\": 4, \\\"truncate\\\": 1, \\\"write\\\": 3}\\ndo_read_during_exec=Ok(Object {\\\"text\\\": String(\\\"HELLO from Wasmer\\\\nappend\\\\n\\\")})\\nError: RuntimeError: unreachable\\n    at abort (guest.wasm[227]:0x92a6)\\n    at _RNvNtNtNtCs7EG80emN7Vk_3std3sys3pal4wasi14abort_internal (guest.wasm[114]:0x5ae7)\\n    at _RNvNtCs7EG80emN7Vk_3std7process5abort (guest.wasm[78]:0x40d4)\\n    at _RNvCs9wFQrvczXsK_7___rustc12___rust_abort (guest.wasm[87]:0x4714)\\n    at _RNvCs9wFQrvczXsK_7___rustc18___rust_start_panic (guest.wasm[42]:0x1dcf)\\n    at _RNvCs9wFQrvczXsK_7___rustc10rust_panic (guest.wasm[84]:0x4559)\\n    at _RNvNtCs7EG80emN7Vk_3std9panicking15panic_with_hook (guest.wasm[70]:0x36ed)\\n    at _RNCNvNtCs7EG80emN7Vk_3std9panicking13panic_handler0B5_ (guest.wasm[66]:0x3203)\\n    at _RINvNtNtCs7EG80emN7Vk_3std3sys9backtrace26___rust_end_short_backtraceNCNvNtB6_9panicking13panic_handler0zEB6_ (guest.wasm[65]:0x316b)\\n    at _RNvCs9wFQrvczXsK_7___rustc17rust_begin_unwind (guest.wasm[90]:0x47f7)\\n    at _RNvNtCsdBWa9hlvTBY_4core9panicking9panic_fmt (guest.wasm[279]:0xd85d)\\n    at _RNvNtCsdBWa9hlvTBY_4core9panicking19assert_failed_inner (guest.wasm[276]:0xd768)\\n    at _RINvNtCsdBWa9hlvTBY_4core9panicking13assert_failedjjEB4_ (guest.wasm[277]:0xd7ff)\\n    at _RNvCscrbR1WpGxe0_5guest4main (guest.wasm[29]:0xf36)\\n    at _RINvNtNtCs7EG80emN7Vk_3std3sys9backtrace28___rust_begin_short_backtraceFEuuECscrbR1WpGxe0_5guest (guest.wasm[26]:0x7e0)\\n    at _RNCINvNtCs7EG80emN7Vk_3std2rt10lang_startuE0CscrbR1WpGxe0_5guest (guest.wasm[27]:0x7f3)\\n    at _RNvNtCs7EG80emN7Vk_3std2rt19lang_start_internal (guest.wasm[109]:0x552e)\\n    at __main_void (guest.wasm[37]:0x1d83)\\n    at _start (guest.wasm[21]:0x65f)\\n\",\"elapsedMs\":359.9971660000001}"
+      }
+    ]
+  },
+  "cancel": {
+    "code": null,
+    "signal": "SIGKILL",
+    "killed": true,
+    "stdout": "",
+    "stderr": "compile_ms=282\ninstantiate_ms=6\ndo_read_mid_guest=Ok(Object {\"text\": String(\"hello from Wasmer\\n\")})\ndo_read_mid_guest=Ok(Object {\"text\": String(\"HELLO from Wasmer\\n\")})\nfilesystem error: {\"code\":\"ENOENT\",\"error\":\"ENOENT: no such file or directory, stat '/workspace/partial.txt'\"}\nfilesystem error: {\"code\":\"ENOENT\",\"error\":\"ENOENT: no such file or directory, stat '/workspace/partial.txt'\"}\n",
+    "elapsedMs": 5003.908583999999
+  },
+  "staleStatus": 409,
+  "restoredWithoutRuntimeDirectory": true,
+  "afterRestart": {
+    "files": {
+      "input.txt": {
+        "size": 22,
+        "bytes": 22,
+        "text": "hello from TypeScript\n"
+      },
+      "large-out.bin": {
+        "size": 262144,
+        "bytes": 262144
+      },
+      "large.bin": {
+        "size": 262144,
+        "bytes": 262144
+      },
+      "output.txt": {
+        "size": 25,
+        "bytes": 25,
+        "text": "HELLO from Wasmer\nappend\n"
+      },
+      "partial.txt": {
+        "size": 16,
+        "bytes": 16,
+        "text": "committed prefix"
+      }
+    },
+    "active": false,
+    "commands": [
+      {
+        "id": "1790102343391-basic-0",
+        "payload": "basic",
+        "status": "succeeded",
+        "result": "{\"code\":0,\"signal\":null,\"killed\":false,\"stdout\":\"metadata_100_us=70741\\nio_256k_read_write_us=275009\\nguest_total_us=446164\\n\",\"stderr\":\"compile_ms=282\\ninstantiate_ms=6\\ndo_read_mid_guest=Ok(Object {\\\"text\\\": String(\\\"hello from Wasmer\\\\n\\\")})\\ndo_read_mid_guest=Ok(Object {\\\"text\\\": String(\\\"HELLO from Wasmer\\\\n\\\")})\\nfilesystem error: {\\\"code\\\":\\\"ENOENT\\\",\\\"error\\\":\\\"ENOENT: no such file or directory, stat '/workspace/rename-from.txt'\\\"}\\nfilesystem error: {\\\"code\\\":\\\"ENOENT\\\",\\\"error\\\":\\\"ENOENT: no such file or directory, stat '/workspace/rename-from.txt'\\\"}\\nfilesystem error: {\\\"code\\\":\\\"ENOENT\\\",\\\"error\\\":\\\"ENOENT: no such file or directory, stat '/workspace/rename-to.txt'\\\"}\\nexecute_ms=448; calls={\\\"do-read\\\": 2, \\\"fstat\\\": 3, \\\"list\\\": 1, \\\"open\\\": 8, \\\"read\\\": 9, \\\"rename\\\": 1, \\\"stat\\\": 113, \\\"sync\\\": 9, \\\"unlink\\\": 1, \\\"write\\\": 8}\\ndo_read_during_exec=Ok(Object {\\\"text\\\": String(\\\"HELLO from Wasmer\\\\nappend\\\\n\\\")})\\n\",\"elapsedMs\":752.5457499999999}"
+      },
+      {
+        "id": "1790102343391-basic-1",
+        "payload": "basic",
+        "status": "succeeded",
+        "result": "{\"code\":0,\"signal\":null,\"killed\":false,\"stdout\":\"metadata_100_us=68805\\nio_256k_read_write_us=286355\\nguest_total_us=447149\\n\",\"stderr\":\"compile_ms=282\\ninstantiate_ms=7\\ndo_read_mid_guest=Ok(Object {\\\"text\\\": String(\\\"hello from Wasmer\\\\n\\\")})\\ndo_read_mid_guest=Ok(Object {\\\"text\\\": String(\\\"HELLO from Wasmer\\\\n\\\")})\\nfilesystem error: {\\\"code\\\":\\\"ENOENT\\\",\\\"error\\\":\\\"ENOENT: no such file or directory, stat '/workspace/rename-from.txt'\\\"}\\nfilesystem error: {\\\"code\\\":\\\"ENOENT\\\",\\\"error\\\":\\\"ENOENT: no such file or directory, stat '/workspace/rename-from.txt'\\\"}\\nfilesystem error: {\\\"code\\\":\\\"ENOENT\\\",\\\"error\\\":\\\"ENOENT: no such file or directory, stat '/workspace/rename-to.txt'\\\"}\\nexecute_ms=448; calls={\\\"do-read\\\": 2, \\\"fstat\\\": 3, \\\"list\\\": 1, \\\"open\\\": 8, \\\"read\\\": 9, \\\"rename\\\": 1, \\\"stat\\\": 113, \\\"sync\\\": 9, \\\"unlink\\\": 1, \\\"write\\\": 8}\\ndo_read_during_exec=Ok(Object {\\\"text\\\": String(\\\"HELLO from Wasmer\\\\nappend\\\\n\\\")})\\n\",\"elapsedMs\":752.3008749999999}"
+      },
+      {
+        "id": "1790102343391-basic-2",
+        "payload": "basic",
+        "status": "succeeded",
+        "result": "{\"code\":0,\"signal\":null,\"killed\":false,\"stdout\":\"metadata_100_us=68657\\nio_256k_read_write_us=290115\\nguest_total_us=450470\\n\",\"stderr\":\"compile_ms=284\\ninstantiate_ms=6\\ndo_read_mid_guest=Ok(Object {\\\"text\\\": String(\\\"hello from Wasmer\\\\n\\\")})\\ndo_read_mid_guest=Ok(Object {\\\"text\\\": String(\\\"HELLO from Wasmer\\\\n\\\")})\\nfilesystem error: {\\\"code\\\":\\\"ENOENT\\\",\\\"error\\\":\\\"ENOENT: no such file or directory, stat '/workspace/rename-from.txt'\\\"}\\nfilesystem error: {\\\"code\\\":\\\"ENOENT\\\",\\\"error\\\":\\\"ENOENT: no such file or directory, stat '/workspace/rename-from.txt'\\\"}\\nfilesystem error: {\\\"code\\\":\\\"ENOENT\\\",\\\"error\\\":\\\"ENOENT: no such file or directory, stat '/workspace/rename-to.txt'\\\"}\\nexecute_ms=452; calls={\\\"do-read\\\": 2, \\\"fstat\\\": 3, \\\"list\\\": 1, \\\"open\\\": 8, \\\"read\\\": 9, \\\"rename\\\": 1, \\\"stat\\\": 113, \\\"sync\\\": 9, \\\"unlink\\\": 1, \\\"write\\\": 8}\\ndo_read_during_exec=Ok(Object {\\\"text\\\": String(\\\"HELLO from Wasmer\\\\nappend\\\\n\\\")})\\n\",\"elapsedMs\":755.1971669999998}"
+      },
+      {
+        "id": "1790102343391-edge",
+        "payload": "edge",
+        "status": "failed",
+        "result": "{\"code\":1,\"signal\":null,\"killed\":false,\"stdout\":\"\",\"stderr\":\"compile_ms=286\\ninstantiate_ms=6\\ndo_read_mid_guest=Ok(Object {\\\"text\\\": String(\\\"hello from Wasmer\\\\n\\\")})\\ndo_read_mid_guest=Ok(Object {\\\"text\\\": String(\\\"HELLO from Wasmer\\\\n\\\")})\\n\\nthread 'main' (1) panicked at examples/agentfs-wasmer/guest.rs:45:9:\\nassertion `left == right` failed: truncate growth must read as zeros\\n  left: 25\\n right: 32\\nnote: run with `RUST_BACKTRACE=1` environment variable to display a backtrace\\nexecute_ms=59; calls={\\\"do-read\\\": 2, \\\"fstat\\\": 1, \\\"list\\\": 1, \\\"open\\\": 4, \\\"read\\\": 4, \\\"stat\\\": 6, \\\"sync\\\": 4, \\\"truncate\\\": 1, \\\"write\\\": 3}\\ndo_read_during_exec=Ok(Object {\\\"text\\\": String(\\\"HELLO from Wasmer\\\\nappend\\\\n\\\")})\\nError: RuntimeError: unreachable\\n    at abort (guest.wasm[227]:0x92a6)\\n    at _RNvNtNtNtCs7EG80emN7Vk_3std3sys3pal4wasi14abort_internal (guest.wasm[114]:0x5ae7)\\n    at _RNvNtCs7EG80emN7Vk_3std7process5abort (guest.wasm[78]:0x40d4)\\n    at _RNvCs9wFQrvczXsK_7___rustc12___rust_abort (guest.wasm[87]:0x4714)\\n    at _RNvCs9wFQrvczXsK_7___rustc18___rust_start_panic (guest.wasm[42]:0x1dcf)\\n    at _RNvCs9wFQrvczXsK_7___rustc10rust_panic (guest.wasm[84]:0x4559)\\n    at _RNvNtCs7EG80emN7Vk_3std9panicking15panic_with_hook (guest.wasm[70]:0x36ed)\\n    at _RNCNvNtCs7EG80emN7Vk_3std9panicking13panic_handler0B5_ (guest.wasm[66]:0x3203)\\n    at _RINvNtNtCs7EG80emN7Vk_3std3sys9backtrace26___rust_end_short_backtraceNCNvNtB6_9panicking13panic_handler0zEB6_ (guest.wasm[65]:0x316b)\\n    at _RNvCs9wFQrvczXsK_7___rustc17rust_begin_unwind (guest.wasm[90]:0x47f7)\\n    at _RNvNtCsdBWa9hlvTBY_4core9panicking9panic_fmt (guest.wasm[279]:0xd85d)\\n    at _RNvNtCsdBWa9hlvTBY_4core9panicking19assert_failed_inner (guest.wasm[276]:0xd768)\\n    at _RINvNtCsdBWa9hlvTBY_4core9panicking13assert_failedjjEB4_ (guest.wasm[277]:0xd7ff)\\n    at _RNvCscrbR1WpGxe0_5guest4main (guest.wasm[29]:0xf36)\\n    at _RINvNtNtCs7EG80emN7Vk_3std3sys9backtrace28___rust_begin_short_backtraceFEuuECscrbR1WpGxe0_5guest (guest.wasm[26]:0x7e0)\\n    at _RNCINvNtCs7EG80emN7Vk_3std2rt10lang_startuE0CscrbR1WpGxe0_5guest (guest.wasm[27]:0x7f3)\\n    at _RNvNtCs7EG80emN7Vk_3std2rt19lang_start_internal (guest.wasm[109]:0x552e)\\n    at __main_void (guest.wasm[37]:0x1d83)\\n    at _start (guest.wasm[21]:0x65f)\\n\",\"elapsedMs\":359.9971660000001}"
+      },
+      {
+        "id": "1790102343391-cancel",
+        "payload": "cancel",
+        "status": "cancelled",
+        "result": "{\"code\":null,\"signal\":\"SIGKILL\",\"killed\":true,\"stdout\":\"\",\"stderr\":\"compile_ms=282\\ninstantiate_ms=6\\ndo_read_mid_guest=Ok(Object {\\\"text\\\": String(\\\"hello from Wasmer\\\\n\\\")})\\ndo_read_mid_guest=Ok(Object {\\\"text\\\": String(\\\"HELLO from Wasmer\\\\n\\\")})\\nfilesystem error: {\\\"code\\\":\\\"ENOENT\\\",\\\"error\\\":\\\"ENOENT: no such file or directory, stat '/workspace/partial.txt'\\\"}\\nfilesystem error: {\\\"code\\\":\\\"ENOENT\\\",\\\"error\\\":\\\"ENOENT: no such file or directory, stat '/workspace/partial.txt'\\\"}\\n\",\"elapsedMs\":5003.908583999999}"
+      }
+    ]
+  },
+  "restartVerified": true,
+  "ownerLostReply": {
+    "lostReply": "fetch failed"
+  },
+  "afterOwnerLoss": {
+    "files": {
+      "input.txt": {
+        "size": 22,
+        "bytes": 22,
+        "text": "hello from TypeScript\n"
+      },
+      "large-out.bin": {
+        "size": 262144,
+        "bytes": 262144
+      },
+      "large.bin": {
+        "size": 262144,
+        "bytes": 262144
+      },
+      "output.txt": {
+        "size": 25,
+        "bytes": 25,
+        "text": "HELLO from Wasmer\nappend\n"
+      },
+      "owner-partial.txt": {
+        "size": 16,
+        "bytes": 16,
+        "text": "committed prefix"
+      },
+      "partial.txt": {
+        "size": 16,
+        "bytes": 16,
+        "text": "committed prefix"
+      }
+    },
+    "active": false,
+    "commands": [
+      {
+        "id": "1790102343391-basic-0",
+        "payload": "basic",
+        "status": "succeeded",
+        "result": "{\"code\":0,\"signal\":null,\"killed\":false,\"stdout\":\"metadata_100_us=70741\\nio_256k_read_write_us=275009\\nguest_total_us=446164\\n\",\"stderr\":\"compile_ms=282\\ninstantiate_ms=6\\ndo_read_mid_guest=Ok(Object {\\\"text\\\": String(\\\"hello from Wasmer\\\\n\\\")})\\ndo_read_mid_guest=Ok(Object {\\\"text\\\": String(\\\"HELLO from Wasmer\\\\n\\\")})\\nfilesystem error: {\\\"code\\\":\\\"ENOENT\\\",\\\"error\\\":\\\"ENOENT: no such file or directory, stat '/workspace/rename-from.txt'\\\"}\\nfilesystem error: {\\\"code\\\":\\\"ENOENT\\\",\\\"error\\\":\\\"ENOENT: no such file or directory, stat '/workspace/rename-from.txt'\\\"}\\nfilesystem error: {\\\"code\\\":\\\"ENOENT\\\",\\\"error\\\":\\\"ENOENT: no such file or directory, stat '/workspace/rename-to.txt'\\\"}\\nexecute_ms=448; calls={\\\"do-read\\\": 2, \\\"fstat\\\": 3, \\\"list\\\": 1, \\\"open\\\": 8, \\\"read\\\": 9, \\\"rename\\\": 1, \\\"stat\\\": 113, \\\"sync\\\": 9, \\\"unlink\\\": 1, \\\"write\\\": 8}\\ndo_read_during_exec=Ok(Object {\\\"text\\\": String(\\\"HELLO from Wasmer\\\\nappend\\\\n\\\")})\\n\",\"elapsedMs\":752.5457499999999}"
+      },
+      {
+        "id": "1790102343391-basic-1",
+        "payload": "basic",
+        "status": "succeeded",
+        "result": "{\"code\":0,\"signal\":null,\"killed\":false,\"stdout\":\"metadata_100_us=68805\\nio_256k_read_write_us=286355\\nguest_total_us=447149\\n\",\"stderr\":\"compile_ms=282\\ninstantiate_ms=7\\ndo_read_mid_guest=Ok(Object {\\\"text\\\": String(\\\"hello from Wasmer\\\\n\\\")})\\ndo_read_mid_guest=Ok(Object {\\\"text\\\": String(\\\"HELLO from Wasmer\\\\n\\\")})\\nfilesystem error: {\\\"code\\\":\\\"ENOENT\\\",\\\"error\\\":\\\"ENOENT: no such file or directory, stat '/workspace/rename-from.txt'\\\"}\\nfilesystem error: {\\\"code\\\":\\\"ENOENT\\\",\\\"error\\\":\\\"ENOENT: no such file or directory, stat '/workspace/rename-from.txt'\\\"}\\nfilesystem error: {\\\"code\\\":\\\"ENOENT\\\",\\\"error\\\":\\\"ENOENT: no such file or directory, stat '/workspace/rename-to.txt'\\\"}\\nexecute_ms=448; calls={\\\"do-read\\\": 2, \\\"fstat\\\": 3, \\\"list\\\": 1, \\\"open\\\": 8, \\\"read\\\": 9, \\\"rename\\\": 1, \\\"stat\\\": 113, \\\"sync\\\": 9, \\\"unlink\\\": 1, \\\"write\\\": 8}\\ndo_read_during_exec=Ok(Object {\\\"text\\\": String(\\\"HELLO from Wasmer\\\\nappend\\\\n\\\")})\\n\",\"elapsedMs\":752.3008749999999}"
+      },
+      {
+        "id": "1790102343391-basic-2",
+        "payload": "basic",
+        "status": "succeeded",
+        "result": "{\"code\":0,\"signal\":null,\"killed\":false,\"stdout\":\"metadata_100_us=68657\\nio_256k_read_write_us=290115\\nguest_total_us=450470\\n\",\"stderr\":\"compile_ms=284\\ninstantiate_ms=6\\ndo_read_mid_guest=Ok(Object {\\\"text\\\": String(\\\"hello from Wasmer\\\\n\\\")})\\ndo_read_mid_guest=Ok(Object {\\\"text\\\": String(\\\"HELLO from Wasmer\\\\n\\\")})\\nfilesystem error: {\\\"code\\\":\\\"ENOENT\\\",\\\"error\\\":\\\"ENOENT: no such file or directory, stat '/workspace/rename-from.txt'\\\"}\\nfilesystem error: {\\\"code\\\":\\\"ENOENT\\\",\\\"error\\\":\\\"ENOENT: no such file or directory, stat '/workspace/rename-from.txt'\\\"}\\nfilesystem error: {\\\"code\\\":\\\"ENOENT\\\",\\\"error\\\":\\\"ENOENT: no such file or directory, stat '/workspace/rename-to.txt'\\\"}\\nexecute_ms=452; calls={\\\"do-read\\\": 2, \\\"fstat\\\": 3, \\\"list\\\": 1, \\\"open\\\": 8, \\\"read\\\": 9, \\\"rename\\\": 1, \\\"stat\\\": 113, \\\"sync\\\": 9, \\\"unlink\\\": 1, \\\"write\\\": 8}\\ndo_read_during_exec=Ok(Object {\\\"text\\\": String(\\\"HELLO from Wasmer\\\\nappend\\\\n\\\")})\\n\",\"elapsedMs\":755.1971669999998}"
+      },
+      {
+        "id": "1790102343391-edge",
+        "payload": "edge",
+        "status": "failed",
+        "result": "{\"code\":1,\"signal\":null,\"killed\":false,\"stdout\":\"\",\"stderr\":\"compile_ms=286\\ninstantiate_ms=6\\ndo_read_mid_guest=Ok(Object {\\\"text\\\": String(\\\"hello from Wasmer\\\\n\\\")})\\ndo_read_mid_guest=Ok(Object {\\\"text\\\": String(\\\"HELLO from Wasmer\\\\n\\\")})\\n\\nthread 'main' (1) panicked at examples/agentfs-wasmer/guest.rs:45:9:\\nassertion `left == right` failed: truncate growth must read as zeros\\n  left: 25\\n right: 32\\nnote: run with `RUST_BACKTRACE=1` environment variable to display a backtrace\\nexecute_ms=59; calls={\\\"do-read\\\": 2, \\\"fstat\\\": 1, \\\"list\\\": 1, \\\"open\\\": 4, \\\"read\\\": 4, \\\"stat\\\": 6, \\\"sync\\\": 4, \\\"truncate\\\": 1, \\\"write\\\": 3}\\ndo_read_during_exec=Ok(Object {\\\"text\\\": String(\\\"HELLO from Wasmer\\\\nappend\\\\n\\\")})\\nError: RuntimeError: unreachable\\n    at abort (guest.wasm[227]:0x92a6)\\n    at _RNvNtNtNtCs7EG80emN7Vk_3std3sys3pal4wasi14abort_internal (guest.wasm[114]:0x5ae7)\\n    at _RNvNtCs7EG80emN7Vk_3std7process5abort (guest.wasm[78]:0x40d4)\\n    at _RNvCs9wFQrvczXsK_7___rustc12___rust_abort (guest.wasm[87]:0x4714)\\n    at _RNvCs9wFQrvczXsK_7___rustc18___rust_start_panic (guest.wasm[42]:0x1dcf)\\n    at _RNvCs9wFQrvczXsK_7___rustc10rust_panic (guest.wasm[84]:0x4559)\\n    at _RNvNtCs7EG80emN7Vk_3std9panicking15panic_with_hook (guest.wasm[70]:0x36ed)\\n    at _RNCNvNtCs7EG80emN7Vk_3std9panicking13panic_handler0B5_ (guest.wasm[66]:0x3203)\\n    at _RINvNtNtCs7EG80emN7Vk_3std3sys9backtrace26___rust_end_short_backtraceNCNvNtB6_9panicking13panic_handler0zEB6_ (guest.wasm[65]:0x316b)\\n    at _RNvCs9wFQrvczXsK_7___rustc17rust_begin_unwind (guest.wasm[90]:0x47f7)\\n    at _RNvNtCsdBWa9hlvTBY_4core9panicking9panic_fmt (guest.wasm[279]:0xd85d)\\n    at _RNvNtCsdBWa9hlvTBY_4core9panicking19assert_failed_inner (guest.wasm[276]:0xd768)\\n    at _RINvNtCsdBWa9hlvTBY_4core9panicking13assert_failedjjEB4_ (guest.wasm[277]:0xd7ff)\\n    at _RNvCscrbR1WpGxe0_5guest4main (guest.wasm[29]:0xf36)\\n    at _RINvNtNtCs7EG80emN7Vk_3std3sys9backtrace28___rust_begin_short_backtraceFEuuECscrbR1WpGxe0_5guest (guest.wasm[26]:0x7e0)\\n    at _RNCINvNtCs7EG80emN7Vk_3std2rt10lang_startuE0CscrbR1WpGxe0_5guest (guest.wasm[27]:0x7f3)\\n    at _RNvNtCs7EG80emN7Vk_3std2rt19lang_start_internal (guest.wasm[109]:0x552e)\\n    at __main_void (guest.wasm[37]:0x1d83)\\n    at _start (guest.wasm[21]:0x65f)\\n\",\"elapsedMs\":359.9971660000001}"
+      },
+      {
+        "id": "1790102343391-cancel",
+        "payload": "cancel",
+        "status": "cancelled",
+        "result": "{\"code\":null,\"signal\":\"SIGKILL\",\"killed\":true,\"stdout\":\"\",\"stderr\":\"compile_ms=282\\ninstantiate_ms=6\\ndo_read_mid_guest=Ok(Object {\\\"text\\\": String(\\\"hello from Wasmer\\\\n\\\")})\\ndo_read_mid_guest=Ok(Object {\\\"text\\\": String(\\\"HELLO from Wasmer\\\\n\\\")})\\nfilesystem error: {\\\"code\\\":\\\"ENOENT\\\",\\\"error\\\":\\\"ENOENT: no such file or directory, stat '/workspace/partial.txt'\\\"}\\nfilesystem error: {\\\"code\\\":\\\"ENOENT\\\",\\\"error\\\":\\\"ENOENT: no such file or directory, stat '/workspace/partial.txt'\\\"}\\n\",\"elapsedMs\":5003.908583999999}"
+      },
+      {
+        "id": "1790102343391-owner",
+        "payload": "owner",
+        "status": "interrupted",
+        "result": null
+      }
+    ]
+  },
+  "oldExecutionStatus": 409,
+  "ownerInterruptionVerified": true,
+  "provenance": {
+    "celld": "c91ca5436db5974e17b9a8abb3d216fe35737831",
+    "agentfs_sdk": "0.6.4",
+    "wasmer": "7.4.0",
+    "wasmer_wasix": "0.704.0",
+    "cpu": "Apple M3 Max",
+    "memoryGiB": 64,
+    "notes": "Debug hosts, optimized WASI guest. Final observation run without package probes in parallel; historical commands omitted."
+  }
+}

@@ -1,0 +1,31 @@
+{
+  "name": "@celld/wasmer-sandbox",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts",
+    "./filesystem": "./src/filesystem.ts",
+    "./worker": "./src/worker.ts"
+  },
+  "scripts": {
+    "test": "node --test test/*.test.ts",
+    "check": "tsc --noEmit",
+    "test:integration": "node test/integration.mjs",
+    "test:fleet": "node test/fleet.mjs",
+    "serve": "node service/main.mjs",
+    "format:check": "prettier --check \"src/**/*.ts\" \"service/*.mjs\" \"test/*.{ts,mjs}\" \"example/*.ts\""
+  },
+  "dependencies": {
+    "buffer": "6.0.3"
+  },
+  "devDependencies": {
+    "@types/node": "26.0.0",
+    "esbuild": "0.25.12",
+    "prettier": "3.6.2",
+    "typescript": "5.9.3"
+  },
+  "engines": {
+    "node": ">=24.12.0"
+  }
+}

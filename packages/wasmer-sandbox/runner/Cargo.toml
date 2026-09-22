@@ -1,0 +1,27 @@
+[package]
+name = "celld-wasmer-runner"
+version = "0.1.0"
+edition = "2024"
+publish = false
+[workspace]
+[dependencies]
+wasmer = { version = "=7.4.0", default-features = false, features = ["sys", "cranelift", "wat"] }
+wasmer-wasix = { version = "=0.704.0", default-features = false, features = ["sys-minimal"] }
+virtual-fs = { version = "=0.704.0", default-features = false, features = ["tracking"] }
+tokio = { version = "1", features = ["full"] }
+futures = "0.3"
+serde_json = "1"
+ureq = { version = "2.12", default-features = false, features = ["json", "tls"] }
+anyhow = "1"
+
+serde = { version = "1", features = ["derive"] }
+libc = "0.2"
+sha2 = "0.10"
+shared-buffer = "0.1"
+virtual-net = { version = "=0.704.0", default-features = false }
+
+webc = "=12.0.1"
+wasmer-types = "=7.4.0"
+async-trait = "0.1"
+
+wasmer-config = "=0.704.0"

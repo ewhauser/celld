@@ -1,0 +1,264 @@
+{
+  "date": "2026-09-22T19:35:39.255Z",
+  "checks": [
+    "filesystem write acknowledged while object store was paused",
+    "another owner restores acknowledged state after prior owner and disk loss",
+    "suspended owner expires, takeover fences old execution, resumed owner self-fences"
+  ],
+  "states": [
+    {
+      "node": 0,
+      "state": {
+        "activating": 0,
+        "activation_waiting": 0,
+        "adopting": 0,
+        "allocator": {
+          "active_bytes": 11304960,
+          "allocated_bytes": 9004120,
+          "mapped_bytes": 14614528,
+          "resident_bytes": 13910016,
+          "retained_bytes": 0
+        },
+        "capacity_waiting": 0,
+        "cgroup_current_bytes": null,
+        "cgroup_working_set_bytes": null,
+        "deployment": {
+          "cells": {
+            "SandboxWorkspace:42d8fc3ba5bd638b009b8dcaae5674ca7bd93771ac8933e3035ea9e923faf2fd": 1
+          },
+          "draining": [],
+          "generation": 1,
+          "isolates": {
+            "cells": {
+              "sandbox-test": {
+                "cells": 1,
+                "external_bytes": 714452,
+                "freed": 0,
+                "heap_bytes": 5767168,
+                "live": 1,
+                "live_empty": 0,
+                "requests": 1,
+                "retiring": 0,
+                "turns": 0
+              }
+            },
+            "services": {
+              "sandbox-test": {
+                "cells": 0,
+                "external_bytes": 708219,
+                "freed": 0,
+                "heap_bytes": 4456448,
+                "live": 1,
+                "live_empty": 1,
+                "requests": 0,
+                "retiring": 0,
+                "turns": 0
+              }
+            },
+            "stateless": {
+              "cells": 0,
+              "external_bytes": 708219,
+              "freed": 0,
+              "heap_bytes": 4456448,
+              "live": 1,
+              "live_empty": 1,
+              "requests": 0,
+              "retiring": 0,
+              "turns": 0
+            }
+          },
+          "prefix": "deploy/sandbox-test/2e1d8ffc7bbf6574",
+          "swapping": 0,
+          "version": "2e1d8ffc7bbf6574"
+        },
+        "evicting": 0,
+        "handed_off": 0,
+        "handoff_failed": 0,
+        "in_use_bytes": 88319064,
+        "libc_malloc": null,
+        "node_load": {
+          "bucket_format": 2,
+          "cgroup_current_bytes": null,
+          "cgroup_working_set_bytes": null,
+          "cpu_percent_x100": 0,
+          "draining": false,
+          "fd_limit": 9223372036854776000,
+          "host_websockets": 0,
+          "in_use_bytes": 88286296,
+          "memory_headroom": true,
+          "open_fds": 0,
+          "owned_cells": 1,
+          "placement_weight": 16,
+          "pressured": false,
+          "rebalance_paused": false,
+          "resident_cells": 1,
+          "restoring": 0,
+          "rss_bytes": 93192192,
+          "sampled_ms": 1790105746293,
+          "shed_cells": 0
+        },
+        "occupied": 1,
+        "owned_cells": 1,
+        "ownership": "s3",
+        "phases": {
+          "resident": 1
+        },
+        "published": [
+          "SandboxWorkspace:42d8fc3ba5bd638b009b8dcaae5674ca7bd93771ac8933e3035ea9e923faf2fd"
+        ],
+        "publishes": 1,
+        "quiescing": 0,
+        "rebalance_failed": 0,
+        "rebalanced": 0,
+        "releasing": 0,
+        "remote_route_refreshes": 0,
+        "residents": [
+          "SandboxWorkspace:42d8fc3ba5bd638b009b8dcaae5674ca7bd93771ac8933e3035ea9e923faf2fd"
+        ],
+        "restoring": 0,
+        "rss_bytes": 93224960,
+        "shedding": null,
+        "shutdown": {
+          "capabilities": {
+            "strict_disk_removal": true
+          },
+          "control_only": false,
+          "operation": null,
+          "runtime_generation": "f877a1a7d83fade97011fb941e1f38efcdb953e664112302ae206d3b94caadfb",
+          "schema_version": 1
+        },
+        "stops": 0
+      }
+    },
+    {
+      "node": 1,
+      "state": {
+        "activating": 0,
+        "activation_waiting": 0,
+        "adopting": 0,
+        "allocator": {
+          "active_bytes": 10043392,
+          "allocated_bytes": 7658784,
+          "mapped_bytes": 12943360,
+          "resident_bytes": 12222464,
+          "retained_bytes": 0
+        },
+        "capacity_waiting": 0,
+        "cgroup_current_bytes": null,
+        "cgroup_working_set_bytes": null,
+        "deployment": {
+          "cells": {
+            "SandboxWorkspace:42d8fc3ba5bd638b009b8dcaae5674ca7bd93771ac8933e3035ea9e923faf2fd": 1
+          },
+          "draining": [],
+          "generation": 1,
+          "isolates": {
+            "cells": {
+              "sandbox-test": {
+                "cells": 1,
+                "external_bytes": 709099,
+                "freed": 0,
+                "heap_bytes": 4718592,
+                "live": 1,
+                "live_empty": 0,
+                "requests": 1,
+                "retiring": 0,
+                "turns": 0
+              }
+            },
+            "services": {
+              "sandbox-test": {
+                "cells": 0,
+                "external_bytes": 721030,
+                "freed": 0,
+                "heap_bytes": 3670016,
+                "live": 1,
+                "live_empty": 1,
+                "requests": 1,
+                "retiring": 0,
+                "turns": 0
+              }
+            },
+            "stateless": {
+              "cells": 0,
+              "external_bytes": 721030,
+              "freed": 0,
+              "heap_bytes": 3670016,
+              "live": 1,
+              "live_empty": 1,
+              "requests": 1,
+              "retiring": 0,
+              "turns": 0
+            }
+          },
+          "prefix": "deploy/sandbox-test/2e1d8ffc7bbf6574",
+          "swapping": 0,
+          "version": "2e1d8ffc7bbf6574"
+        },
+        "evicting": 0,
+        "handed_off": 0,
+        "handoff_failed": 0,
+        "in_use_bytes": 87039264,
+        "libc_malloc": null,
+        "node_load": {
+          "bucket_format": 2,
+          "cgroup_current_bytes": null,
+          "cgroup_working_set_bytes": null,
+          "cpu_percent_x100": 0,
+          "draining": false,
+          "fd_limit": 9223372036854776000,
+          "host_websockets": 0,
+          "in_use_bytes": 87039264,
+          "memory_headroom": true,
+          "open_fds": 0,
+          "owned_cells": 1,
+          "placement_weight": 16,
+          "pressured": false,
+          "rebalance_paused": false,
+          "resident_cells": 1,
+          "restoring": 0,
+          "rss_bytes": 91602944,
+          "sampled_ms": 1790105755657,
+          "shed_cells": 0
+        },
+        "occupied": 1,
+        "owned_cells": 1,
+        "ownership": "s3",
+        "phases": {
+          "resident": 1
+        },
+        "published": [
+          "SandboxWorkspace:42d8fc3ba5bd638b009b8dcaae5674ca7bd93771ac8933e3035ea9e923faf2fd"
+        ],
+        "publishes": 1,
+        "quiescing": 0,
+        "rebalance_failed": 0,
+        "rebalanced": 0,
+        "releasing": 0,
+        "remote_route_refreshes": 1,
+        "residents": [
+          "SandboxWorkspace:42d8fc3ba5bd638b009b8dcaae5674ca7bd93771ac8933e3035ea9e923faf2fd"
+        ],
+        "restoring": 0,
+        "rss_bytes": 91602944,
+        "shedding": null,
+        "shutdown": {
+          "capabilities": {
+            "strict_disk_removal": true
+          },
+          "control_only": false,
+          "operation": null,
+          "runtime_generation": "58a70d9663bce3df683dcd958ceeb332fb049e3aa3d7ace99bbcb6808f59d85a",
+          "schema_version": 1
+        },
+        "stops": 0
+      }
+    }
+  ],
+  "followerAttempts": [
+    {
+      "attempt": 1,
+      "acknowledged": true
+    }
+  ]
+}

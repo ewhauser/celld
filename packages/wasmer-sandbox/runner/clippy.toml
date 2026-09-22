@@ -1,0 +1,6 @@
+# This isolated helper is an OS process, not a celld effect adapter. Reading
+# configured immutable tool artifacts and emitting the private JSON protocol
+# are its explicit host boundaries. Do not inherit the node-engine I/O bans.
+disallowed-methods = []
+disallowed-macros = []
+disallowed-types = []

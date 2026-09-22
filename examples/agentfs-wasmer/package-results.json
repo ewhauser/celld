@@ -1,0 +1,42 @@
+{
+  "cli": "wasmer 7.4.2",
+  "runs": [
+    {
+      "args": [
+        "wasmer/bash@=1.0.25",
+        "--",
+        "-c",
+        "printf \"bash-ok\\n\"; printf \"x\\n\" | cat"
+      ],
+      "code": 0,
+      "stdout": "bash-ok\nx\n",
+      "stderr": "{\"timestamp\":\"2026-09-22T18:38:25.846687Z\",\"level\":\"WARN\",\"fields\":{\"message\":\"Unable to remove the corrupted cache file\",\"path\":\"/var/folders/w1/9twq581x5xn7hg5sqflql2y00000gn/T/agentfs-wasmer-packages-fzkbykq_/cache/compiled/cranelift-opts-rkyv-v24/5B37A9F95FCA50F55024B7FC37B786FA80024E55320266CB19936729D24C70CE.bin\",\"error\":\"No such file or directory (os error 2)\"},\"target\":\"wasmer_wasix::runtime::module_cache::filesystem\",\"threadId\":\"ThreadId(31)\"}\n{\"timestamp\":\"2026-09-22T18:38:26.009956Z\",\"level\":\"WARN\",\"fields\":{\"message\":\"Unable to remove the corrupted cache file\",\"path\":\"/var/folders/w1/9twq581x5xn7hg5sqflql2y00000gn/T/agentfs-wasmer-packages-fzkbykq_/cache/compiled/cranelift-opts-rkyv-v24/41273F94662CE30F12DAED7E23E6B10B100444C48F7A1778ED819789F7876771.bin\",\"error\":\"No such file or directory (os error 2)\"},\"target\":\"wasmer_wasix::runtime::module_cache::filesystem\",\"threadId\":\"ThreadId(35)\"}\n",
+      "seconds": 3.360127832973376
+    },
+    {
+      "args": [
+        "python/python@=3.13.20",
+        "--",
+        "-c",
+        "import sys,json; print(sys.version); print(json.dumps({\"ok\":True}))"
+      ],
+      "code": 0,
+      "stdout": "3.13.15 (main, Aug  5 2026, 12:25:43) [Clang 21.1.2 ]\n{\"ok\": true}\n",
+      "stderr": "{\"timestamp\":\"2026-09-22T18:38:33.224757Z\",\"level\":\"WARN\",\"fields\":{\"message\":\"Unable to remove the corrupted cache file\",\"path\":\"/var/folders/w1/9twq581x5xn7hg5sqflql2y00000gn/T/agentfs-wasmer-packages-fzkbykq_/cache/compiled/cranelift-opts-rkyv-v24/3FC48792E8F667333A6397FD9CE6961A5A76CD69160C5AF6AF074A32C0BAF3F4.bin\",\"error\":\"No such file or directory (os error 2)\"},\"target\":\"wasmer_wasix::runtime::module_cache::filesystem\",\"threadId\":\"ThreadId(35)\"}\n",
+      "seconds": 9.234152582939714
+    },
+    {
+      "args": [
+        "wasmer/coreutils@=1.0.25",
+        "--entrypoint",
+        "echo",
+        "--",
+        "coreutils-ok"
+      ],
+      "code": 0,
+      "stdout": "coreutils-ok\n",
+      "stderr": "",
+      "seconds": 0.026353375054895878
+    }
+  ]
+}

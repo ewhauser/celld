@@ -1,0 +1,126 @@
+{
+  "date": "2026-09-22T19:36:08.047Z",
+  "platform": "linux",
+  "checks": [
+    "unauthorized control and stale callbacks rejected",
+    "real DO/shared Wasmer sparse I/O, shrink/growth, append, rename, stdin/env/stdout/stderr",
+    "durable replay and payload conflict",
+    "real celld transactionSync, transaction and blockConcurrencyWhile deadlock guards",
+    "exit status, traps, host/network isolation, CPU timeout and bounded output",
+    "cancellation fences writes and preserves committed prefix",
+    "Bash, pipeline and coreutils on the durable filesystem",
+    "Python stdlib on the durable filesystem",
+    "LTX restore without the prior runtime directory",
+    "owner process loss restores committed prefix, interrupts command and fences former execution"
+  ],
+  "commands": [
+    {
+      "id": "basic",
+      "status": "succeeded",
+      "result": {
+        "exitCode": 0,
+        "reason": "exited",
+        "stderr": "guest-stderr\n",
+        "stdout": "guest-ok\n"
+      },
+      "startedAt": 1790105768189,
+      "finishedAt": 1790105768284
+    },
+    {
+      "id": "exit",
+      "status": "failed",
+      "result": {
+        "exitCode": 42,
+        "reason": "exited",
+        "stderr": "",
+        "stdout": ""
+      },
+      "startedAt": 1790105768293,
+      "finishedAt": 1790105768337
+    },
+    {
+      "id": "trap",
+      "status": "failed",
+      "result": {
+        "exitCode": 45,
+        "reason": "exited",
+        "stderr": "\nthread 'main' (1) panicked at packages/wasmer-sandbox/test/guest.rs:8:17:\nintentional trap\nnote: run with `RUST_BACKTRACE=1` environment variable to display a backtrace\n",
+        "stdout": ""
+      },
+      "startedAt": 1790105768340,
+      "finishedAt": 1790105768384
+    },
+    {
+      "id": "isolation",
+      "status": "succeeded",
+      "result": {
+        "exitCode": 0,
+        "reason": "exited",
+        "stderr": "",
+        "stdout": "isolated\n"
+      },
+      "startedAt": 1790105768388,
+      "finishedAt": 1790105768439
+    },
+    {
+      "id": "timeout",
+      "status": "timed_out",
+      "result": {
+        "reason": "timed_out",
+        "exitCode": 124,
+        "stdout": "",
+        "stderr": "execution stopped"
+      },
+      "startedAt": 1790105768442,
+      "finishedAt": 1790105769949
+    },
+    {
+      "id": "output",
+      "status": "failed",
+      "result": {
+        "reason": "failed",
+        "exitCode": 125,
+        "stdout": "",
+        "stderr": "runner terminated without a valid result"
+      },
+      "startedAt": 1790105769954,
+      "finishedAt": 1790105770968
+    },
+    {
+      "id": "cancel",
+      "status": "cancelled",
+      "result": {
+        "reason": "cancelled",
+        "exitCode": 124,
+        "stdout": "",
+        "stderr": "execution stopped"
+      },
+      "startedAt": 1790105770974,
+      "finishedAt": 1790105770983
+    },
+    {
+      "id": "bash",
+      "status": "succeeded",
+      "result": {
+        "exitCode": 0,
+        "reason": "exited",
+        "stderr": "",
+        "stdout": "8\n"
+      },
+      "startedAt": 1790105770986,
+      "finishedAt": 1790105772814
+    },
+    {
+      "id": "python",
+      "status": "succeeded",
+      "result": {
+        "exitCode": 0,
+        "reason": "exited",
+        "stderr": "",
+        "stdout": "{\"value\": 42}\n"
+      },
+      "startedAt": 1790105772819,
+      "finishedAt": 1790105777435
+    }
+  ]
+}

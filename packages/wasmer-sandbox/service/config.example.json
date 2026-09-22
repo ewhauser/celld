@@ -1,0 +1,27 @@
+{
+  "host": "0.0.0.0",
+  "port": 19877,
+  "runner": "/usr/local/bin/celld-wasmer-runner",
+  "callbackOrigin": "https://YOUR-CELLD-ROUTER.example",
+  "maxConcurrent": 2,
+  "tools": {
+    "bash": {
+      "path": "/tools/bash.webc",
+      "package": "wasmer/bash@1.0.25",
+      "sha256": "059606d132e2e6bc1afe3b432ee64dcb1b1b059815c8bb213cf3b24798ef21e1",
+      "entrypoint": "bash"
+    },
+    "coreutils": {
+      "path": "/tools/coreutils.webc",
+      "package": "wasmer/coreutils@1.0.25",
+      "sha256": "36ea48f185ca15fe8454b1defb6a11754659dbed6330549662b62874d509f95f",
+      "entrypoint": "echo"
+    },
+    "python": {
+      "path": "/tools/python.webc",
+      "package": "python/python@3.13.20",
+      "sha256": "a9fa8202f1bf6a4eca8d31ee5f2b1970c8f45af5c5520cc954d28a133333d8e7",
+      "entrypoint": "python"
+    }
+  }
+}

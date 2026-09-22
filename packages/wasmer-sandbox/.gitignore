@@ -1,0 +1,8 @@
+!package-lock.json
+runner/target/
+test/guest.wasm
+test/artifacts/
+example/.dev.vars
+tools/
+service/config.json
+example/wrangler.production.json

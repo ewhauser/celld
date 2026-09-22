@@ -1,0 +1,21 @@
+✔ sparse writes, truncate growth, shrink/regrowth and EOF preserve byte positions (1.96874ms)
+✔ append is atomic, handles survive rename, open unlink/replacement fails safely (2.065641ms)
+✔ path confinement, type checks, directory cycles, exclusivity and handle rights (0.872986ms)
+✔ quota failures roll back an entire operation; independent instances preserve AgentFS schema (0.702481ms)
+✔ random offset operations match an independent dense byte model (10.439733ms)
+✔ command replay/conflict, single writer, sequenced callbacks, stale tokens and durable terminal result (18.184156ms)
+✔ unknown completion remains interrupted across activation and is never automatically rerun (1.34753ms)
+✔ deadlock guard runs before any hash, mutation or launch (0.496259ms)
+✔ invalid configuration and oversized/invalid input fail closed (0.410694ms)
+✔ replay survives removal of its former working directory (2.178838ms)
+✔ command transport bounds count UTF-8 bytes and preserve special environment keys (0.632254ms)
+✔ cancellation during the pre-launch durability barrier never starts a guest (0.785671ms)
+✔ supervisor authenticates, pins modules, bounds admission, cancels and deduplicates (162.699894ms)
+ℹ tests 13
+ℹ suites 0
+ℹ pass 13
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 394.231149

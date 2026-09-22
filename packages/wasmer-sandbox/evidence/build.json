@@ -1,0 +1,77 @@
+{
+  "baseline": "c91ca5436db5974e17b9a8abb3d216fe35737831",
+  "state": "local uncommitted implementation; images not pushed",
+  "qualificationDate": "2026-09-22",
+  "host": {
+    "os": "Darwin",
+    "architecture": "arm64",
+    "node": "v26.5.0",
+    "rust": "rustc 1.97.0 (2d8144b78 2026-07-07) (Homebrew)"
+  },
+  "linux": {
+    "architecture": "arm64",
+    "runnerBuild": "Rust 1.97.1, release",
+    "celldBuild": "Rust 1.97.1, lab profile",
+    "memoryBytes": 2147483648,
+    "nanoCPUs": 2000000000,
+    "pidLimit": 256,
+    "user": "sandbox",
+    "readOnlyRootfs": true,
+    "capDrop": [
+      "ALL"
+    ],
+    "securityOpt": [
+      "no-new-privileges"
+    ],
+    "exitCode": 0,
+    "oomKilled": false
+  },
+  "images": {
+    "celld-wasmer-sandbox:qualification": "sha256:8fefcfd175fc1cfff404430e01e4a7139c8a911285e5ed0b5ca35abe1c2ac106",
+    "celld-wasmer-linux-tests:qualification": "sha256:ef1f25c9b2c65ae59dc59324f8224f6e47f8b4da6e6baab3f47cf45cf6d35615",
+    "celld-wasmer-runtime:qualification": "sha256:5959aa96f42df05f5c6ca1616bd80459a605fbcc26eeec58fe26ab36f0d301b2"
+  },
+  "tests": {
+    "typescript": 13,
+    "rust": 4,
+    "linuxIntegration": 10,
+    "macosIntegration": 10,
+    "fleetFaults": 3
+  },
+  "sourceSha256": {
+    ".github/workflows/wasmer-sandbox.yml": "06bcf7d59fcb638fed289955340e2141e1b883d7991020c9e08834a45e9358e4",
+    "crates/celld/js/harness.js": "7ee32e63b2b964f52b57413b7a1396928df6bdb34db92dcfd20a40da92976869",
+    "packages/wasmer-sandbox/Dockerfile": "f5992b8e81af4604bd3ccfb2395b45ef0e9a538a38fd1c049621fe4e6aaa32b2",
+    "packages/wasmer-sandbox/package-lock.json": "482eae118307bb2a08d235f5989e80630b8af7e1b7f0fbb0b32c7a15da10222d",
+    "packages/wasmer-sandbox/package.json": "f1bfbe62c8e59d3a91d4421af534a99e1fc4af79e689b16cf9151dff7c67733d",
+    "packages/wasmer-sandbox/runner/Cargo.lock": "0f44d90e1c92e04d00073fa596d8395e54f2f7d6dfba9fe9f9ada49ea8f609f3",
+    "packages/wasmer-sandbox/runner/Cargo.toml": "f7865c04e0bad6c0b53062c5d2e17ec2c88e774516f19c6b85cf210450049a84",
+    "packages/wasmer-sandbox/runner/src/main.rs": "055a86d7d4e6aa15b9f0e0e731581daf4140a385484d74363e3c9e960f22a6c5",
+    "packages/wasmer-sandbox/runner/src/memory.rs": "ce140869eb75877415a7133c23e3ac9471dfd07af2b730dd78874a86fd96c7de",
+    "packages/wasmer-sandbox/runner/src/output.rs": "971c0f63653cd8bd6ff22a4b188e199db8f531218e8cdac1a49bf434970df599",
+    "packages/wasmer-sandbox/runner/src/packages.rs": "d36f2d809b71f565966582abdaa6f4c2b114bf9d5e4b2577f0e2b192bfe6fffb",
+    "packages/wasmer-sandbox/runner/src/policy.rs": "1856df3f63eb7072b57e6965603b2e88412b657373774ff3239f7f97d716884f",
+    "packages/wasmer-sandbox/runner/src/remote.rs": "7dae1b6a27dc7e4c2b893c79504e08d5b30f9f084a807f3adc9215716e568af8",
+    "packages/wasmer-sandbox/service/compose.yaml": "c8e8906e992d2c8b3b03d7e85c72870966f7070d44d484f51546b4ecf7caa5bf",
+    "packages/wasmer-sandbox/service/config.example.json": "065d7046aa29549103795b4427c585307d6e5700c05aad8fc2a62bbb30a53a15",
+    "packages/wasmer-sandbox/service/fetch-tools.mjs": "530ae98fe68b54be6ce3ab193ad88094bc37ac997a6bac2384e6230b05f78ee9",
+    "packages/wasmer-sandbox/service/main.mjs": "bf1712e6a4f110239f9b818b3ea369d5f5252ffe3615f327f63a194f477e9267",
+    "packages/wasmer-sandbox/service/server.mjs": "45629edf96000424bde075e6be27d77814bdef62c3d30bf63ed02bcd1ade721d",
+    "packages/wasmer-sandbox/service/tools.lock.json": "1b1b1d9603c2c358b616185eb42cedae7d3969acd758ab13add8e201610fbb07",
+    "packages/wasmer-sandbox/src/filesystem.ts": "5ae72940988daef11bf4ebbf34428b811bea8a65e1c32d3c0024171b7ede6fc9",
+    "packages/wasmer-sandbox/src/index.ts": "b8daeae5f581914db9959b51e3e0e0e8dc5798c4fefba1b2bc9f663f922507bf",
+    "packages/wasmer-sandbox/src/protocol.ts": "71eb4a16682d4aabbb836e013af6e98480ecee32a92f901eb3e4b43806e44452",
+    "packages/wasmer-sandbox/src/storage.ts": "763bacd05af70dc607847c6979d80049365325c498b822dda2e83007277fb0dc",
+    "packages/wasmer-sandbox/src/worker.ts": "42f2c0cdc80ab8ad84aeecc58fc76842573c2bc4238379ff2c8709c013a9f2f8",
+    "packages/wasmer-sandbox/test/Linux.Dockerfile": "d8f86919272ee2de4fb4eaef6a5eec913f483a8885159e6850ef414bb09d6afe",
+    "packages/wasmer-sandbox/test/Linux.Dockerfile.dockerignore": "9d085d8a61f8d0c6273fdc30dd1c73e84e3da5b5411461f7f512b4b0d89c7440",
+    "packages/wasmer-sandbox/test/filesystem.test.ts": "7a1f174a3d4b0a0682e8342e2bc31334a8a626229457e3dd55322b8f1ffdf132",
+    "packages/wasmer-sandbox/test/fleet.mjs": "5fa0c85ab953ea7efc3ed5fadd290301a19e18ebc279c375cab10880d18057f2",
+    "packages/wasmer-sandbox/test/guest.rs": "751cbd56faf2e16b098caa56e0dc0460ae67c11886ce11f026ccbaa5612efbb2",
+    "packages/wasmer-sandbox/test/guest.wasm": "1bc1b216549aa83aef0ea136ad796eacf47e624bc527973f63b070b2e1436687",
+    "packages/wasmer-sandbox/test/integration.mjs": "3fc1c22374d6bb615e4ed768767a966f3855d1c3497caed21bbff45e6a1a0678",
+    "packages/wasmer-sandbox/test/sandbox.test.ts": "e3c8f3ef42df517351176ed2b27b974e2df9423b316a8d331ca070c2a2b4eaea",
+    "packages/wasmer-sandbox/test/storage.ts": "4a6aa8e0a242f463af9029f78819ee129a3190ca5557878edd28e49d6f7c5fe5",
+    "packages/wasmer-sandbox/test/supervisor.test.ts": "d11fb5ff8a7b315decaf6e048cc063d59956a4ae98828e70dbc4a1eeb0d2b0d8"
+  }
+}

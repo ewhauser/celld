@@ -1,0 +1,60 @@
+name: Wasmer sandbox qualification
+on:
+  pull_request:
+    paths: ["packages/wasmer-sandbox/**", "crates/celld/js/harness.js", ".github/workflows/wasmer-sandbox.yml"]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  qualification:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 60
+    env:
+      CARGO_BUILD_JOBS: 3
+      CELLD_BIN: ${{ github.workspace }}/target/debug/celld
+      CELLD_WASMER_RUNNER: ${{ github.workspace }}/packages/wasmer-sandbox/runner/target/debug/celld-wasmer-runner
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: "24.12.0"
+      - name: Toolchain
+        run: |
+          rustup toolchain install 1.97.1 --profile minimal --component clippy --component rustfmt --target wasm32-wasip1
+          rustup default 1.97.1
+      - name: Build and unit checks
+        run: |
+          set -euo pipefail
+          cargo build --locked -p celld
+          cd packages/wasmer-sandbox
+          npm ci --ignore-scripts
+          npm run check
+          npm run format:check
+          npm test
+          cargo fmt --manifest-path runner/Cargo.toml --check
+          cargo clippy --locked --all-targets --manifest-path runner/Cargo.toml -- -D warnings
+          cargo test --locked --manifest-path runner/Cargo.toml
+          cargo build --locked --manifest-path runner/Cargo.toml
+          rustc --target wasm32-wasip1 -O test/guest.rs -o test/guest.wasm
+      - name: Fetch pinned qualification tools
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/wasmer"
+          curl --fail --location --retry 3 https://github.com/wasmerio/wasmer/releases/download/v7.4.2/wasmer-linux-amd64.tar.gz -o "$RUNNER_TEMP/wasmer/cli.tar.gz"
+          echo "07271f7ecf449135bbd44cfe9f38a65e54ab25f1564a9c6bd2d0d5cca5743963  $RUNNER_TEMP/wasmer/cli.tar.gz" | sha256sum --check
+          tar -xzf "$RUNNER_TEMP/wasmer/cli.tar.gz" -C "$RUNNER_TEMP/wasmer"
+          cd packages/wasmer-sandbox
+          WASMER_BIN="$RUNNER_TEMP/wasmer/bin/wasmer" node service/fetch-tools.mjs tools
+      - name: Real runtime and tool integration
+        working-directory: packages/wasmer-sandbox
+        run: SANDBOX_TEST_TOOLS="$PWD/tools/tools.json" npm run test:integration
+      - name: Three-node durability and fencing
+        working-directory: packages/wasmer-sandbox
+        run: npm run test:fleet
+      - name: Retain non-secret results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: wasmer-sandbox-results
+          path: packages/wasmer-sandbox/test/artifacts/**/results.json
+          if-no-files-found: warn

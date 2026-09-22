@@ -1750,6 +1750,7 @@ class DurableObjectStorage {
       return root._activeTransaction.transactionSync(f);
     const savepoint = this._transactionStart();
     const control = this._newTransactionControl(savepoint);
+    root._synchronousCallbackDepth = (root._synchronousCallbackDepth || 0) + 1;
     try {
       const value = f(this._transactionView(control));
       if (!control.rolledBack) {
@@ -1767,6 +1768,8 @@ class DurableObjectStorage {
         }
       }
       throw error;
+    } finally {
+      root._synchronousCallbackDepth--;
     }
   }
   _newTransactionControl(savepoint) {
@@ -2524,6 +2527,17 @@ class DurableObjectState {
   // Workerd's DurableObjectState.exports (actor-state.h): the same
   // loopback surface as ctx.exports on stateless entrypoints.
   get exports() { return __ctxExports(); }
+  // celld extension for backends that call this cell while a method awaits
+  // them (for example the Wasmer filesystem service). A closed input gate or
+  // live transaction would deadlock those callbacks or include guest writes
+  // in an application transaction. Check before the first asynchronous step.
+  assertCanAwaitCallback() {
+    const root = this.storage._transactionRoot;
+    if (this._blockDepth > 0 || root._synchronousCallbackDepth > 0 ||
+        root._activeTransaction !== null) {
+      throw new Error("Cannot await cell callbacks inside a storage transaction or blockConcurrencyWhile()");
+    }
+  }
   blockConcurrencyWhile(f) {
     // The native context binds the gate and its operations to one driver.
     // Its async continuations keep that driver even inside a foreign turn.

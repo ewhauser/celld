@@ -1,0 +1,15 @@
+{
+  "name": "celld-agentfs-wasmer-probe",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "node run.mjs"
+  },
+  "dependencies": {
+    "agentfs-sdk": "0.6.4",
+    "buffer": "6.0.3"
+  },
+  "devDependencies": {
+    "esbuild": "0.25.12"
+  }
+}
