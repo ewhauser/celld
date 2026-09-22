@@ -2,35 +2,29 @@
 import { DurableObject } from "cloudflare:workers";
 import { Buffer } from "buffer";
 import { WasmerSandbox } from "./index.ts";
-import { boundedJSON, identifier } from "./protocol.ts";
+import { boundedJSON } from "./protocol.ts";
 import { check } from "./storage.ts";
 
-export interface Env {
-  SANDBOX_NATIVE_FILESYSTEM?: string;
-  WORKSPACES: any;
-  SANDBOX_API_TOKEN: string;
-  SANDBOX_CALLBACK_TOKEN?: string;
+import { authorizedWorkspace, type AuthorizationEnv } from "./authorization.ts";
+
+export interface Env extends AuthorizationEnv {
   SANDBOX_SUPERVISOR_TOKEN: string;
   SANDBOX_SUPERVISOR_URL: string;
-}
-function auth(request: Request, expected: string | undefined) {
-  check(typeof expected === "string" && expected.length >= 32, "ECONFIG");
-  // Tokens stay within authenticated TLS or loopback. Do not use this shared
-  // service token as end-user authorization: apply your tenant policy upstream.
-  check(request.headers.get("authorization") === `Bearer ${expected}`, "EAUTH");
 }
 export function errorResponse(error: unknown): Response {
   const e = error as { code?: string; message?: string };
   const status =
-    e.code === "EAUTH"
-      ? 401
-      : e.code === "ENOENT"
-        ? 404
-        : ["EBUSY", "ECONFLICT", "ESTALE"].includes(e.code ?? "")
-          ? 409
-          : e.code === "ENOSPC"
-            ? 507
-            : 400;
+    e.code === "ECONFIG"
+      ? 503
+      : e.code === "EAUTH"
+        ? 401
+        : e.code === "ENOENT"
+          ? 404
+          : ["EBUSY", "ECONFLICT", "ESTALE"].includes(e.code ?? "")
+            ? 409
+            : e.code === "ENOSPC"
+              ? 507
+              : 400;
   return Response.json(
     { code: e.code ?? "EINVAL", error: e.message ?? "invalid request" },
     { status, headers: { "cache-control": "no-store" } },
@@ -56,17 +50,9 @@ export class SandboxWorkspace extends DurableObject {
       check(
         parts.length === 5 && parts[1] === "v1" && parts[2] === "workspaces",
       );
-      const workspace = identifier(parts[3]),
-        action = parts[4];
-      const env = this.env as Env;
-      auth(
-        request,
-        action === "fs" ? env.SANDBOX_CALLBACK_TOKEN : env.SANDBOX_API_TOKEN,
-      );
-      const id = /^[a-f0-9]{64}$/.test(workspace)
-        ? env.WORKSPACES.idFromString(workspace)
-        : env.WORKSPACES.idFromName(workspace);
-      check(id.toString() === this.ctx.id.toString(), "ECONFLICT");
+      const action = parts[4];
+      const id = await authorizedWorkspace(request, this.env);
+      check(id.toString() === this.ctx.id.toString(), "EAUTH");
       if (action === "fs") return this.sandbox.callback(request);
       check(request.method === "POST");
       const body = await boundedJSON(request, 2 * 1024 * 1024);
@@ -135,16 +121,7 @@ export async function routeWorkspace(
   env: Env,
 ): Promise<Response> {
   try {
-    const p = new URL(request.url).pathname.split("/");
-    check(p.length === 5 && p[1] === "v1" && p[2] === "workspaces");
-    const workspace = identifier(p[3]);
-    auth(
-      request,
-      p[4] === "fs" ? env.SANDBOX_CALLBACK_TOKEN : env.SANDBOX_API_TOKEN,
-    );
-    const id = /^[a-f0-9]{64}$/.test(workspace)
-      ? env.WORKSPACES.idFromString(workspace)
-      : env.WORKSPACES.idFromName(workspace);
+    const id = await authorizedWorkspace(request, env);
     return env.WORKSPACES.get(id).fetch(request);
   } catch (e) {
     return errorResponse(e);

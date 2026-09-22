@@ -46,7 +46,9 @@ Configure these Worker bindings through your normal deployment process:
 
 | Binding | Value |
 | --- | --- |
-| `SANDBOX_API_TOKEN` | A random service API token, at least 32 characters |
+| `SANDBOX_AUTH_ISSUER` | Exact trusted credential issuer |
+| `SANDBOX_AUTH_AUDIENCE` | Exact sandbox API audience |
+| `SANDBOX_AUTH_JWKS` | JSON public JWKS, pinned by the operator; ES256 signing keys only |
 | `SANDBOX_SUPERVISOR_TOKEN` | A distinct random Worker-to-executor token |
 | `SANDBOX_SUPERVISOR_URL` | The owning node's local executor, usually `http://127.0.0.1:19877` |
 | `WORKSPACES` | Durable Object namespace for `SandboxWorkspace` |
@@ -86,24 +88,65 @@ untrusted production traffic. Pin your built image by digest when deploying it.
 
 ## Use the HTTP API
 
-Paths use `/v1/workspaces/<workspace>/<action>`. A workspace is an agent name
-matching `[A-Za-z0-9_-]{1,128}`, or an actual 64-character lowercase hexadecimal
-Durable Object ID. Names resolve through `idFromName`; hexadecimal IDs use
-`idFromString`. Reserve hexadecimal names for IDs. All actions use POST and
-`Authorization: Bearer <SANDBOX_API_TOKEN>`. This is an internal service API;
-apply tenant/user authorization before forwarding requests from your product.
+Paths use `/v1/workspaces/<workspace>/<action>`. The workspace is an alias
+matching `[A-Za-z0-9_-]{1,128}`. All actions use POST and
+`Authorization: Bearer <AGENT_TOKEN>`, a signed credential for exactly one
+tenant, agent and workspace. Hexadecimal aliases have no special meaning:
+callers cannot select a Durable Object by its raw ID.
+
+The trusted application control plane authenticates its caller, checks who may
+act as the requested agent, and issues a short-lived ES256 JWT. Keep its private
+key outside celld, the executor and agent environments. This package verifies
+credentials with `jose`; it does not provide an identity provider or a public
+credential-minting endpoint. Never mint from caller-provided tenant/agent claims
+without your application's ownership check.
+
+Required protected header: `alg: ES256`, `typ: sandbox-agent+jwt`, and `kid`.
+Required claims: exact `iss` and `aud`, `tenant`, `sub` (the agent ID),
+`workspace` (the exact path alias), integer `iat` and `exp`. Tenant and agent IDs
+use the same identifier syntax as aliases. Tokens must expire after issuance,
+within 300 seconds, and have an age no greater than 300 seconds. Future issuance,
+expired tokens and a future `nbf` are rejected, with no clock tolerance. Keep
+clocks synchronized. Each JWKS key needs a unique `kid`, `kty: EC`, `crv: P-256`,
+`alg: ES256`, `use: sig`, and public `x`/`y`; private key material is rejected.
+JWKS URLs or keys supplied by a token are never fetched or trusted.
+
+Both the router and the Durable Object verify the token and derive the object
+name from the unambiguous tuple `["sandbox-agent-v1", issuer, tenant, agent,
+workspace]`. A direct request to a different object fails authorization.
+All file actions, command execution, results/status and cancellation use this
+same check. Identity headers, body fields and raw IDs do not override it.
+A credential grants all supported actions within that one workspace. Sharing
+one agent identity intentionally shares its workspace; issue distinct identities
+for agents that must not share. Credentials are bearer secrets: use TLS outside
+loopback, avoid logging them, and never pass control-plane credentials to guests.
+
+To rotate keys, deploy overlapping public keys under distinct `kid` values,
+start signing with the new key, then remove the old key after its credentials
+expire. Each request uses current Worker configuration, with no remote key cache.
+Removing a key blocks new requests signed by it; it does not stop already
+admitted commands. Token expiry likewise governs admission, not command lifetime.
+
+This is a breaking authorization change. `SANDBOX_API_TOKEN` no longer grants
+access, and unscoped legacy object names/IDs are not adopted. Existing workspaces
+require an administrator-controlled offline migration that explicitly maps each
+old object to its tenant/agent/workspace; this change provides no automatic data
+migration. Keep the issuer stable because it is part of workspace identity.
+Missing/invalid auth configuration fails closed (503); invalid credentials or
+scope fail with a generic 401. Install the new public-key bindings and update
+clients to obtain fresh credentials before switching traffic.
 
 ```sh
 curl "$WORKER/v1/workspaces/agent-42/write" \
-  -H "Authorization: Bearer $SANDBOX_API_TOKEN" -H 'Content-Type: application/json' \
+  -H "Authorization: Bearer $AGENT_TOKEN" -H 'Content-Type: application/json' \
   -d '{"path":"/workspace/input.txt","data":"aGVsbG8K"}'
 
 curl "$WORKER/v1/workspaces/agent-42/exec" \
-  -H "Authorization: Bearer $SANDBOX_API_TOKEN" -H 'Content-Type: application/json' \
+  -H "Authorization: Bearer $AGENT_TOKEN" -H 'Content-Type: application/json' \
   -d '{"id":"job-001","tool":"bash","args":["-c","cat input.txt | wc -c"],"cwd":"/workspace","timeoutMs":30000}'
 
 curl "$WORKER/v1/workspaces/agent-42/status" \
-  -H "Authorization: Bearer $SANDBOX_API_TOKEN" -H 'Content-Type: application/json' \
+  -H "Authorization: Bearer $AGENT_TOKEN" -H 'Content-Type: application/json' \
   -d '{"id":"job-001"}'
 ```
 
@@ -120,6 +163,14 @@ Other actions: `read`/`write` (`{path,data}` with base64 data), `stat`, `list`,
 `{data}` in base64. Read/write convenience operations are limited to 1 MiB;
 guest file descriptors support larger files in bounded chunks. `/fs` is reserved for the explicit HTTP reference backend. IPC mode rejects
 filesystem callbacks; the helper is not given an HTTP filesystem URL or token.
+The HTTP reference backend requires `SANDBOX_NATIVE_FILESYSTEM=0` and a separate
+`SANDBOX_CALLBACK_TOKEN` of at least 32 characters. Its `/fs` route accepts only
+raw object IDs plus that internal credential, followed by the existing active
+execution token/sequence checks. Agent JWTs cannot use it; callback and supervisor
+tokens cannot authorize agent API actions. Keep this reference surface internal
+and its tokens out of agents. Trusted Worker code, fleet administrators and the
+credential issuer remain inside the trust boundary; arbitrary untrusted Worker
+JavaScript is not isolated by this API authorization layer.
 
 ## Use TypeScript inside the agent's Durable Object
 

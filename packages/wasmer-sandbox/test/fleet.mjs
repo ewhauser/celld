@@ -16,6 +16,7 @@ import { fileURLToPath } from "node:url";
 import { once } from "node:events";
 import { randomBytes, createHash } from "node:crypto";
 import assert from "node:assert/strict";
+import { authFixture } from "./auth-fixture.mjs";
 import { createSupervisor } from "../service/server.mjs";
 const dir = resolve(dirname(fileURLToPath(import.meta.url)), ".."),
   repo = resolve(dir, "../..");
@@ -24,6 +25,7 @@ await mkdir(work, { recursive: true });
 const name = `celld-wasmer-fleet-${Date.now()}`,
   port = Number(process.env.SANDBOX_FLEET_PORT ?? 19970),
   s3port = port + 2;
+const auth = await authFixture();
 const token = randomBytes(32).toString("hex"),
   url = `http://127.0.0.1:${port}`,
   endpoint = `http://127.0.0.1:${s3port}`;
@@ -59,7 +61,8 @@ const nodes = [];
 let supervisor,
   proxy,
   paused = false,
-  oldToken;
+  oldToken,
+  workspaceId;
 const evidence = { date: new Date().toISOString(), checks: [], states: [] };
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 function docker(...args) {
@@ -69,12 +72,17 @@ function docker(...args) {
   }).trim();
 }
 async function post(action, body = {}, timeout = 30000) {
-  return fetch(url + "/v1/workspaces/test/" + action, {
-    method: "POST",
-    headers: { authorization: `Bearer ${token}` },
-    body: JSON.stringify(body),
-    signal: AbortSignal.timeout(timeout),
-  });
+  return fetch(
+    url + `/v1/workspaces/${action === "fs" ? workspaceId : "test"}/` + action,
+    {
+      method: "POST",
+      headers: {
+        authorization: `Bearer ${action === "fs" ? token : await auth.sign()}`,
+      },
+      body: JSON.stringify(body),
+      signal: AbortSignal.timeout(timeout),
+    },
+  );
 }
 async function call(action, body, timeout) {
   const r = await post(action, body, timeout),
@@ -162,7 +170,7 @@ try {
       },
       migrations: [{ tag: "v1", new_sqlite_classes: ["SandboxWorkspace"] }],
       vars: {
-        SANDBOX_API_TOKEN: token,
+        ...auth.vars,
         SANDBOX_NATIVE_FILESYSTEM: "0", // The shared executor is a remote HTTP reference backend.
         SANDBOX_CALLBACK_TOKEN: token,
         SANDBOX_SUPERVISOR_TOKEN: token,
@@ -173,11 +181,12 @@ try {
   await writeFile(
     resolve(work, "worker.ts"),
     `import {SandboxWorkspace as Base,routeWorkspace} from ${JSON.stringify(resolve(dir, "src/worker.ts"))};
+import {authorizedWorkspace} from ${JSON.stringify(resolve(dir, "src/authorization.ts"))};
 export class SandboxWorkspace extends Base {
  async fetch(req) {
   const action=new URL(req.url).pathname.split('/').pop();
   if(['native-register','native-mutate'].includes(action)) {
-   if(req.headers.get('authorization')!==${JSON.stringify(`Bearer ${token}`)})return new Response('',{status:401});
+   if((await authorizedWorkspace(req,this.env)).toString()!==this.ctx.id.toString())return new Response('',{status:401});
    const body=await req.json();
    if(action==='native-register') { this.ctx.agentFsOperation({op:'configure',limits:{maxBytes:67108864,maxFileBytes:16777216,maxInodes:4096,maxHandles:128}}); return Response.json({scope:this.ctx.agentFsCapability(body.token,Date.now()+120000)}); }
    this.sandbox.fs.writeFile('/workspace/native-gate', new Uint8Array(13));
@@ -243,6 +252,7 @@ export default {fetch:routeWorkspace};`,
       req.on("data", (b) => (s += b));
       req.on("end", () => {
         oldToken = JSON.parse(s).token;
+        workspaceId = JSON.parse(s).workspace;
       });
     }
   });

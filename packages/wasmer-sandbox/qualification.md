@@ -178,3 +178,25 @@ Handle lifecycle operations are rejected inside outer SQL transactions; pathname
 mutations support nested rollback. Capabilities currently exclude embedded facets.
 See the native filesystem document for the complete contract and the deployment
 boundary above for remaining target-environment qualification.
+
+## Per-agent API authorization (2026-09-22)
+
+Stage 1 replaces shared API credentials with verified ES256 credentials scoped
+by issuer, tenant, agent and workspace. Both the router and Durable Object verify
+requests. Broad internal tokens cannot authorize file, execution, result or cancel
+operations. See [configuration and migration](README.md#use-the-http-api).
+
+[Retained authorization evidence](evidence/agent-authorization.json): 20 unit tests,
+17 native IPC integration checks, 12 HTTP reference integration checks and six
+three-node fault checks passed locally on macOS arm64. Type checking, formatting
+and whitespace checks passed. The integration suites include all-action direct
+object and raw-ID bypass attempts, tenant/agent separation, forged and expired
+credentials, private command results, identical command IDs and unauthorized
+cancellation of a running command. Their test-only direct-object adapter is not
+part of the production Worker.
+
+The existing celld/runner binaries and a guest artifact with matching source were
+reused. No Rust runtime code was changed by this authorization stage. Linux CI
+already runs these suites but has not run for this change. This evidence covers
+API access control, not adversarial OS isolation or arbitrary untrusted Worker
+code. The issuer's application ownership checks remain a deployment prerequisite.

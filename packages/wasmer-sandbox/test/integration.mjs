@@ -14,6 +14,7 @@ import { resolve, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { createHash, randomBytes } from "node:crypto";
 import assert from "node:assert/strict";
+import { authFixture } from "./auth-fixture.mjs";
 import { createSupervisor } from "../service/server.mjs";
 const dir = resolve(dirname(fileURLToPath(import.meta.url)), ".."),
   repo = resolve(dir, "../..");
@@ -26,6 +27,9 @@ const socketDir = nativeFilesystem
   : undefined;
 if (socketDir) await chmod(socketDir, 0o700);
 const socketPath = socketDir && resolve(socketDir, "fs.sock");
+const auth = await authFixture();
+const agentToken = await auth.sign();
+let workspaceId;
 const token = randomBytes(32).toString("hex"),
   callbackToken = randomBytes(32).toString("hex");
 const port = Number(process.env.SANDBOX_TEST_PORT ?? 19876),
@@ -86,7 +90,7 @@ await writeFile(
     migrations: [{ tag: "v1", new_sqlite_classes: ["Workspace"] }],
     vars: {
       SANDBOX_NATIVE_FILESYSTEM: nativeFilesystem ? "1" : "0",
-      SANDBOX_API_TOKEN: token,
+      ...auth.vars,
       SANDBOX_CALLBACK_TOKEN: callbackToken,
       SANDBOX_SUPERVISOR_TOKEN: token,
       SANDBOX_SUPERVISOR_URL: `http://127.0.0.1:${helperPort}`,
@@ -98,11 +102,12 @@ await writeFile(
   `
 import { SandboxWorkspace,routeWorkspace } from ${JSON.stringify(resolve(dir, "src/worker.ts"))};
 import { WasmerSandbox } from ${JSON.stringify(resolve(dir, "src/index.ts"))};
+import { authorizedWorkspace } from ${JSON.stringify(resolve(dir, "src/authorization.ts"))};
 export class Workspace extends SandboxWorkspace {
  async fetch(req) {
   const action=new URL(req.url).pathname.split('/').pop();
   if(['bench','native-register','native-revoke','native-busy','native-app-checks','native-app-close'].includes(action)) {
-   if(req.headers.get('authorization')!==${JSON.stringify(`Bearer ${token}`)})return new Response('',{status:401});
+   if((await authorizedWorkspace(req,this.env)).toString()!==this.ctx.id.toString())return new Response('',{status:401});
    const body=await req.json();
    if(action==='native-app-checks') {
     const fs=this.sandbox.fs;
@@ -123,7 +128,7 @@ export class Workspace extends SandboxWorkspace {
    finally {this.sandbox=prior;}
   }
   if(new URL(req.url).pathname.endsWith('/guard')) {
-   if(req.headers.get('authorization')!==${JSON.stringify(`Bearer ${token}`)})return new Response('',{status:401});
+   if((await authorizedWorkspace(req,this.env)).toString()!==this.ctx.id.toString())return new Response('',{status:401});
    const capture=async()=>{try{await this.sandbox.exec({id:'guard',tool:'guest'});return 'UNEXPECTED';}catch(e){return e.message;}};
    const a=await this.ctx.storage.transactionSync(capture);
    const b=await this.ctx.storage.transaction(capture);
@@ -133,7 +138,12 @@ export class Workspace extends SandboxWorkspace {
   return super.fetch(req);
  }
 }
-export default {fetch:routeWorkspace};`,
+export default {async fetch(req,env) {
+ const u=new URL(req.url),p=u.pathname.split('/');
+ if(p[1]==='__auth-id') {try{return Response.json({id:(await authorizedWorkspace(new Request(new URL('/v1/workspaces/test/list',u),req),env)).toString()});}catch{return new Response('',{status:401});}}
+ if(p[1]==='__direct') {const target=p[2];u.pathname='/v1/workspaces/'+p[3]+'/'+p[4];return env.WORKSPACES.get(env.WORKSPACES.idFromString(target)).fetch(new Request(u,req));}
+ return routeWorkspace(req,env);
+}};`,
 );
 let celld;
 const results = {
@@ -174,7 +184,7 @@ async function start() {
     try {
       const r = await fetch(url + "/v1/workspaces/test/list", {
         method: "POST",
-        headers: { authorization: `Bearer ${token}` },
+        headers: { authorization: `Bearer ${await auth.sign()}` },
         body: JSON.stringify({ path: "/workspace" }),
         signal: AbortSignal.timeout(500),
       });
@@ -208,13 +218,16 @@ async function stop() {
   }
   celld = null;
 }
-async function post(action, body = {}, key = token) {
-  return fetch(url + "/v1/workspaces/test/" + action, {
-    method: "POST",
-    headers: { authorization: `Bearer ${key}` },
-    body: JSON.stringify(body),
-    signal: AbortSignal.timeout(140000),
-  });
+async function post(action, body = {}, key = undefined) {
+  return fetch(
+    url + `/v1/workspaces/${action === "fs" ? workspaceId : "test"}/` + action,
+    {
+      method: "POST",
+      headers: { authorization: `Bearer ${key ?? (await auth.sign())}` },
+      body: JSON.stringify(body),
+      signal: AbortSignal.timeout(140000),
+    },
+  );
 }
 async function call(action, body) {
   const r = await post(action, body);
@@ -229,6 +242,25 @@ async function exec(id, args = [], extra = {}) {
 }
 try {
   await start();
+  workspaceId = (
+    await (
+      await fetch(url + "/__auth-id", {
+        headers: { authorization: `Bearer ${await auth.sign()}` },
+      })
+    ).json()
+  ).id;
+  const { authorizationChecks } = await import(
+    "./authorization-integration.mjs"
+  );
+  await authorizationChecks({
+    url,
+    auth,
+    agentToken,
+    workspaceId,
+    token,
+    callbackToken,
+    record,
+  });
   assert.equal((await post("list", { path: "/workspace" }, "bad")).status, 401);
   assert.equal(
     (
@@ -238,7 +270,7 @@ try {
         callbackToken,
       )
     ).status,
-    409,
+    nativeFilesystem ? 401 : 409,
   );
   record("unauthorized control and stale callbacks rejected");
   await call("write", {
@@ -474,7 +506,7 @@ try {
         callbackToken,
       )
     ).status,
-    409,
+    nativeFilesystem ? 401 : 409,
   );
   record(
     "owner process loss restores committed prefix, interrupts command and fences former execution",

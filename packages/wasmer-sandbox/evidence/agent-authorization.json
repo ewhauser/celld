@@ -1,0 +1,73 @@
+{
+  "date": "2026-09-22",
+  "platform": "macOS arm64",
+  "scope": "Stage 1 API authorization; no execution-isolation claim",
+  "unit_tests": 20,
+  "checks": {
+    "typecheck": "passed",
+    "prettier": "passed",
+    "git_diff_check": "passed"
+  },
+  "integration": {
+    "native_ipc": {
+      "checks": [
+        "real router and direct DO reject cross-agent IDs, aliases, headers and service credentials for every action",
+        "agent command results and identical command IDs are isolated; authorized execution works",
+        "cross-agent cancellation cannot interrupt another agent; own cancellation succeeds",
+        "unauthorized control and stale callbacks rejected",
+        "real DO/shared Wasmer sparse I/O, shrink/growth, append, rename, stdin/env/stdout/stderr",
+        "durable replay and payload conflict",
+        "real celld transactionSync, transaction and blockConcurrencyWhile deadlock guards",
+        "exit status, traps, host/network isolation, CPU timeout and bounded output",
+        "temporary quota rejects repeated/huge growth atomically and reclaims capacity",
+        "cancellation fences writes and preserves committed prefix",
+        "all native IPC filesystem operations: raw 64 KiB binary I/O, handles, sparse offsets, truncate, rename, directories, sync and heartbeat",
+        "native TypeScript rollback, transaction handle guard and app/guest handle isolation",
+        "native filesystem: persistent binary connection, metadata, path confinement, auth, ordering, input gate, expiry and revocation",
+        "native IPC rejects oversized, empty, unknown-version and truncated requests",
+        "LTX restore without the prior runtime directory",
+        "native capability is not resurrected by process restart or LTX restore",
+        "owner process loss restores committed prefix, interrupts command and fences former execution"
+      ],
+      "count": 17,
+      "source": "test/artifacts/run-1790116202607/results.json"
+    },
+    "http_reference": {
+      "checks": [
+        "real router and direct DO reject cross-agent IDs, aliases, headers and service credentials for every action",
+        "agent command results and identical command IDs are isolated; authorized execution works",
+        "cross-agent cancellation cannot interrupt another agent; own cancellation succeeds",
+        "unauthorized control and stale callbacks rejected",
+        "real DO/shared Wasmer sparse I/O, shrink/growth, append, rename, stdin/env/stdout/stderr",
+        "durable replay and payload conflict",
+        "real celld transactionSync, transaction and blockConcurrencyWhile deadlock guards",
+        "exit status, traps, host/network isolation, CPU timeout and bounded output",
+        "temporary quota rejects repeated/huge growth atomically and reclaims capacity",
+        "cancellation fences writes and preserves committed prefix",
+        "LTX restore without the prior runtime directory",
+        "owner process loss restores committed prefix, interrupts command and fences former execution"
+      ],
+      "count": 12,
+      "source": "test/artifacts/run-1790116175331/results.json"
+    },
+    "three_node_fleet": {
+      "checks": [
+        "filesystem write acknowledged while object store was paused",
+        "another owner restores acknowledged state after prior owner and disk loss",
+        "native IPC capability rejected on the new owner after prior owner and disk loss",
+        "suspended owner expires, takeover fences old execution, resumed owner self-fences",
+        "native write acknowledgement is withheld until bucket durability recovers",
+        "native read output is withheld while proof is unavailable and released after bucket recovery"
+      ],
+      "count": 6,
+      "source": "test/artifacts/fleet-1790116201439/results.json"
+    }
+  },
+  "runtime_assets": "Existing parent celld and Wasmer runner binaries; copied guest.wasm after guest.rs equality check. No Rust runtime changes in this stage.",
+  "limitations": [
+    "Local macOS validation; hosted Linux CI not run for this authorization change.",
+    "Trusted issuer must enforce agent ownership before minting credentials.",
+    "Existing workspace data requires explicit offline ownership mapping; no automatic migration.",
+    "Worker code, administrators, callback service and credential issuer remain trusted."
+  ]
+}
