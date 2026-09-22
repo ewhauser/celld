@@ -119,7 +119,7 @@ export class Workspace extends SandboxWorkspace {
     return Response.json({handle:fs.open('/workspace/app-handle',{read:true,write:true,create:true})});
    }
    if(action==='native-app-close') {this.sandbox.fs.fstat(body.handle);this.sandbox.fs.close(body.handle);return Response.json({ok:true});}
-   if(action==='native-register') return Response.json({scope:this.ctx.agentFsCapability(body.token, Date.now()+(body.ttl ?? 10000))});
+   if(action==='native-register') return Response.json({scope:this.ctx.agentFsCapability(body.token, Date.now()+(body.ttl ?? 10000), body.command ?? 'integration-test')});
    if(action==='native-revoke') {this.ctx.agentFsCapability(null);return Response.json({ok:true});}
    if(action==='native-busy') {await this.ctx.blockConcurrencyWhile(async()=>{await new Promise(r=>setTimeout(r,500));});return Response.json({ok:true});}
    const sandbox=new WasmerSandbox(this.ctx, {workspace:this.ctx.id.toString(),supervisorURL:this.env.SANDBOX_SUPERVISOR_URL,supervisorToken:this.env.SANDBOX_SUPERVISOR_TOKEN,nativeFilesystem:body.native});

@@ -143,6 +143,7 @@ export async function createSupervisor(config) {
         nativeFilesystem = {
           socket: config.filesystemSocket,
           scope: b.nativeFilesystemScope,
+          command: cmd.id,
         };
       }
       check(

@@ -16,7 +16,11 @@ export interface State {
   storage: Storage;
   assertCanAwaitCallback(): void;
   agentFsOperation?(operation: unknown, data?: Uint8Array): string | Uint8Array;
-  agentFsCapability?(token: string | null, deadline?: number): string;
+  agentFsCapability?(
+    token: string | null,
+    deadline?: number,
+    command?: string,
+  ): string;
 }
 export interface SandboxOptions {
   nativeFilesystem?: boolean;
@@ -193,6 +197,7 @@ export class WasmerSandbox {
         nativeScope = this.state.agentFsCapability(
           active.token,
           active.deadline,
+          active.id,
         );
       }
       await this.state.storage.sync();

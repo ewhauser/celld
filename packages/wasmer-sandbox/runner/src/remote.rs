@@ -17,6 +17,7 @@ use virtual_fs::{
 pub struct NativeFilesystem {
     pub socket: String,
     pub scope: String,
+    pub command: String,
 }
 #[derive(Debug)]
 struct NativeConnection {
@@ -89,6 +90,7 @@ impl Remote {
         let request = celld_agentfs_ipc::Request {
             scope: state.config.scope.clone(),
             token: self.token.clone(),
+            command: state.config.command.clone(),
             sequence: state.next,
             operation,
             data: data.to_vec(),
@@ -474,6 +476,7 @@ mod ipc_tests {
         remote.set_native_filesystem(Some(NativeFilesystem {
             socket: path.clone(),
             scope: "Workspace:test".into(),
+            command: "test-command".into(),
         }));
         for _ in 0..2 {
             assert_eq!(
@@ -506,6 +509,7 @@ mod ipc_tests {
         remote.set_native_filesystem(Some(NativeFilesystem {
             socket: path.clone(),
             scope: "Workspace:test".into(),
+            command: "test-command".into(),
         }));
         assert!(
             remote

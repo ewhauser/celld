@@ -2,12 +2,20 @@ import { createConnection } from "node:net";
 import { once } from "node:events";
 import assert from "node:assert/strict";
 import { performance } from "node:perf_hooks";
-function request(scope, token, sequence, operation, data = Buffer.alloc(0)) {
+import { randomBytes } from "node:crypto";
+function request(
+  scope,
+  token,
+  sequence,
+  operation,
+  data = Buffer.alloc(0),
+  command = "integration-test",
+) {
   const metadata = Buffer.from(
-    JSON.stringify({ scope, token, sequence, operation }),
+    JSON.stringify({ scope, token, command, sequence, operation }),
   );
   const header = Buffer.alloc(5);
-  header[0] = 2;
+  header[0] = 3;
   header.writeUInt32LE(metadata.length, 1);
   return Buffer.concat([header, metadata, data]);
 }
@@ -34,7 +42,7 @@ export async function connect(socketPath) {
     bytes = bytes.subarray(size + 4);
     const p = pending;
     pending = null;
-    assert.equal(body[0], 2);
+    assert.equal(body[0], 3);
     const n = body.readUInt32LE(1);
     p?.resolve({
       ...JSON.parse(body.subarray(5, 5 + n)),
@@ -58,13 +66,16 @@ export async function connect(socketPath) {
       sequence,
       operation = { op: "stat", path: "/workspace/input.txt" },
       data,
+      command,
     ) {
       if (typeof operation === "string")
         operation = { op: "stat", path: operation };
       assert.equal(pending, null);
       return new Promise((resolve, reject) => {
         pending = { resolve, reject };
-        socket.write(frame(request(scope, token, sequence, operation, data)));
+        socket.write(
+          frame(request(scope, token, sequence, operation, data, command)),
+        );
       });
     },
   };
@@ -83,13 +94,16 @@ export async function ipcChecks({ socketPath, call, post, token, record }) {
     (await client.call(scope, token, 3, "/workspace/../outside")).code,
     "EACCES",
   );
-  assert.equal((await client.call(scope, "wrong", 4)).code, "ESTALE");
+  const forged = await connect(socketPath);
+  assert.equal((await forged.call(scope, "wrong", 1)).code, "ESTALE");
+  forged.socket.destroy();
+  const competing = await connect(socketPath);
+  assert.equal((await competing.call(scope, token, 4)).code, "ESTALE");
+  competing.socket.destroy();
   assert.equal((await client.call(scope, token, 4)).code, undefined);
-  assert.equal((await client.call(scope, token, 4)).code, "ESTALE");
   // A closed input gate must not be bypassed by the native path.
   const busy = post("native-busy", {});
   await new Promise((r) => setTimeout(r, 100));
-  assert.equal((await client.call(scope, "wrong", 5)).code, "ESTALE");
   assert.equal((await client.call(scope, token, 5)).code, "EBUSY");
   assert.equal((await busy).status, 200);
   assert.equal((await client.call(scope, token, 5)).code, undefined);
@@ -157,8 +171,59 @@ export async function ipcChecks({ socketPath, call, post, token, record }) {
   record(
     "all native IPC filesystem operations: raw 64 KiB binary I/O, handles, sparse offsets, truncate, rename, directories, sync and heartbeat",
   );
-  await call("native-revoke", {});
-  assert.equal((await client.call(scope, token, 6)).code, "ESTALE");
+  const staleHandle = (
+    await fs({ op: "open", path: "/workspace/input.txt", read: true })
+  ).value.handle;
+  const switched = client.call(scope + "-other", token, seq);
+  await assert.rejects(switched, /IPC closed/);
+  const reconnect = await connect(socketPath);
+  assert.equal((await reconnect.call(scope, token, seq)).code, "ESTALE");
+  reconnect.socket.destroy();
+  record(
+    "native IPC binds one socket to one grant; disconnect revokes and reconnect fails",
+  );
+  const secondToken = randomBytes(32).toString("hex");
+  const second = await call("native-register", {
+    token: secondToken,
+    command: "second-command",
+  });
+  const wrongCommand = await connect(socketPath);
+  assert.equal(
+    (await wrongCommand.call(second.scope, secondToken, 1)).code,
+    "ESTALE",
+  );
+  wrongCommand.socket.destroy();
+  const secondClient = await connect(socketPath);
+  assert.equal(
+    (
+      await secondClient.call(
+        second.scope,
+        secondToken,
+        1,
+        { op: "fstat", handle: staleHandle },
+        undefined,
+        "second-command",
+      )
+    ).code,
+    "EBADF",
+  );
+  assert.equal(
+    (
+      await secondClient.call(
+        second.scope,
+        secondToken,
+        3,
+        { op: "heartbeat" },
+        undefined,
+        "second-command",
+      )
+    ).code,
+    "ESTALE",
+  );
+  secondClient.socket.destroy();
+  record(
+    "native IPC rejects cross-command handles, forged command IDs and out-of-order requests",
+  );
   client.socket.destroy();
   await call("native-app-close", app);
   record(
@@ -183,7 +248,7 @@ export async function ipcChecks({ socketPath, call, post, token, record }) {
   for (const bytes of [
     Buffer.from([255, 255, 255, 255]),
     Buffer.from([0, 0, 0, 0]),
-    frame(Buffer.from([2, 1])),
+    frame(Buffer.from([3, 1])),
     frame(Buffer.from([1])),
   ]) {
     const c = await connect(socketPath);

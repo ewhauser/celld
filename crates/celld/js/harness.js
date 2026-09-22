@@ -2536,9 +2536,9 @@ class DurableObjectState {
   agentFsOperation(operation, data) {
     return __agentfs_operation(this._scope, JSON.stringify(operation), data);
   }
-  agentFsCapability(token, deadline) {
+  agentFsCapability(token, deadline, command) {
     if (token != null) this.assertCanAwaitCallback();
-    __agentfs_capability(this._scope, token, deadline);
+    __agentfs_capability(this._scope, token, deadline, command);
     return this._scope;
   }
   assertCanAwaitCallback() {

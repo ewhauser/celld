@@ -188,7 +188,7 @@ export class SandboxWorkspace extends Base {
   if(['native-register','native-mutate'].includes(action)) {
    if((await authorizedWorkspace(req,this.env)).toString()!==this.ctx.id.toString())return new Response('',{status:401});
    const body=await req.json();
-   if(action==='native-register') { this.ctx.agentFsOperation({op:'configure',limits:{maxBytes:67108864,maxFileBytes:16777216,maxInodes:4096,maxHandles:128}}); return Response.json({scope:this.ctx.agentFsCapability(body.token,Date.now()+120000)}); }
+   if(action==='native-register') { this.ctx.agentFsOperation({op:'configure',limits:{maxBytes:67108864,maxFileBytes:16777216,maxInodes:4096,maxHandles:128}}); return Response.json({scope:this.ctx.agentFsCapability(body.token,Date.now()+120000,body.command ?? 'integration-test')}); }
    this.sandbox.fs.writeFile('/workspace/native-gate', new Uint8Array(13));
    console.log('NATIVE_GATE_WRITE_COMPLETE');
    await new Promise(r=>setTimeout(r,2000));
@@ -390,9 +390,13 @@ export default {fetch:routeWorkspace};`,
       (await c.call(nativeCapability.scope, nativeCapability.token, 2)).code,
       "ESTALE",
     );
+    c.socket.destroy();
+    const staleWrite = await connect(
+      resolve(socketDir, `${current.index}.sock`),
+    );
     assert.equal(
       (
-        await c.call(
+        await staleWrite.call(
           nativeCapability.scope,
           nativeCapability.token,
           2,
@@ -402,7 +406,7 @@ export default {fetch:routeWorkspace};`,
       ).code,
       "ESTALE",
     );
-    c.socket.destroy();
+    staleWrite.socket.destroy();
     pass(
       "native IPC capability rejected on the new owner after prior owner and disk loss",
     );

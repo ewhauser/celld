@@ -1260,7 +1260,8 @@ pub(super) fn op_agentfs_capability(
     }
     let token = args.get(1).to_rust_string_lossy(scope);
     let deadline = args.get(2).integer_value(scope).unwrap_or(0).max(0) as u64;
-    if let Err(error) = storage::agentfs_register(&cell, token, deadline) {
+    let command = args.get(3).to_rust_string_lossy(scope);
+    if let Err(error) = storage::agentfs_register(&cell, token, command, deadline) {
         throw_storage_error(scope, "AgentFS IPC register", error);
     }
 }

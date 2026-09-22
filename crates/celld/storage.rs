@@ -4751,11 +4751,21 @@ pub fn bump_alarm_with_policy(scope: &str, now_ms: i64, counts_against_limit: bo
 include!(env!("CELLD_INTERNAL_STORAGE_OBSERVERS"));
 
 /// Install a process-local, activation-bound capability; never persisted or restored.
-pub(crate) fn agentfs_register(scope: &str, token: String, deadline: u64) -> anyhow::Result<()> {
+pub(crate) fn agentfs_register(
+    scope: &str,
+    token: String,
+    command: String,
+    deadline: u64,
+) -> anyhow::Result<()> {
     anyhow::ensure!(!is_embedded(scope), "AgentFS IPC does not support facets");
     let now = crate::ownership_store::now_ms();
     anyhow::ensure!(
-        token.len() >= 32 && token.len() <= 128 && deadline > now && deadline - now <= 310_000,
+        token.len() >= 32
+            && token.len() <= 128
+            && !command.is_empty()
+            && command.len() <= 128
+            && deadline > now
+            && deadline - now <= 310_000,
         "invalid AgentFS IPC capability"
     );
     dbs(|dbs| {
@@ -4769,8 +4779,12 @@ pub(crate) fn agentfs_register(scope: &str, token: String, deadline: u64) -> any
         );
         cell.agentfs_capability = Some(crate::agentfs::Capability {
             token,
+            command,
+            epoch: cell.epoch,
             deadline,
             next: 1,
+            session: None,
+            allowed_operations: crate::agentfs::GUEST_OPERATIONS,
         });
         Ok(())
     })
@@ -4783,20 +4797,45 @@ pub(crate) fn agentfs_revoke(scope: &str) {
         }
     });
 }
-/// Authenticate before inspecting even the input gate or transaction state.
-pub(crate) fn agentfs_authorized(request: &celld_agentfs_ipc::Request) -> bool {
+/// A disconnected socket may only revoke the exact grant it bound. A newer
+/// command or owner activation must not be affected by delayed cleanup.
+pub(crate) fn agentfs_revoke_session(scope: &str, session: u64, epoch: u64) {
     dbs(|dbs| {
-        dbs.borrow()
-            .get(&request.scope)
-            .and_then(|cell| cell.agentfs_capability.as_ref())
-            .is_some_and(|cap| {
-                cap.validate(request, crate::ownership_store::now_ms())
-                    .is_ok()
+        if let Some(cell) = dbs.borrow_mut().get_mut(scope) {
+            if cell.epoch == epoch
+                && cell
+                    .agentfs_capability
+                    .as_ref()
+                    .is_some_and(|cap| cap.session == Some(session) && cap.epoch == epoch)
+            {
+                cell.agentfs_capability = None;
+                cell.agentfs_workspace.revoke();
+            }
+        }
+    });
+}
+/// Authenticate before inspecting even the input gate or transaction state.
+pub(crate) fn agentfs_authorized(
+    request: &celld_agentfs_ipc::Request,
+    session: u64,
+    epoch: u64,
+) -> bool {
+    dbs(|dbs| {
+        dbs.borrow_mut()
+            .get_mut(&request.scope)
+            .is_some_and(|cell| {
+                cell.epoch == epoch
+                    && cell.agentfs_capability.as_mut().is_some_and(|cap| {
+                        cap.bind(request, session, epoch, crate::ownership_store::now_ms())
+                            .is_ok()
+                    })
             })
     })
 }
 pub(crate) fn agentfs_operation(
     request: &celld_agentfs_ipc::Request,
+    session: u64,
+    epoch: u64,
 ) -> Result<celld_agentfs_ipc::Reply, celld_agentfs_ipc::Error> {
     use celld_agentfs_ipc::Error;
     require_sql_healthy(&request.scope).map_err(|_| Error::Io)?;
@@ -4806,7 +4845,7 @@ pub(crate) fn agentfs_operation(
         cell.agentfs_capability
             .as_mut()
             .ok_or(Error::Stale)?
-            .admit(request, crate::ownership_store::now_ms())?;
+            .admit(request, session, epoch, crate::ownership_store::now_ms())?;
         if !cell.connection.is_autocommit() {
             return Err(Error::Busy);
         }

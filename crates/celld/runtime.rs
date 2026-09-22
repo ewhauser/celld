@@ -2537,6 +2537,8 @@ impl RuntimeManager {
     pub async fn agentfs_operation(
         &self,
         request: &celld_agentfs_ipc::Request,
+        session: u64,
+        epoch: u64,
     ) -> anyhow::Result<crate::agentfs::Answer> {
         let admitted = self
             .admit_cell_request(&request.scope)?
@@ -2544,8 +2546,22 @@ impl RuntimeManager {
         admitted
             .affiliation
             .slot()
-            .turn_cell(&request.scope, |worker| worker.agentfs_operation(request))
+            .turn_cell(&request.scope, |worker| {
+                worker.agentfs_operation(request, session, epoch)
+            })
             .await
+    }
+
+    pub async fn agentfs_revoke_session(&self, scope: &str, session: u64, epoch: u64) {
+        if let Ok(Some(admitted)) = self.admit_cell_request(scope) {
+            let _ = admitted
+                .affiliation
+                .slot()
+                .turn_cell(scope, |worker| {
+                    worker.agentfs_revoke_session(scope, session, epoch)
+                })
+                .await;
+        }
     }
 
     pub async fn rpc(

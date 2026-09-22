@@ -6497,18 +6497,35 @@ pub struct HeapBytes {
 }
 
 impl Worker {
+    pub(crate) fn agentfs_revoke_session(
+        &mut self,
+        scope: &str,
+        session: u64,
+        epoch: u64,
+    ) -> Result<()> {
+        let inner = self
+            .inner
+            .as_ref()
+            .ok_or_else(|| anyhow!("isolate retired"))?;
+        let (_locker, _cells) = inner.lock();
+        storage::agentfs_revoke_session(scope, session, epoch);
+        Ok(())
+    }
+
     /// Called only under the cell turn scheduler and isolate permit. No JS
     /// callback or second SQLite connection is involved.
     pub(crate) fn agentfs_operation(
         &mut self,
         request: &celld_agentfs_ipc::Request,
+        session: u64,
+        epoch: u64,
     ) -> Result<crate::agentfs::Answer> {
         let inner = self
             .inner
             .as_ref()
             .ok_or_else(|| anyhow!("isolate retired"))?;
         let (_locker, _cells) = inner.lock();
-        if !storage::agentfs_authorized(request) {
+        if !storage::agentfs_authorized(request, session, epoch) {
             return Ok(crate::agentfs::Answer {
                 result: Err(celld_agentfs_ipc::Error::Stale),
                 observed: None,
@@ -6531,7 +6548,7 @@ impl Worker {
             });
         }
         let before = storage::write_position(&request.scope)?;
-        let result = storage::agentfs_operation(request);
+        let result = storage::agentfs_operation(request, session, epoch);
         let (written, observed) = gate_positions(&request.scope, before)?;
         Ok(crate::agentfs::Answer {
             result,

@@ -5,25 +5,81 @@ use celld_agentfs_ipc::{Error, Reply, Request, Stat};
 use rusqlite::{params, Connection, OptionalExtension};
 use serde_json::{json, Value};
 use std::collections::BTreeMap;
+pub(crate) const GUEST_OPERATIONS: u32 = (1 << 14) - 1;
 pub(crate) struct Capability {
     pub token: String,
+    pub command: String,
+    pub epoch: u64,
     pub deadline: u64,
     pub next: u64,
+    pub session: Option<u64>,
+    pub allowed_operations: u32,
 }
 impl Capability {
-    pub(crate) fn validate(&self, r: &Request, now: u64) -> Result<(), Error> {
+    pub(crate) fn validate(
+        &self,
+        r: &Request,
+        session: u64,
+        epoch: u64,
+        now: u64,
+    ) -> Result<(), Error> {
         if now >= self.deadline
             || r.token != self.token
+            || r.command != self.command
+            || epoch != self.epoch
+            || self.session.is_some_and(|bound| bound != session)
             || r.sequence != self.next
             || self.next > celld_agentfs_ipc::MAX_REQUESTS
+            || !self.allows(&r.operation)
         {
             Err(Error::Stale)
         } else {
             Ok(())
         }
     }
-    pub(crate) fn admit(&mut self, r: &Request, now: u64) -> Result<(), Error> {
-        self.validate(r, now)?;
+    /// The guest grant has a closed operation set. Application-only operations
+    /// never become reachable by acquiring a valid IPC capability.
+    fn allows(&self, operation: &Value) -> bool {
+        let bit = match operation["op"].as_str() {
+            Some("stat") => 0,
+            Some("list") => 1,
+            Some("mkdir") => 2,
+            Some("open") => 3,
+            Some("close") => 4,
+            Some("fstat") => 5,
+            Some("read") => 6,
+            Some("write") => 7,
+            Some("truncate") => 8,
+            Some("unlink") => 9,
+            Some("rmdir") => 10,
+            Some("rename") => 11,
+            Some("sync") => 12,
+            Some("heartbeat") => 13,
+            _ => return false,
+        };
+        self.allowed_operations & (1 << bit) != 0
+    }
+    pub(crate) fn bind(
+        &mut self,
+        r: &Request,
+        session: u64,
+        epoch: u64,
+        now: u64,
+    ) -> Result<(), Error> {
+        self.validate(r, session, epoch, now)?;
+        if self.session.is_none() {
+            self.session = Some(session);
+        }
+        Ok(())
+    }
+    pub(crate) fn admit(
+        &mut self,
+        r: &Request,
+        session: u64,
+        epoch: u64,
+        now: u64,
+    ) -> Result<(), Error> {
+        self.validate(r, session, epoch, now)?;
         self.next += 1;
         Ok(())
     }
@@ -995,21 +1051,37 @@ mod tests {
     fn capability_ordering_and_expiry() {
         let mut c = Capability {
             token: "secret".into(),
+            command: "command-1".into(),
+            epoch: 7,
             deadline: 10,
             next: 1,
+            session: None,
+            allowed_operations: GUEST_OPERATIONS,
         };
         let mut r = Request {
             scope: "test".into(),
             token: "wrong".into(),
+            command: "command-1".into(),
             sequence: 1,
             operation: json!({"op":"heartbeat"}),
             data: vec![],
         };
-        assert_eq!(c.admit(&r, 0), Err(Error::Stale));
+        assert_eq!(c.bind(&r, 3, 7, 0), Err(Error::Stale));
         r.token = "secret".into();
-        assert_eq!(c.admit(&r, 0), Ok(()));
-        assert_eq!(c.admit(&r, 0), Err(Error::Stale));
+        r.command = "other-command".into();
+        assert_eq!(c.bind(&r, 3, 7, 0), Err(Error::Stale));
+        r.command = "command-1".into();
+        assert_eq!(c.bind(&r, 3, 8, 0), Err(Error::Stale));
+        assert_eq!(c.bind(&r, 3, 7, 0), Ok(()));
+        assert_eq!(c.bind(&r, 4, 7, 0), Err(Error::Stale));
+        assert_eq!(c.admit(&r, 3, 7, 0), Ok(()));
+        assert_eq!(c.admit(&r, 3, 7, 0), Err(Error::Stale));
         r.sequence = 2;
-        assert_eq!(c.admit(&r, 10), Err(Error::Stale));
+        assert_eq!(c.admit(&r, 3, 7, 10), Err(Error::Stale));
+        r.operation = json!({"op":"configure"});
+        assert_eq!(c.admit(&r, 3, 7, 0), Err(Error::Stale));
+        r.operation = json!({"op":"write"});
+        c.allowed_operations = 1 << 13; // heartbeat only
+        assert_eq!(c.admit(&r, 3, 7, 0), Err(Error::Stale));
     }
 }

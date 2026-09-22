@@ -1,5 +1,5 @@
 // Copyright 2026 Deno Land Inc. Apache-2.0 license.
-//! Version 2 local AgentFS protocol: bounded JSON metadata followed by raw bytes.
+//! Version 3 local AgentFS protocol: bounded JSON metadata followed by raw bytes.
 //! Outer frames and metadata lengths are u32 little endian. No file data is JSON.
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -12,6 +12,7 @@ pub const MAX_REQUESTS: u64 = 100_000;
 pub struct Request {
     pub scope: String,
     pub token: String,
+    pub command: String,
     pub sequence: u64,
     pub operation: Value,
     #[serde(skip)]
@@ -117,14 +118,14 @@ fn pack(metadata: &impl Serialize, data: &[u8]) -> io::Result<Vec<u8>> {
         return Err(invalid());
     }
     let mut out = Vec::with_capacity(5 + json.len() + data.len());
-    out.push(2);
+    out.push(3);
     out.extend_from_slice(&(json.len() as u32).to_le_bytes());
     out.extend(json);
     out.extend_from_slice(data);
     Ok(out)
 }
 fn unpack(input: &[u8], max_metadata: usize) -> io::Result<(&[u8], &[u8])> {
-    if input.len() < 5 || input.len() > MAX_FRAME || input[0] != 2 {
+    if input.len() < 5 || input.len() > MAX_FRAME || input[0] != 3 {
         return Err(invalid());
     }
     let n = u32::from_le_bytes(input[1..5].try_into().unwrap()) as usize;
@@ -142,7 +143,12 @@ impl Request {
     pub fn decode(input: &[u8]) -> io::Result<Self> {
         let (json, data) = unpack(input, 16384)?;
         let mut r: Self = serde_json::from_slice(json)?;
-        if r.scope.len() > 1024 || r.token.len() > 128 || !r.operation.is_object() {
+        if r.scope.len() > 1024
+            || r.token.len() > 128
+            || r.command.is_empty()
+            || r.command.len() > 128
+            || !r.operation.is_object()
+        {
             return Err(invalid());
         }
         r.data = data.to_vec();
@@ -199,6 +205,7 @@ mod tests {
         let r = Request {
             scope: "Workspace:test".into(),
             token: "secret".into(),
+            command: "test-command".into(),
             sequence: 1,
             operation: serde_json::json!({"op":"write","handle":1,"offset":0}),
             data: (0..=255).collect(),
@@ -209,8 +216,17 @@ mod tests {
             assert!(Request::decode(&b[..n]).is_err());
         }
         let mut bad = b.clone();
-        bad[0] = 1;
+        bad[0] = 2;
         assert!(Request::decode(&bad).is_err());
+        let legacy = pack(
+            &serde_json::json!({
+                "scope":"Workspace:test", "token":"secret", "sequence":1,
+                "operation":{"op":"heartbeat"}
+            }),
+            &[],
+        )
+        .unwrap();
+        assert!(Request::decode(&legacy).is_err());
         let mut big = r;
         big.data = vec![0; MAX_DATA + 1];
         assert!(big.encode().is_err());
@@ -227,6 +243,6 @@ mod tests {
             decode_response(&encode_response(Err(Error::Stale))).unwrap(),
             Err(Error::Stale)
         );
-        assert!(decode_response(&[2, 255, 255, 255, 255]).is_err());
+        assert!(decode_response(&[3, 255, 255, 255, 255]).is_err());
     }
 }
