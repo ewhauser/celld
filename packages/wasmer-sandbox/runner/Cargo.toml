@@ -5,6 +5,7 @@ edition = "2024"
 publish = false
 [workspace]
 [dependencies]
+celld-agentfs-ipc = { path = "ipc" }
 wasmer = { version = "=7.4.0", default-features = false, features = ["sys", "cranelift", "wat"] }
 wasmer-wasix = { version = "=0.704.0", default-features = false, features = ["sys-minimal"] }
 virtual-fs = { version = "=0.704.0", default-features = false, features = ["tracking"] }
@@ -25,3 +26,6 @@ wasmer-types = "=7.4.0"
 async-trait = "0.1"
 
 wasmer-config = "=0.704.0"
+
+[patch.crates-io]
+virtual-fs = { path = "vendor/virtual-fs" }

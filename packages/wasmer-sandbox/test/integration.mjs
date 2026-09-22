@@ -1,6 +1,15 @@
 import { spawn, execFileSync } from "node:child_process";
 import { once } from "node:events";
-import { mkdir, writeFile, readFile, rename, open } from "node:fs/promises";
+import {
+  mkdir,
+  writeFile,
+  readFile,
+  rename,
+  open,
+  mkdtemp,
+  rm,
+  chmod,
+} from "node:fs/promises";
 import { resolve, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { createHash, randomBytes } from "node:crypto";
@@ -11,6 +20,10 @@ const dir = resolve(dirname(fileURLToPath(import.meta.url)), ".."),
 const artifacts = resolve(dir, "test/artifacts"),
   work = resolve(artifacts, `run-${Date.now()}`);
 await mkdir(work, { recursive: true });
+const nativeStat = process.env.SANDBOX_NATIVE_STAT === "1";
+const socketDir = nativeStat ? await mkdtemp("/tmp/celld-ipc-") : undefined;
+if (socketDir) await chmod(socketDir, 0o700);
+const socketPath = socketDir && resolve(socketDir, "fs.sock");
 const token = randomBytes(32).toString("hex"),
   callbackToken = randomBytes(32).toString("hex");
 const port = Number(process.env.SANDBOX_TEST_PORT ?? 19876),
@@ -21,6 +34,7 @@ const guest = resolve(dir, "test/guest.wasm"),
     process.env.CELLD_WASMER_RUNNER ??
     resolve(dir, "runner/target/debug/celld-wasmer-runner");
 const config = {
+  nativeStatSocket: socketPath,
   development: process.platform !== "linux",
   token,
   callbackToken,
@@ -68,6 +82,7 @@ await writeFile(
     },
     migrations: [{ tag: "v1", new_sqlite_classes: ["Workspace"] }],
     vars: {
+      SANDBOX_EXPERIMENTAL_NATIVE_STAT: nativeStat ? "1" : "0",
       SANDBOX_API_TOKEN: token,
       SANDBOX_CALLBACK_TOKEN: callbackToken,
       SANDBOX_SUPERVISOR_TOKEN: token,
@@ -79,8 +94,21 @@ await writeFile(
   resolve(work, "worker.ts"),
   `
 import { SandboxWorkspace,routeWorkspace } from ${JSON.stringify(resolve(dir, "src/worker.ts"))};
+import { WasmerSandbox } from ${JSON.stringify(resolve(dir, "src/index.ts"))};
 export class Workspace extends SandboxWorkspace {
  async fetch(req) {
+  const action=new URL(req.url).pathname.split('/').pop();
+  if(['bench','native-register','native-revoke','native-busy'].includes(action)) {
+   if(req.headers.get('authorization')!==${JSON.stringify(`Bearer ${token}`)})return new Response('',{status:401});
+   const body=await req.json();
+   if(action==='native-register') return Response.json({scope:this.ctx.experimentalAgentFsStat(body.token, Date.now()+(body.ttl ?? 10000))});
+   if(action==='native-revoke') {this.ctx.experimentalAgentFsStat(null);return Response.json({ok:true});}
+   if(action==='native-busy') {await this.ctx.blockConcurrencyWhile(async()=>{await new Promise(r=>setTimeout(r,500));});return Response.json({ok:true});}
+   const sandbox=new WasmerSandbox(this.ctx, {workspace:this.ctx.id.toString(),supervisorURL:this.env.SANDBOX_SUPERVISOR_URL,supervisorToken:this.env.SANDBOX_SUPERVISOR_TOKEN,experimentalNativeStat:body.native});
+   const prior=this.sandbox;this.sandbox=sandbox;
+   try {return Response.json(await sandbox.exec({id:body.id,tool:'guest',args:['stat-bench',String(body.count)],timeoutMs:120000}));}
+   finally {this.sandbox=prior;}
+  }
   if(new URL(req.url).pathname.endsWith('/guard')) {
    if(req.headers.get('authorization')!==${JSON.stringify(`Bearer ${token}`)})return new Response('',{status:401});
    const capture=async()=>{try{await this.sandbox.exec({id:'guard',tool:'guest'});return 'UNEXPECTED';}catch(e){return e.message;}};
@@ -106,6 +134,7 @@ function record(name) {
   console.log("PASS", name);
 }
 async function start() {
+  if (socketPath) await rm(socketPath, { force: true });
   const log = await open(resolve(work, "celld.log"), "a");
   celld = spawn(
     process.env.CELLD_BIN ?? resolve(repo, "target/debug/celld"),
@@ -115,6 +144,9 @@ async function start() {
       detached: true,
       env: {
         ...process.env,
+        ...(socketPath
+          ? { CELLD_EXPERIMENTAL_AGENTFS_SOCKET: socketPath }
+          : {}),
         CELLD_ESBUILD:
           process.env.CELLD_ESBUILD ??
           resolve(
@@ -208,6 +240,8 @@ try {
   });
   assert.equal(v.status, "succeeded", JSON.stringify(v));
   assert.equal(v.result.stdout, "guest-ok\n");
+  assert.ok(v.result.statCalls[nativeStat ? "native" : "http"] > 0);
+  assert.equal(v.result.statCalls[nativeStat ? "http" : "native"], 0);
   assert.equal(v.result.stderr, "guest-stderr\n");
   const read = await call("read", { path: "/workspace/renamed.txt" });
   assert.deepEqual(
@@ -255,6 +289,12 @@ try {
   record(
     "exit status, traps, host/network isolation, CPU timeout and bounded output",
   );
+  const quota = await exec("quota", ["quota"]);
+  assert.equal(quota.status, "succeeded", JSON.stringify(quota));
+  assert.equal(quota.result.stdout, "quota-preserved\n");
+  record(
+    "temporary quota rejects repeated/huge growth atomically and reclaims capacity",
+  );
   const pending = exec("cancel", ["wait"]);
   for (let i = 0; i < 100; i++) {
     if ((await call("status", { id: "cancel" }))?.status === "running") break;
@@ -267,6 +307,18 @@ try {
   await call("cancel", { id: "cancel" });
   assert.equal((await pending).status, "cancelled");
   record("cancellation fences writes and preserves committed prefix");
+  if (nativeStat) {
+    const { ipcChecks, benchmark } = await import("./native-stat.mjs");
+    await ipcChecks({
+      socketPath,
+      call,
+      post,
+      token: randomBytes(32).toString("hex"),
+      record,
+    });
+    if (process.env.SANDBOX_BENCH === "1")
+      results.benchmark = await benchmark(call);
+  }
   if (config.tools.bash) {
     const b = await call("exec", {
       id: "bash",
@@ -287,6 +339,18 @@ try {
       "shell-ok",
     );
     record("Bash, pipeline and coreutils on the durable filesystem");
+  }
+  if (config.tools.coreutils) {
+    const c = await call("exec", {
+      id: "coreutils-direct",
+      tool: "coreutils",
+      args: ["explicit-entrypoint"],
+      timeoutMs: 120000,
+    });
+    results.commands.push(c);
+    assert.equal(c.status, "succeeded", JSON.stringify(c));
+    assert.equal(c.result.stdout, "explicit-entrypoint\n");
+    record("explicit coreutils entrypoint on a multi-command package");
   }
   if (config.tools.python) {
     const p = await call("exec", {
@@ -311,6 +375,21 @@ try {
     );
     record("Python stdlib on the durable filesystem");
   }
+  let restartCapability;
+  if (nativeStat) {
+    restartCapability = { token: randomBytes(32).toString("hex") };
+    Object.assign(
+      restartCapability,
+      await call("native-register", restartCapability),
+    );
+    const { connect } = await import("./native-stat.mjs");
+    const c = await connect(socketPath);
+    assert.equal(
+      (await c.call(restartCapability.scope, restartCapability.token, 1))[0],
+      0,
+    );
+    c.socket.destroy();
+  }
   await stop();
   await rename(
     resolve(work, ".celld/dev/runtime"),
@@ -323,6 +402,18 @@ try {
   );
   assert.equal((await call("status", { id: "basic" })).status, "succeeded");
   record("LTX restore without the prior runtime directory");
+  if (restartCapability) {
+    const { connect } = await import("./native-stat.mjs");
+    const c = await connect(socketPath);
+    assert.equal(
+      (await c.call(restartCapability.scope, restartCapability.token, 2))[0],
+      1,
+    );
+    c.socket.destroy();
+    record(
+      "native capability is not resurrected by process restart or LTX restore",
+    );
+  }
   const removed = await post("unlink", { path: "/workspace/partial" });
   assert.ok(removed.ok || removed.status === 404);
   const interrupted = post("exec", {
@@ -378,6 +469,7 @@ try {
 } finally {
   await stop();
   await service.close();
+  if (socketDir) await rm(socketDir, { recursive: true, force: true });
   await writeFile(
     resolve(work, "results.json"),
     JSON.stringify(results, null, 2),

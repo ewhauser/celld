@@ -21,6 +21,7 @@ check-cfg = ["cfg(celld_internal_tests)", "cfg(celld_proxy_internals)"]
 disallowed_macros = "forbid"
 
 [dependencies]
+celld-agentfs-ipc = { path = "../../packages/wasmer-sandbox/runner/ipc" }
 async-trait.workspace = true
 chrono.workspace = true
 aes.workspace = true

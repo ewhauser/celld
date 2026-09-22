@@ -245,3 +245,93 @@ test("cancellation during the pre-launch durability barrier never starts a guest
     globalThis.fetch = original;
   }
 });
+
+test("execution snapshots caller arguments before hashing or awaiting durability", async () => {
+  const sandbox = new WasmerSandbox(
+    { storage: memoryStorage(), assertCanAwaitCallback() {} },
+    options,
+  );
+  const original = globalThis.fetch;
+  let launches = 0;
+  globalThis.fetch = async (_url, init) => {
+    launches++;
+    const cmd = JSON.parse(init!.body as string);
+    return Response.json({
+      reason: "exited",
+      exitCode: 0,
+      stdout: cmd.args.join(" "),
+      stderr: "",
+    });
+  };
+  try {
+    const args = ["original"];
+    const pending = sandbox.exec({ id: "snapshot", tool: "guest", args });
+    args[0] = "changed";
+    args.push("extra");
+    assert.equal((await pending).result.stdout, "original");
+    assert.equal(
+      (
+        await sandbox.exec({
+          id: "snapshot",
+          tool: "guest",
+          args: ["original"],
+        })
+      ).result.stdout,
+      "original",
+    );
+    assert.equal(launches, 1);
+  } finally {
+    globalThis.fetch = original;
+  }
+});
+
+test("native stat capability is registered before launch and revoked on completion, loss and cancellation", async () => {
+  for (const outcome of ["success", "lost", "cancel"]) {
+    const storage = memoryStorage(),
+      events: string[] = [];
+    const sandbox = new WasmerSandbox(
+      {
+        storage,
+        assertCanAwaitCallback() {},
+        experimentalAgentFsStat(token, deadline) {
+          events.push(token === null ? "revoke" : "grant");
+          if (token !== null) assert.ok(deadline! > Date.now());
+          return "Workspace:test";
+        },
+      },
+      { ...options, experimentalNativeStat: true },
+    );
+    const original = globalThis.fetch;
+    globalThis.fetch = async (url, init) => {
+      if (String(url).endsWith("/v1/cancel")) {
+        assert.equal(events.at(-1), "revoke");
+        events.push("cancel");
+        return Response.json({ ok: true });
+      }
+      const config = JSON.parse(init!.body as string);
+      assert.equal(config.nativeStatScope, "Workspace:test");
+      assert.equal(events[0], "grant");
+      events.push("launch");
+      if (outcome === "cancel") await sandbox.cancel("native");
+      if (outcome === "lost") throw Error("lost reply");
+      return Response.json({
+        reason: "exited",
+        exitCode: 0,
+        stdout: "",
+        stderr: "",
+      });
+    };
+    try {
+      const result = await sandbox.exec({ id: "native", tool: "guest" });
+      assert.equal(
+        result.status,
+        { success: "succeeded", lost: "interrupted", cancel: "cancelled" }[
+          outcome
+        ],
+      );
+      assert.equal(events.at(-1), "revoke");
+    } finally {
+      globalThis.fetch = original;
+    }
+  }
+});

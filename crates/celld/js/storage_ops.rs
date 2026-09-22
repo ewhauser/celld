@@ -1247,3 +1247,20 @@ pub(super) fn op_storage_delete_all(
         scope.throw_exception(exception);
     }
 }
+
+pub(super) fn op_agentfs_capability(
+    scope: &mut v8::PinScope,
+    args: v8::FunctionCallbackArguments,
+    _rv: v8::ReturnValue<v8::Value>,
+) {
+    let cell = args.get(0).to_rust_string_lossy(scope);
+    if args.get(1).is_null_or_undefined() {
+        storage::agentfs_revoke(&cell);
+        return;
+    }
+    let token = args.get(1).to_rust_string_lossy(scope);
+    let deadline = args.get(2).integer_value(scope).unwrap_or(0).max(0) as u64;
+    if let Err(error) = storage::agentfs_register(&cell, token, deadline) {
+        throw_storage_error(scope, "AgentFS IPC register", error);
+    }
+}

@@ -11,6 +11,9 @@
 //! execution shape required for monotonic lease ticks to fence the node even
 //! when a storage operation remains hung, without spawning a task per effect.
 
+#[cfg(unix)]
+mod agentfs_ipc_server;
+
 use anyhow::Context as _;
 use celld::actor::*;
 use celld::bucket::Bucket;
@@ -4331,6 +4334,9 @@ async fn async_main(telemetry_config: Option<celld::telemetry::Config>) -> anyho
         operation_deadline_ms: celld::actor::operation_deadline_ms()?,
         follower: follower.clone(),
     };
+
+    #[cfg(unix)]
+    agentfs_ipc_server::start(app.clone())?;
 
     // The in-fleet log tier, v0. The takeover interlock is installed in
     // every posture — a bucket-posture node can take over from a

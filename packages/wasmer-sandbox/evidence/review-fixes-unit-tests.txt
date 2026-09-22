@@ -1,0 +1,26 @@
+
+> @celld/wasmer-sandbox@0.1.0 test
+> node --test test/*.test.ts
+
+✔ sparse writes, truncate growth, shrink/regrowth and EOF preserve byte positions (2.875208ms)
+✔ append is atomic, handles survive rename, open unlink/replacement fails safely (1.853083ms)
+✔ path confinement, type checks, directory cycles, exclusivity and handle rights (1.141792ms)
+✔ quota failures roll back an entire operation; independent instances preserve AgentFS schema (0.918417ms)
+✔ random offset operations match an independent dense byte model (10.923917ms)
+✔ command replay/conflict, single writer, sequenced callbacks, stale tokens and durable terminal result (17.378042ms)
+✔ unknown completion remains interrupted across activation and is never automatically rerun (1.30975ms)
+✔ deadlock guard runs before any hash, mutation or launch (0.460834ms)
+✔ invalid configuration and oversized/invalid input fail closed (0.454041ms)
+✔ replay survives removal of its former working directory (2.127959ms)
+✔ command transport bounds count UTF-8 bytes and preserve special environment keys (0.571708ms)
+✔ cancellation during the pre-launch durability barrier never starts a guest (0.864334ms)
+✔ execution snapshots caller arguments before hashing or awaiting durability (0.752ms)
+✔ supervisor authenticates, pins modules, bounds admission, cancels and deduplicates (193.983875ms)
+ℹ tests 14
+ℹ suites 0
+ℹ pass 14
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 274.286833

@@ -6497,6 +6497,42 @@ pub struct HeapBytes {
 }
 
 impl Worker {
+    /// Called only under the cell turn scheduler and isolate permit. No JS
+    /// callback or second SQLite connection is involved.
+    pub(crate) fn agentfs_stat(
+        &mut self,
+        request: &celld_agentfs_ipc::Request,
+    ) -> Result<crate::agentfs::Answer> {
+        let inner = self
+            .inner
+            .as_ref()
+            .ok_or_else(|| anyhow!("isolate retired"))?;
+        let (_locker, _cells) = inner.lock();
+        if !storage::agentfs_authorized(request) {
+            return Ok(crate::agentfs::Answer {
+                result: Err(celld_agentfs_ipc::Error::Stale),
+                observed: None,
+            });
+        }
+        // This experiment fails closed instead of queueing behind JS input
+        // gates. It must never observe an application's critical section.
+        let busy = cell_gates()
+            .lock()
+            .unwrap()
+            .get(&request.scope)
+            .is_some_and(|gate| !gate.gate.is_open());
+        if busy || storage::sync_sample(&request.scope)?.is_some_and(|sample| sample.in_transaction)
+        {
+            return Ok(crate::agentfs::Answer {
+                result: Err(celld_agentfs_ipc::Error::Busy),
+                observed: None,
+            });
+        }
+        let result = storage::agentfs_stat(request);
+        let sample = storage::write_position(&request.scope)?;
+        let observed = storage::observed_position(&request.scope, sample);
+        Ok(crate::agentfs::Answer { result, observed })
+    }
     /// The heap V8 reports for this isolate. Takes the isolate lock, so the
     /// caller must hold the pool's permit for this worker, exactly as a turn
     /// does; `None` once the isolate has been freed.
@@ -9180,6 +9216,7 @@ ops! { OP_NAMES, install_op_functions,
         "__storage_queue_put_serialized" => storage_ops::op_storage_queue_put_serialized,
         "__storage_flush_pending_puts" => storage_ops::op_storage_flush_pending_puts,
         "__storage_sync" => storage_ops::op_storage_sync,
+        "__agentfs_capability" => storage_ops::op_agentfs_capability,
         "__storage_cancel_pending_puts" => storage_ops::op_storage_cancel_pending_puts,
         "__actor_abort" => op_actor_abort,
         "__cron_plan" => op_cron_plan,

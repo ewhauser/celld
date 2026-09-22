@@ -1,0 +1,10 @@
+   Compiling celld v0.5.1-ewhauser.1 (/Users/ewhauser/working/celld/crates/celld)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 4.92s
+     Running unittests lib.rs (target/debug/deps/celld-d020442b53eae042)
+<jemalloc>: option background_thread currently supports pthread only
+
+running 2 tests
+test agentfs::tests::capability_is_ordered_bounded_and_expires ... ok
+test agentfs::tests::native_stat_confines_paths_and_matches_agentfs ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 3 filtered out; finished in 0.00s

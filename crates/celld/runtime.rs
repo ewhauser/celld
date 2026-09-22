@@ -2532,6 +2532,22 @@ impl RuntimeManager {
             .await
     }
 
+    /// The caller owns the actor request/output gate. Pin the existing cell,
+    /// honor its admission limit, and enter its normal serialized turn lane.
+    pub async fn agentfs_stat(
+        &self,
+        request: &celld_agentfs_ipc::Request,
+    ) -> anyhow::Result<crate::agentfs::Answer> {
+        let admitted = self
+            .admit_cell_request(&request.scope)?
+            .ok_or_else(|| anyhow!("cell overloaded"))?;
+        admitted
+            .affiliation
+            .slot()
+            .turn_cell(&request.scope, |worker| worker.agentfs_stat(request))
+            .await
+    }
+
     pub async fn rpc(
         &self,
         cell: String,

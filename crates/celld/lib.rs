@@ -583,3 +583,6 @@ pub fn worker_compat(metadata: &serde_json::Value) -> js::Compat {
 }
 
 pub mod disk_removal;
+
+/// Experimental native AgentFS stat operation.
+pub mod agentfs;

@@ -1,0 +1,184 @@
+{
+  "date": "2026-09-22T21:03:22.037Z",
+  "platform": "linux",
+  "checks": [
+    "unauthorized control and stale callbacks rejected",
+    "real DO/shared Wasmer sparse I/O, shrink/growth, append, rename, stdin/env/stdout/stderr",
+    "durable replay and payload conflict",
+    "real celld transactionSync, transaction and blockConcurrencyWhile deadlock guards",
+    "exit status, traps, host/network isolation, CPU timeout and bounded output",
+    "temporary quota rejects repeated/huge growth atomically and reclaims capacity",
+    "cancellation fences writes and preserves committed prefix",
+    "Bash, pipeline and coreutils on the durable filesystem",
+    "explicit coreutils entrypoint on a multi-command package",
+    "Python stdlib on the durable filesystem",
+    "LTX restore without the prior runtime directory",
+    "owner process loss restores committed prefix, interrupts command and fences former execution"
+  ],
+  "commands": [
+    {
+      "id": "basic",
+      "status": "succeeded",
+      "result": {
+        "exitCode": 0,
+        "reason": "exited",
+        "statCalls": {
+          "http": 11,
+          "native": 0
+        },
+        "stderr": "guest-stderr\n",
+        "stdout": "guest-ok\n"
+      },
+      "startedAt": 1790111002177,
+      "finishedAt": 1790111002277
+    },
+    {
+      "id": "exit",
+      "status": "failed",
+      "result": {
+        "exitCode": 42,
+        "reason": "exited",
+        "statCalls": {
+          "http": 2,
+          "native": 0
+        },
+        "stderr": "",
+        "stdout": ""
+      },
+      "startedAt": 1790111002285,
+      "finishedAt": 1790111002335
+    },
+    {
+      "id": "trap",
+      "status": "failed",
+      "result": {
+        "exitCode": 45,
+        "reason": "exited",
+        "statCalls": {
+          "http": 2,
+          "native": 0
+        },
+        "stderr": "\nthread 'main' (1) panicked at packages/wasmer-sandbox/test/guest.rs:24:19:\nintentional trap\nnote: run with `RUST_BACKTRACE=1` environment variable to display a backtrace\n",
+        "stdout": ""
+      },
+      "startedAt": 1790111002339,
+      "finishedAt": 1790111002389
+    },
+    {
+      "id": "isolation",
+      "status": "succeeded",
+      "result": {
+        "exitCode": 0,
+        "reason": "exited",
+        "statCalls": {
+          "http": 5,
+          "native": 0
+        },
+        "stderr": "",
+        "stdout": "isolated\n"
+      },
+      "startedAt": 1790111002393,
+      "finishedAt": 1790111002447
+    },
+    {
+      "id": "timeout",
+      "status": "timed_out",
+      "result": {
+        "reason": "timed_out",
+        "exitCode": 124,
+        "stdout": "",
+        "stderr": "execution stopped"
+      },
+      "startedAt": 1790111002451,
+      "finishedAt": 1790111003957
+    },
+    {
+      "id": "output",
+      "status": "failed",
+      "result": {
+        "reason": "failed",
+        "exitCode": 125,
+        "stdout": "",
+        "stderr": "runner terminated without a valid result"
+      },
+      "startedAt": 1790111003962,
+      "finishedAt": 1790111004975
+    },
+    {
+      "id": "quota",
+      "status": "succeeded",
+      "result": {
+        "exitCode": 0,
+        "reason": "exited",
+        "statCalls": {
+          "http": 2,
+          "native": 0
+        },
+        "stderr": "",
+        "stdout": "quota-preserved\n"
+      },
+      "startedAt": 1790111004980,
+      "finishedAt": 1790111005036
+    },
+    {
+      "id": "cancel",
+      "status": "cancelled",
+      "result": {
+        "reason": "cancelled",
+        "exitCode": 124,
+        "stdout": "",
+        "stderr": "execution stopped"
+      },
+      "startedAt": 1790111005041,
+      "finishedAt": 1790111005047
+    },
+    {
+      "id": "bash",
+      "status": "succeeded",
+      "result": {
+        "exitCode": 0,
+        "reason": "exited",
+        "statCalls": {
+          "http": 16,
+          "native": 0
+        },
+        "stderr": "",
+        "stdout": "8\n"
+      },
+      "startedAt": 1790111005050,
+      "finishedAt": 1790111006886
+    },
+    {
+      "id": "coreutils-direct",
+      "status": "succeeded",
+      "result": {
+        "exitCode": 0,
+        "reason": "exited",
+        "statCalls": {
+          "http": 2,
+          "native": 0
+        },
+        "stderr": "",
+        "stdout": "explicit-entrypoint\n"
+      },
+      "startedAt": 1790111006892,
+      "finishedAt": 1790111008032
+    },
+    {
+      "id": "python",
+      "status": "succeeded",
+      "result": {
+        "exitCode": 0,
+        "reason": "exited",
+        "statCalls": {
+          "http": 42,
+          "native": 0
+        },
+        "stderr": "",
+        "stdout": "{\"value\": 42}\n"
+      },
+      "startedAt": 1790111008037,
+      "finishedAt": 1790111012578
+    }
+  ]
+}

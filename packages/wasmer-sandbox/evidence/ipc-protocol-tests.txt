@@ -1,0 +1,15 @@
+   Compiling celld-agentfs-ipc v0.1.0 (/Users/ewhauser/working/celld/packages/wasmer-sandbox/runner/ipc)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.50s
+     Running unittests src/lib.rs (target/debug/deps/celld_agentfs_ipc-3d00d42afb6308ef)
+
+running 2 tests
+test tests::replies_round_trip_and_reject_truncation ... ok
+test tests::bounded_strict_frames ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests celld_agentfs_ipc
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s

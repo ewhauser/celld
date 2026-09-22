@@ -6,6 +6,7 @@ import { boundedJSON, identifier } from "./protocol.ts";
 import { check } from "./storage.ts";
 
 export interface Env {
+  SANDBOX_EXPERIMENTAL_NATIVE_STAT?: string;
   WORKSPACES: any;
   SANDBOX_API_TOKEN: string;
   SANDBOX_CALLBACK_TOKEN: string;
@@ -42,6 +43,7 @@ export class SandboxWorkspace extends DurableObject {
   constructor(ctx: any, env: Env) {
     super(ctx, env);
     this.sandbox = new WasmerSandbox(ctx, {
+      experimentalNativeStat: env.SANDBOX_EXPERIMENTAL_NATIVE_STAT === "1",
       workspace: ctx.id.toString(),
       supervisorURL: env.SANDBOX_SUPERVISOR_URL,
       supervisorToken: env.SANDBOX_SUPERVISOR_TOKEN,

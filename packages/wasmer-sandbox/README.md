@@ -180,7 +180,7 @@ of the supported contract.
   or replacement of an open durable inode are rejected. Close the inode first.
 
 Default limits: 64 MiB logical workspace, 16 MiB/file, 4,096 inodes, 128 handles,
-64 KiB per filesystem transfer, 16 MiB temporary file content, eight guest tasks,
+64 KiB per filesystem transfer, 16 MiB of temporary file buffer capacity, eight guest tasks,
 64 KiB per stdout/stderr, 64 KiB stdin, 128 arguments, 64 environment entries,
 30 seconds per command (120 seconds maximum), two executions per supervisor.
 Each Wasm memory is capped at 512 MiB and each table at 1,000,000 elements.
@@ -189,6 +189,10 @@ physical memory), CPU-time limit, 256 file
 descriptors and disabled core dumps/no-new-privileges. The service container's
 memory/PID limits cover runtime overhead and temporary filesystem metadata.
 Limits are rejection boundaries, not quotas silently truncated on success.
+Temporary buffer capacity is released when the underlying file is deleted and
+its handles are closed; truncation may retain allocated capacity. The pinned
+[filesystem patch](runner/vendor/README.md) reserves quota before allocation and
+keeps rejected growth from modifying existing files.
 
 The journal stops admitting commands after 10,000 IDs by default. Archive it
 under your retention policy while the workspace is idle. Deleting a journal row
@@ -227,3 +231,10 @@ The fleet test kills only its own nodes, removes their synthetic working state,
 and pauses only its isolated MinIO container. Ports 19876–19877 and 19970–19985
 must be free (overridable with `SANDBOX_TEST_PORT`/`SANDBOX_FLEET_PORT`). See the
 Linux test Dockerfile and CI workflow for container qualification.
+
+## Local IPC experiment
+
+An opt-in [native stat experiment](ipc-experiment.md) uses a persistent binary
+Unix socket into celld’s managed storage turn. It includes a paired HTTP/native
+benchmark and capability/failure tests. It currently accelerates path metadata
+only; the default service continues to use HTTP for all filesystem operations.

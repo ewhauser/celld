@@ -14,8 +14,10 @@ export type { Command, Storage };
 export interface State {
   storage: Storage;
   assertCanAwaitCallback(): void;
+  experimentalAgentFsStat?(token: string | null, deadline?: number): string;
 }
 export interface SandboxOptions {
+  experimentalNativeStat?: boolean;
   supervisorURL: string;
   supervisorToken: string;
   workspace: string;
@@ -161,12 +163,28 @@ export class WasmerSandbox {
       Date.now(),
     );
     this.active = active;
+    let nativeScope: string | undefined;
     try {
+      if (this.options.experimentalNativeStat) {
+        check(
+          typeof this.state.experimentalAgentFsStat === "function",
+          "EPROTONOSUPPORT",
+        );
+        nativeScope = this.state.experimentalAgentFsStat(
+          active.token,
+          active.deadline,
+        );
+      }
       await this.state.storage.sync();
       check(!active.cancelled, "ECANCELLED", "cancelled before launch");
       const result = await this.supervisor(
         "/v1/run",
-        { ...cmd, workspace: this.options.workspace, token: active.token },
+        {
+          ...cmd,
+          workspace: this.options.workspace,
+          token: active.token,
+          nativeStatScope: nativeScope,
+        },
         cmd.timeoutMs + 10000,
       );
       check(
@@ -212,6 +230,7 @@ export class WasmerSandbox {
     } finally {
       // Revokes callbacks before releasing the execution slot, including on a
       // lost helper response. A fresh activation never adopts old tokens.
+      if (nativeScope) this.state.experimentalAgentFsStat!(null);
       this.active = null;
       this.fs.closeAll();
     }
@@ -223,6 +242,8 @@ export class WasmerSandbox {
     const active = this.active;
     if (active?.id === id) {
       active.cancelled = true; // admission closes immediately, before remote I/O
+      if (this.options.experimentalNativeStat)
+        this.state.experimentalAgentFsStat?.(null);
       try {
         await this.supervisor(
           "/v1/cancel",

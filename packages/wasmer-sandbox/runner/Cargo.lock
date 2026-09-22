@@ -358,11 +358,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "celld-agentfs-ipc"
+version = "0.1.0"
+
+[[package]]
 name = "celld-wasmer-runner"
 version = "0.1.0"
 dependencies = [
  "anyhow",
  "async-trait",
+ "celld-agentfs-ipc",
  "futures",
  "libc",
  "serde",
@@ -3717,8 +3722,6 @@ checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
 [[package]]
 name = "virtual-fs"
 version = "0.704.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e9dac889f2eeb604513014328d0f7c524473c6668dca67e4a432803a897e8cfe"
 dependencies = [
  "anyhow",
  "async-trait",

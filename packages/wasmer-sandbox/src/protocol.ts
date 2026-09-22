@@ -60,7 +60,15 @@ export function command(value: Command): NormalCommand {
       new TextEncoder().encode(stdin).length <= 65536,
   );
   check(integer(timeoutMs, 120000) >= 100);
-  const result = { id, tool, args, env: sorted, cwd, stdin, timeoutMs };
+  const result = {
+    id,
+    tool,
+    args: [...args],
+    env: sorted,
+    cwd,
+    stdin,
+    timeoutMs,
+  };
   check(
     new TextEncoder().encode(JSON.stringify(result)).length <= 131072,
     "E2BIG",

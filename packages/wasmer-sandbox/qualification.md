@@ -1,31 +1,29 @@
 # Qualification record
 
 Verified locally on September 22, 2026, against celld baseline
-`c91ca5436db5974e17b9a8abb3d216fe35737831` plus this worktree's callback guard and
-Wasmer package. This is an implemented service with executable integration and
+`21338a4` plus this worktree's review fixes for temporary-file quota accounting,
+explicit entrypoint selection, and immutable command arguments. This is an implemented service with executable integration and
 fault tests. It is not a deployed fleet, published image/package, or hosted CI
-result. Source hashes and local image IDs are in [evidence/build.json](evidence/build.json).
+result. Source hashes and local image IDs are in [evidence/review-fixes-build.json](evidence/review-fixes-build.json).
 
 ## Results
 
 | Check | Result | Evidence |
 | --- | --- | --- |
-| Managed AgentFS, journal, protocol, cancellation and supervisor unit tests | 13 passed on macOS and Linux | [macOS](evidence/unit-tests.txt), [Linux](evidence/linux-unit-tests.txt) |
-| Native output, path policy, memory and table bounds | 4 passed | [runner-tests.txt](evidence/runner-tests.txt) |
+| Managed AgentFS, journal, protocol, cancellation and supervisor unit tests | 14 passed on macOS | [unit tests](evidence/review-fixes-unit-tests.txt) |
+| Native output, path policy, memory and table bounds | 8 passed | [runner tests](evidence/review-fixes-runner-tests.txt) |
 | TypeScript strict checking, Prettier, Rust fmt and Clippy with warnings denied | Passed | Commands below; CI repeats them |
-| Linux arm64, non-root/read-only/capability-free container, 2 GiB, 2 CPUs, 256 PIDs | 10 integration checks passed; exit 0; no OOM kill | [linux-arm64.json](evidence/linux-arm64.json) |
-| macOS arm64 development runner | 10 integration checks passed | [macos-development.json](evidence/macos-development.json) |
-| Three native celld nodes and isolated MinIO | All three fault checks passed | [three-node-faults.json](evidence/three-node-faults.json) |
+| Linux arm64, non-root/read-only/capability-free container, 2 GiB, 2 CPUs, 256 PIDs | 12 integration checks passed; exit 0; no OOM kill | [Linux integration](evidence/review-fixes-linux.json) |
+| macOS arm64 development runner | 12 integration checks passed | [macOS integration](evidence/review-fixes-macos.json) |
+| Three native celld nodes and isolated MinIO | All three fault checks passed on the original build | [three-node-faults.json](evidence/three-node-faults.json) |
 | Compose configuration | Validated with Docker Compose | [service/compose.yaml](service/compose.yaml) |
 
 The Linux integration uses the release-built native runner and celld's `lab`
 profile in a Colima Linux VM. It runs the same supervisor, SDK and Worker router
-as the service, along with test-only celld and esbuild dependencies. The separate
-Linux unit run permits a writable/executable temporary directory for its fake
-runner fixture; the real integration uses the restricted container above. macOS is a
-development target and does not exercise Linux resource limits. Its retained run
-preceded the final replay/input-validation fixes, which have separate unit
-regressions and are included in the final Linux run.
+as the service, along with test-only celld and esbuild dependencies. macOS is a development target and does not exercise Linux resource limits.
+The retained three-node fault run is from the original implementation; it was
+not repeated for these helper quota and command-input fixes. Original evidence
+files remain available alongside the review-fix results.
 
 Integration checks exercise real managed SQLite callbacks, sparse byte offsets,
 truncate shrink/regrowth, append, rename, stdin/environment/stdio, replay and ID
@@ -58,6 +56,15 @@ address** ceiling, caps each Wasm memory at 512 MiB and each table at one millio
 elements, and relies on the service's 2 GiB cgroup for aggregate physical memory.
 Those distinct limits are intentional. Allocation minima and subsequent growth
 have native regression tests; the guest integration tests the effective limit.
+
+The review regressions first failed against the original implementation. The
+vendored filesystem patch now reserves quota before allocating and rolls back
+reservations on allocation failure. Tests cover repeated rejected growth,
+unchanged bytes, append/split/clone accounting, aggregate quota, deletion/reuse,
+and rejection of a 1 TiB guest truncate. The integration also launches the
+configured coreutils `echo` entrypoint directly. A TypeScript regression mutates
+the caller's argument array during hashing and verifies execution and replay
+both use the original snapshot.
 
 ## Reproduce
 
@@ -131,3 +138,10 @@ Use the required cgroup, privilege and egress restrictions from the README;
 Wasmer resource limits alone do not bound all runtime/compiler memory. The
 executor's shared service token is an internal trust boundary, so applications
 must authorize tenant access before forwarding requests.
+
+## Native IPC experiment
+
+The later stat-only IPC work is tracked separately in [ipc-experiment.md](ipc-experiment.md),
+with its own paired benchmark and fault evidence. The results above describe the
+HTTP implementation and review fixes; they do not by themselves qualify a full
+native filesystem backend.

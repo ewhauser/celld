@@ -1,0 +1,16 @@
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.22s
+warning: the following packages contain code that will be rejected by a future version of Rust: proc-macro-error2 v2.0.1
+note: to see what the problems were, use the option `--future-incompat-report`, or run `cargo report future-incompatibilities --id 1`
+     Running unittests src/main.rs (examples/agentfs-wasmer/native/target/debug/deps/celld_wasmer_runner-7031f6b4784c0017)
+
+running 8 tests
+test packages::tests::allocator_failure_releases_reserved_quota ... ok
+test policy::tests::mutation_domains_follow_normalized_paths ... ok
+test packages::tests::rejected_growth_preserves_bytes_and_accounting ... ok
+test output::tests::bounded_output_remembers_overflow ... ok
+test memory::tests::guest_growth_is_limited_even_with_large_declared_maximum ... ok
+test memory::tests::oversized_minimum_is_rejected ... ok
+test packages::tests::append_split_and_clone_reserve_shared_quota_before_mutation ... ok
+test packages::tests::failed_temporary_file_growth_is_atomic_and_quota_is_reusable ... ok
+
+test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.05s

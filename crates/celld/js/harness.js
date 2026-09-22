@@ -2531,6 +2531,13 @@ class DurableObjectState {
   // them (for example the Wasmer filesystem service). A closed input gate or
   // live transaction would deadlock those callbacks or include guest writes
   // in an application transaction. Check before the first asynchronous step.
+  // Experimental stat-only native IPC capability. It dies with this storage
+  // activation and must be revoked before cancelling/releasing a command.
+  experimentalAgentFsStat(token, deadline) {
+    if (token != null) this.assertCanAwaitCallback();
+    __agentfs_capability(this._scope, token, deadline);
+    return this._scope;
+  }
   assertCanAwaitCallback() {
     const root = this.storage._transactionRoot;
     if (this._blockDepth > 0 || root._synchronousCallbackDepth > 0 ||

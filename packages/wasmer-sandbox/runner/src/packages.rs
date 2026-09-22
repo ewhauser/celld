@@ -117,3 +117,120 @@ pub fn root(
         .build();
     wasmer_wasix::fs::WasiFsRoot::from_mount_fs(root).with_memory_limiter_opt(Some(limiter))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::Ordering;
+    use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
+    use virtual_fs::{FileSystem, limiter::TrackedVec};
+
+    #[test]
+    fn rejected_growth_preserves_bytes_and_accounting() {
+        let limit = Arc::new(MemoryLimit::default());
+        let mut bytes = TrackedVec::new(Some(limit.clone()));
+        bytes.extend_from_slice(b"keep").unwrap();
+        let used = limit.0.load(Ordering::SeqCst);
+        for _ in 0..2 {
+            assert!(bytes.resize(17 * 1024 * 1024, 0).is_err());
+            assert_eq!(bytes.len(), 4);
+            assert_eq!(&*bytes, b"keep");
+            assert_eq!(limit.0.load(Ordering::SeqCst), used);
+        }
+        drop(bytes);
+        assert_eq!(limit.0.load(Ordering::SeqCst), 0);
+        TrackedVec::with_capacity(1, Some(limit)).unwrap();
+    }
+
+    #[test]
+    fn append_split_and_clone_reserve_shared_quota_before_mutation() {
+        let limit = Arc::new(MemoryLimit::default());
+        let mut full = TrackedVec::with_capacity(16 * 1024 * 1024, Some(limit.clone())).unwrap();
+        full.extend_from_slice(b"keep").unwrap();
+        let mut extra = TrackedVec::new(None);
+        extra.extend_from_slice(b"x").unwrap();
+        assert!(full.split_off(3).is_err());
+        assert!(full.try_clone().is_err());
+        full.resize(16 * 1024 * 1024, 0).unwrap();
+        assert!(full.append(&mut extra).is_err());
+        assert_eq!(full.len(), 16 * 1024 * 1024);
+        assert_eq!(&full[..4], b"keep");
+        assert_eq!(&*extra, b"x");
+        drop(full);
+        assert_eq!(limit.0.load(Ordering::SeqCst), 0);
+        let mut small = TrackedVec::new(Some(limit.clone()));
+        small.extend_from_slice(b"copy").unwrap();
+        let copy = small.clone();
+        assert_eq!(limit.0.load(Ordering::SeqCst), 8);
+        drop(copy);
+        drop(small);
+        assert_eq!(limit.0.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn allocator_failure_releases_reserved_quota() {
+        #[derive(Debug, Default)]
+        struct Counting(std::sync::atomic::AtomicUsize);
+        impl virtual_fs::limiter::FsMemoryLimiter for Counting {
+            fn on_grow(&self, n: usize) -> Result<(), virtual_fs::FsError> {
+                self.0.fetch_add(n, Ordering::SeqCst);
+                Ok(())
+            }
+            fn on_shrink(&self, n: usize) {
+                self.0.fetch_sub(n, Ordering::SeqCst);
+            }
+        }
+        let limit = Arc::new(Counting::default());
+        let mut bytes = TrackedVec::new(Some(limit.clone()));
+        // Vec rejects capacities above isize::MAX before calling the allocator.
+        assert!(bytes.reserve_exact(usize::MAX).is_err());
+        assert_eq!(limit.0.load(Ordering::SeqCst), 0);
+        bytes.extend_from_slice(b"ok").unwrap();
+        drop(bytes);
+        assert_eq!(limit.0.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn failed_temporary_file_growth_is_atomic_and_quota_is_reusable() {
+        let fs = root(&Default::default(), &Default::default(), "");
+        let mut a = fs
+            .new_open_options()
+            .read(true)
+            .write(true)
+            .create(true)
+            .open("/tmp/a")
+            .unwrap();
+        a.write_all(b"keep").await.unwrap();
+        for _ in 0..2 {
+            assert!(a.set_len(17 * 1024 * 1024).is_err());
+            assert_eq!(a.size(), 4);
+        }
+        a.seek(std::io::SeekFrom::Start(16 * 1024 * 1024 - 1))
+            .await
+            .unwrap();
+        assert!(a.write_all(b"xx").await.is_err());
+        a.rewind().await.unwrap();
+        let mut data = Vec::new();
+        a.read_to_end(&mut data).await.unwrap();
+        assert_eq!(data, b"keep");
+        drop(a);
+        fs.remove_file(std::path::Path::new("/tmp/a")).unwrap();
+        let mut b = fs
+            .new_open_options()
+            .write(true)
+            .create(true)
+            .open("/tmp/b")
+            .unwrap();
+        b.set_len(16 * 1024 * 1024).unwrap();
+        let mut c = fs
+            .new_open_options()
+            .write(true)
+            .create(true)
+            .open("/tmp/c")
+            .unwrap();
+        assert!(c.write_all(b"x").await.is_err());
+        drop(b);
+        fs.remove_file(std::path::Path::new("/tmp/b")).unwrap();
+        c.write_all(b"x").await.unwrap();
+    }
+}

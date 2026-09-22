@@ -3,6 +3,8 @@ FROM rust:1.97.1-bookworm AS build
 WORKDIR /build
 COPY runner/Cargo.toml runner/Cargo.lock ./
 COPY runner/src ./src
+COPY runner/ipc ./ipc
+COPY runner/vendor ./vendor
 RUN --mount=type=cache,id=celld-wasmer-registry,target=/usr/local/cargo/registry \
     --mount=type=cache,id=celld-wasmer-build,target=/build/target \
     cargo build --release --locked && cp target/release/celld-wasmer-runner /usr/local/bin/

@@ -5,6 +5,12 @@ use std::{
 fn main() {
     let mode = std::env::args().nth(1).unwrap_or("basic".into());
     match mode.as_str() {
+        "stat-bench" => {
+            let count: u32 = std::env::args().nth(2).unwrap_or("1000".into()).parse().unwrap();
+            let started = std::time::Instant::now();
+            for _ in 0..count { assert_eq!(fs::metadata("/workspace/input.txt").unwrap().len(), 15); }
+            println!("{}", started.elapsed().as_micros());
+        }
         "wait" => {
             fs::write("/workspace/partial", b"committed").unwrap();
             loop {
@@ -16,6 +22,39 @@ fn main() {
             let _ = std::io::stdout().write_all(&[b'x'; 4096]);
         },
         "trap" => panic!("intentional trap"),
+        "quota" => {
+            let mut f = fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .create(true)
+                .truncate(true)
+                .open("/tmp/quota")
+                .unwrap();
+            f.write_all(b"keep").unwrap();
+            for _ in 0..2 {
+                assert!(f.set_len(17 * 1024 * 1024).is_err());
+                assert_eq!(f.metadata().unwrap().len(), 4);
+            }
+            // A huge sparse growth must reject without trying to allocate it.
+            assert!(f.set_len(1u64 << 40).is_err());
+            f.seek(SeekFrom::Start(16 * 1024 * 1024 - 1)).unwrap();
+            assert!(f.write_all(b"xx").is_err());
+            f.rewind().unwrap();
+            let mut bytes = Vec::new();
+            f.read_to_end(&mut bytes).unwrap();
+            assert_eq!(bytes, b"keep");
+            drop(f);
+            fs::remove_file("/tmp/quota").unwrap();
+            fs::write("/tmp/small", b"x").unwrap();
+            fs::remove_file("/tmp/small").unwrap();
+            let f = fs::File::create("/tmp/full").unwrap();
+            f.set_len(16 * 1024 * 1024).unwrap();
+            assert!(fs::write("/tmp/extra", b"x").is_err());
+            drop(f);
+            fs::remove_file("/tmp/full").unwrap();
+            fs::write("/tmp/extra", b"x").unwrap();
+            println!("quota-preserved");
+        }
         "isolation" => {
             assert_eq!(core::arch::wasm32::memory_grow::<0>(9000), usize::MAX);
             assert!(fs::read("/etc/passwd").is_err());

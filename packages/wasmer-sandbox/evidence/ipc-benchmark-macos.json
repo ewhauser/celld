@@ -1,0 +1,337 @@
+{
+  "date": "2026-09-22T21:03:33.019Z",
+  "platform": "darwin",
+  "checks": [
+    "unauthorized control and stale callbacks rejected",
+    "real DO/shared Wasmer sparse I/O, shrink/growth, append, rename, stdin/env/stdout/stderr",
+    "durable replay and payload conflict",
+    "real celld transactionSync, transaction and blockConcurrencyWhile deadlock guards",
+    "exit status, traps, host/network isolation, CPU timeout and bounded output",
+    "temporary quota rejects repeated/huge growth atomically and reclaims capacity",
+    "cancellation fences writes and preserves committed prefix",
+    "native stat: persistent binary connection, metadata, path confinement, auth, ordering, input gate, expiry and revocation",
+    "native IPC rejects oversized, empty, unknown-version and truncated requests",
+    "LTX restore without the prior runtime directory",
+    "native capability is not resurrected by process restart or LTX restore",
+    "owner process loss restores committed prefix, interrupts command and fences former execution"
+  ],
+  "commands": [
+    {
+      "id": "basic",
+      "status": "succeeded",
+      "result": {
+        "exitCode": 0,
+        "reason": "exited",
+        "statCalls": {
+          "http": 0,
+          "native": 11
+        },
+        "stderr": "guest-stderr\n",
+        "stdout": "guest-ok\n"
+      },
+      "startedAt": 1790111013389,
+      "finishedAt": 1790111014023
+    },
+    {
+      "id": "exit",
+      "status": "failed",
+      "result": {
+        "exitCode": 42,
+        "reason": "exited",
+        "statCalls": {
+          "http": 0,
+          "native": 2
+        },
+        "stderr": "",
+        "stdout": ""
+      },
+      "startedAt": 1790111014047,
+      "finishedAt": 1790111014558
+    },
+    {
+      "id": "trap",
+      "status": "failed",
+      "result": {
+        "exitCode": 45,
+        "reason": "exited",
+        "statCalls": {
+          "http": 0,
+          "native": 2
+        },
+        "stderr": "\nthread 'main' (1) panicked at packages/wasmer-sandbox/test/guest.rs:24:19:\nintentional trap\nnote: run with `RUST_BACKTRACE=1` environment variable to display a backtrace\n",
+        "stdout": ""
+      },
+      "startedAt": 1790111014570,
+      "finishedAt": 1790111014973
+    },
+    {
+      "id": "isolation",
+      "status": "succeeded",
+      "result": {
+        "exitCode": 0,
+        "reason": "exited",
+        "statCalls": {
+          "http": 0,
+          "native": 5
+        },
+        "stderr": "",
+        "stdout": "isolated\n"
+      },
+      "startedAt": 1790111014984,
+      "finishedAt": 1790111015496
+    },
+    {
+      "id": "timeout",
+      "status": "timed_out",
+      "result": {
+        "reason": "timed_out",
+        "exitCode": 124,
+        "stdout": "",
+        "stderr": "execution stopped"
+      },
+      "startedAt": 1790111015507,
+      "finishedAt": 1790111017128
+    },
+    {
+      "id": "output",
+      "status": "failed",
+      "result": {
+        "reason": "failed",
+        "exitCode": 125,
+        "stdout": "",
+        "stderr": "runner terminated without a valid result"
+      },
+      "startedAt": 1790111017140,
+      "finishedAt": 1790111018234
+    },
+    {
+      "id": "quota",
+      "status": "succeeded",
+      "result": {
+        "exitCode": 0,
+        "reason": "exited",
+        "statCalls": {
+          "http": 0,
+          "native": 2
+        },
+        "stderr": "",
+        "stdout": "quota-preserved\n"
+      },
+      "startedAt": 1790111018246,
+      "finishedAt": 1790111018694
+    },
+    {
+      "id": "cancel",
+      "status": "cancelled",
+      "result": {
+        "reason": "cancelled",
+        "exitCode": 124,
+        "stdout": "",
+        "stderr": "execution stopped"
+      },
+      "startedAt": 1790111018704,
+      "finishedAt": 1790111018735
+    }
+  ],
+  "benchmark": {
+    "description": "Same guest, cell, file and output gates; alternating HTTP/native order; pair 0 excluded as warmup. Guest interval excludes compilation and command launch. Debug builds; local macOS only.",
+    "count": 1000,
+    "httpMedianMicroseconds": 870888,
+    "ipcMedianMicroseconds": 160212,
+    "ratio": 5.4358475020597705,
+    "samples": [
+      {
+        "pair": 0,
+        "warmup": true,
+        "native": false,
+        "count": 1000,
+        "guestMicroseconds": 884961,
+        "commandMilliseconds": 1323.1455839999999,
+        "statCalls": {
+          "http": 1006,
+          "native": 0
+        }
+      },
+      {
+        "pair": 0,
+        "warmup": true,
+        "native": true,
+        "count": 1000,
+        "guestMicroseconds": 162657,
+        "commandMilliseconds": 685.0718340000003,
+        "statCalls": {
+          "http": 0,
+          "native": 1006
+        }
+      },
+      {
+        "pair": 1,
+        "warmup": false,
+        "native": true,
+        "count": 1000,
+        "guestMicroseconds": 160131,
+        "commandMilliseconds": 680.4803329999995,
+        "statCalls": {
+          "http": 0,
+          "native": 1006
+        }
+      },
+      {
+        "pair": 1,
+        "warmup": false,
+        "native": false,
+        "count": 1000,
+        "guestMicroseconds": 883515,
+        "commandMilliseconds": 1300.5882089999996,
+        "statCalls": {
+          "http": 1006,
+          "native": 0
+        }
+      },
+      {
+        "pair": 2,
+        "warmup": false,
+        "native": false,
+        "count": 1000,
+        "guestMicroseconds": 864457,
+        "commandMilliseconds": 1279.710665999999,
+        "statCalls": {
+          "http": 1006,
+          "native": 0
+        }
+      },
+      {
+        "pair": 2,
+        "warmup": false,
+        "native": true,
+        "count": 1000,
+        "guestMicroseconds": 160661,
+        "commandMilliseconds": 691.3019999999997,
+        "statCalls": {
+          "http": 0,
+          "native": 1006
+        }
+      },
+      {
+        "pair": 3,
+        "warmup": false,
+        "native": true,
+        "count": 1000,
+        "guestMicroseconds": 160738,
+        "commandMilliseconds": 576.9409169999999,
+        "statCalls": {
+          "http": 0,
+          "native": 1006
+        }
+      },
+      {
+        "pair": 3,
+        "warmup": false,
+        "native": false,
+        "count": 1000,
+        "guestMicroseconds": 870888,
+        "commandMilliseconds": 1287.4052080000001,
+        "statCalls": {
+          "http": 1006,
+          "native": 0
+        }
+      },
+      {
+        "pair": 4,
+        "warmup": false,
+        "native": false,
+        "count": 1000,
+        "guestMicroseconds": 863237,
+        "commandMilliseconds": 1278.9976669999996,
+        "statCalls": {
+          "http": 1006,
+          "native": 0
+        }
+      },
+      {
+        "pair": 4,
+        "warmup": false,
+        "native": true,
+        "count": 1000,
+        "guestMicroseconds": 159899,
+        "commandMilliseconds": 681.1610419999997,
+        "statCalls": {
+          "http": 0,
+          "native": 1006
+        }
+      },
+      {
+        "pair": 5,
+        "warmup": false,
+        "native": true,
+        "count": 1000,
+        "guestMicroseconds": 164879,
+        "commandMilliseconds": 586.1849999999977,
+        "statCalls": {
+          "http": 0,
+          "native": 1006
+        }
+      },
+      {
+        "pair": 5,
+        "warmup": false,
+        "native": false,
+        "count": 1000,
+        "guestMicroseconds": 908930,
+        "commandMilliseconds": 1358.4161669999994,
+        "statCalls": {
+          "http": 1006,
+          "native": 0
+        }
+      },
+      {
+        "pair": 6,
+        "warmup": false,
+        "native": false,
+        "count": 1000,
+        "guestMicroseconds": 876318,
+        "commandMilliseconds": 1295.4217080000017,
+        "statCalls": {
+          "http": 1006,
+          "native": 0
+        }
+      },
+      {
+        "pair": 6,
+        "warmup": false,
+        "native": true,
+        "count": 1000,
+        "guestMicroseconds": 159141,
+        "commandMilliseconds": 573.101791000001,
+        "statCalls": {
+          "http": 0,
+          "native": 1006
+        }
+      },
+      {
+        "pair": 7,
+        "warmup": false,
+        "native": true,
+        "count": 1000,
+        "guestMicroseconds": 160212,
+        "commandMilliseconds": 577.2360410000001,
+        "statCalls": {
+          "http": 0,
+          "native": 1006
+        }
+      },
+      {
+        "pair": 7,
+        "warmup": false,
+        "native": false,
+        "count": 1000,
+        "guestMicroseconds": 869442,
+        "commandMilliseconds": 1284.9006249999984,
+        "statCalls": {
+          "http": 1006,
+          "native": 0
+        }
+      }
+    ]
+  }
+}

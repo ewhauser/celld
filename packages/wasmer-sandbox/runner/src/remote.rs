@@ -13,8 +13,22 @@ use virtual_fs::{
     ReadDir, VirtualFile,
 };
 
+#[derive(Debug, serde::Deserialize)]
+pub struct NativeStat {
+    pub socket: String,
+    pub scope: String,
+}
+#[derive(Debug)]
+struct NativeConnection {
+    config: NativeStat,
+    stream: Option<std::os::unix::net::UnixStream>,
+    next: u64,
+}
 #[derive(Debug, Clone)]
 pub struct Remote {
+    native_stat: Option<Arc<Mutex<NativeConnection>>>,
+    native_stat_calls: Arc<std::sync::atomic::AtomicU64>,
+    http_stat_calls: Arc<std::sync::atomic::AtomicU64>,
     url: String,
     token: String,
     sequence: Arc<Mutex<u64>>,
@@ -25,6 +39,9 @@ pub struct Remote {
 impl Remote {
     pub fn new(url: String, token: String, callback_token: String) -> Self {
         Self {
+            native_stat: None,
+            native_stat_calls: Default::default(),
+            http_stat_calls: Default::default(),
             url,
             token,
             callback_token,
@@ -32,6 +49,44 @@ impl Remote {
             sequence: Arc::new(Mutex::new(0)),
             poisoned: Default::default(),
         }
+    }
+    pub fn stat_counts(&self) -> Value {
+        use std::sync::atomic::Ordering;
+        json!({"native":self.native_stat_calls.load(Ordering::Relaxed),"http":self.http_stat_calls.load(Ordering::Relaxed)})
+    }
+    pub fn set_native_stat(&mut self, config: Option<NativeStat>) {
+        self.native_stat = config.map(|config| {
+            Arc::new(Mutex::new(NativeConnection {
+                config,
+                stream: None,
+                next: 1,
+            }))
+        });
+    }
+    fn native_stat(
+        &self,
+        path: &str,
+        state: &Mutex<NativeConnection>,
+    ) -> io::Result<Result<celld_agentfs_ipc::Stat, celld_agentfs_ipc::Error>> {
+        let mut state = state
+            .lock()
+            .map_err(|_| io::Error::other("IPC lock poisoned"))?;
+        if state.stream.is_none() {
+            let stream = std::os::unix::net::UnixStream::connect(&state.config.socket)?;
+            stream.set_read_timeout(Some(std::time::Duration::from_secs(5)))?;
+            stream.set_write_timeout(Some(std::time::Duration::from_secs(5)))?;
+            state.stream = Some(stream);
+        }
+        let request = celld_agentfs_ipc::Request {
+            scope: state.config.scope.clone(),
+            token: self.token.clone(),
+            sequence: state.next,
+            path: path.into(),
+        };
+        state.next += 1;
+        let stream = state.stream.as_mut().unwrap();
+        celld_agentfs_ipc::write_frame(stream, &request.encode()?)?;
+        celld_agentfs_ipc::decode_response(&celld_agentfs_ipc::read_frame(stream)?)
     }
     pub fn call(&self, mut value: Value) -> virtual_fs::Result<Value> {
         use std::sync::atomic::Ordering;
@@ -41,8 +96,6 @@ impl Remote {
         // Serialize all operations, including heartbeats. No ambiguous request
         // is retried: the DO caches the previous sequence for transport replay.
         let mut seq = self.sequence.lock().map_err(|_| FsError::IOError)?;
-        *seq += 1;
-        value["seq"] = json!(*seq);
         if self.mounted {
             for key in ["path", "to"] {
                 if let Some(path) = value[key].as_str() {
@@ -50,7 +103,40 @@ impl Remote {
                     value[key] = json!(path);
                 }
             }
+            if value["op"] == "stat"
+                && let Some(native) = &self.native_stat
+            {
+                self.native_stat_calls.fetch_add(1, Ordering::Relaxed);
+                match self.native_stat(value["path"].as_str().ok_or(FsError::InvalidInput)?, native)
+                {
+                    Ok(Ok(s)) => {
+                        return Ok(
+                            json!({"ino":s.ino,"size":s.size,"mode":s.mode,"dir":s.mode & 0o170000 == 0o40000,"atime":s.atime,"mtime":s.mtime,"ctime":s.ctime}),
+                        );
+                    }
+                    Ok(Err(code)) => {
+                        if matches!(
+                            code,
+                            celld_agentfs_ipc::Error::Stale
+                                | celld_agentfs_ipc::Error::Busy
+                                | celld_agentfs_ipc::Error::Io
+                        ) {
+                            self.poisoned.store(true, Ordering::SeqCst);
+                        }
+                        return Err(fs_error(code.code()));
+                    }
+                    Err(_) => {
+                        self.poisoned.store(true, Ordering::SeqCst);
+                        return Err(FsError::IOError);
+                    }
+                }
+            }
         }
+        if value["op"] == "stat" {
+            self.http_stat_calls.fetch_add(1, Ordering::Relaxed);
+        }
+        *seq += 1;
+        value["seq"] = json!(*seq);
         value["token"] = json!(self.token);
         let agent = ureq::AgentBuilder::new()
             .redirects(0)
@@ -78,21 +164,7 @@ impl Remote {
             }
         };
         if let Some(code) = v["code"].as_str() {
-            return Err(match code {
-                "ENOENT" => FsError::EntryNotFound,
-                "EEXIST" => FsError::AlreadyExists,
-                "EACCES" => FsError::PermissionDenied,
-                "EBADF" => FsError::InvalidFd,
-                "ENOTDIR" => FsError::BaseNotDirectory,
-                "EISDIR" => FsError::NotAFile,
-                "ENOTEMPTY" => FsError::DirectoryNotEmpty,
-                "EINVAL" => FsError::InvalidInput,
-                "ENOSPC" => FsError::StorageFull,
-                "EMFILE" => FsError::IOError,
-                "ENOTSUP" => FsError::Unsupported,
-                "EBUSY" => FsError::Lock,
-                _ => FsError::IOError,
-            });
+            return Err(fs_error(code));
         }
         if v.get("value").is_none() {
             self.poisoned.store(true, Ordering::SeqCst);
@@ -310,5 +382,110 @@ impl RemoteFile {
 impl Drop for RemoteFile {
     fn drop(&mut self) {
         let _ = self.call(json!({"op":"close"}));
+    }
+}
+
+fn fs_error(code: &str) -> FsError {
+    match code {
+        "ENOENT" => FsError::EntryNotFound,
+        "EEXIST" => FsError::AlreadyExists,
+        "EACCES" => FsError::PermissionDenied,
+        "EBADF" => FsError::InvalidFd,
+        "ENOTDIR" => FsError::BaseNotDirectory,
+        "EISDIR" => FsError::NotAFile,
+        "ENOTEMPTY" => FsError::DirectoryNotEmpty,
+        "EINVAL" => FsError::InvalidInput,
+        "ENOSPC" => FsError::StorageFull,
+        "EMFILE" => FsError::IOError,
+        "ENOTSUP" => FsError::Unsupported,
+        "EBUSY" => FsError::Lock,
+        _ => FsError::IOError,
+    }
+}
+
+#[cfg(test)]
+mod ipc_tests {
+    use super::*;
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static NEXT: AtomicU64 = AtomicU64::new(1);
+    fn socket() -> (String, std::os::unix::net::UnixListener) {
+        let path = format!(
+            "/tmp/celld-stat-{}-{}.sock",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        );
+        let listener = std::os::unix::net::UnixListener::bind(&path).unwrap();
+        (path, listener)
+    }
+    #[test]
+    fn native_errors_preserve_connection_and_do_not_advance_http_sequence() {
+        let (path, listener) = socket();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            for seq in 1..=2 {
+                let r = celld_agentfs_ipc::Request::decode(
+                    &celld_agentfs_ipc::read_frame(&mut stream).unwrap(),
+                )
+                .unwrap();
+                assert_eq!(r.sequence, seq);
+                assert_eq!(r.path, "/workspace/file");
+                celld_agentfs_ipc::write_frame(
+                    &mut stream,
+                    &celld_agentfs_ipc::encode_response(Err(celld_agentfs_ipc::Error::Missing)),
+                )
+                .unwrap();
+            }
+        });
+        let mut remote = Remote::new(
+            "http://127.0.0.1:1".into(),
+            "token".into(),
+            "callback".into(),
+        );
+        remote.mounted = true;
+        remote.set_native_stat(Some(NativeStat {
+            socket: path.clone(),
+            scope: "Workspace:test".into(),
+        }));
+        for _ in 0..2 {
+            assert_eq!(
+                remote.call(json!({"op":"stat","path":"/file"})),
+                Err(FsError::EntryNotFound)
+            );
+        }
+        assert_eq!(*remote.sequence.lock().unwrap(), 0);
+        assert!(!remote.poisoned.load(Ordering::SeqCst));
+        server.join().unwrap();
+        std::fs::remove_file(path).unwrap();
+    }
+    #[test]
+    fn lost_response_poisons_execution_without_retry_or_http_fallback() {
+        let (path, listener) = socket();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            celld_agentfs_ipc::read_frame(&mut stream).unwrap();
+        });
+        let mut remote = Remote::new(
+            "http://127.0.0.1:1".into(),
+            "token".into(),
+            "callback".into(),
+        );
+        remote.set_native_stat(Some(NativeStat {
+            socket: path.clone(),
+            scope: "Workspace:test".into(),
+        }));
+        assert!(
+            remote
+                .call(json!({"op":"stat","path":"/workspace/file"}))
+                .is_err()
+        );
+        server.join().unwrap();
+        assert!(remote.poisoned.load(Ordering::SeqCst));
+        assert!(
+            remote
+                .call(json!({"op":"stat","path":"/workspace/file"}))
+                .is_err()
+        );
+        assert_eq!(remote.stat_counts(), json!({"native":1,"http":0}));
+        std::fs::remove_file(path).unwrap();
     }
 }

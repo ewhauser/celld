@@ -128,6 +128,7 @@ pub struct Cells {
 /// prevents asynchronous object-store work from recovering an epoch through a
 /// later ownership lookup after a takeover.
 struct OpenCell {
+    agentfs_stat: Option<crate::agentfs::Capability>,
     connection: Connection,
     epoch: u64,
     replicated_wake: bool,
@@ -927,6 +928,7 @@ fn finish_open(
         d.borrow_mut().insert(
             scope.to_string(),
             OpenCell {
+                agentfs_stat: None,
                 connection: c,
                 epoch,
                 replicated_wake,
@@ -4745,3 +4747,64 @@ pub fn bump_alarm_with_policy(scope: &str, now_ms: i64, counts_against_limit: bo
 
 #[cfg(celld_internal_tests)]
 include!(env!("CELLD_INTERNAL_STORAGE_OBSERVERS"));
+
+/// Install a process-local, activation-bound capability; never persisted or restored.
+pub(crate) fn agentfs_register(scope: &str, token: String, deadline: u64) -> anyhow::Result<()> {
+    anyhow::ensure!(!is_embedded(scope), "AgentFS IPC does not support facets");
+    let now = crate::ownership_store::now_ms();
+    anyhow::ensure!(
+        token.len() >= 32 && token.len() <= 128 && deadline > now && deadline - now <= 310_000,
+        "invalid AgentFS IPC capability"
+    );
+    dbs(|dbs| {
+        let mut dbs = dbs.borrow_mut();
+        let cell = dbs
+            .get_mut(scope)
+            .ok_or_else(|| anyhow::anyhow!("cell is not resident"))?;
+        anyhow::ensure!(
+            cell.agentfs_stat.is_none(),
+            "AgentFS IPC capability already active"
+        );
+        cell.agentfs_stat = Some(crate::agentfs::Capability {
+            token,
+            deadline,
+            next: 1,
+        });
+        Ok(())
+    })
+}
+pub(crate) fn agentfs_revoke(scope: &str) {
+    dbs(|dbs| {
+        if let Some(cell) = dbs.borrow_mut().get_mut(scope) {
+            cell.agentfs_stat = None;
+        }
+    });
+}
+/// Authenticate before inspecting even the input gate or transaction state.
+pub(crate) fn agentfs_authorized(request: &celld_agentfs_ipc::Request) -> bool {
+    dbs(|dbs| {
+        dbs.borrow()
+            .get(&request.scope)
+            .and_then(|cell| cell.agentfs_stat.as_ref())
+            .is_some_and(|cap| {
+                cap.validate(request, crate::ownership_store::now_ms())
+                    .is_ok()
+            })
+    })
+}
+pub(crate) fn agentfs_stat(
+    request: &celld_agentfs_ipc::Request,
+) -> Result<celld_agentfs_ipc::Stat, celld_agentfs_ipc::Error> {
+    use celld_agentfs_ipc::Error;
+    require_sql_healthy(&request.scope).map_err(|_| Error::Io)?;
+    dbs(|dbs| {
+        let mut dbs = dbs.borrow_mut();
+        let cell = dbs.get_mut(&request.scope).ok_or(Error::Stale)?;
+        let cap = cell.agentfs_stat.as_mut().ok_or(Error::Stale)?;
+        cap.admit(request, crate::ownership_store::now_ms())?;
+        if !cell.connection.is_autocommit() {
+            return Err(Error::Busy);
+        }
+        crate::agentfs::stat(&cell.connection, &request.path)
+    })
+}

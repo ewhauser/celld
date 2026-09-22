@@ -1,0 +1,388 @@
+{
+  "date": "2026-09-22T21:00:28.394Z",
+  "platform": "darwin",
+  "checks": [
+    "unauthorized control and stale callbacks rejected",
+    "real DO/shared Wasmer sparse I/O, shrink/growth, append, rename, stdin/env/stdout/stderr",
+    "durable replay and payload conflict",
+    "real celld transactionSync, transaction and blockConcurrencyWhile deadlock guards",
+    "exit status, traps, host/network isolation, CPU timeout and bounded output",
+    "temporary quota rejects repeated/huge growth atomically and reclaims capacity",
+    "cancellation fences writes and preserves committed prefix",
+    "native stat: persistent binary connection, metadata, path confinement, auth, ordering, input gate, expiry and revocation",
+    "native IPC rejects oversized, empty, unknown-version and truncated requests",
+    "Bash, pipeline and coreutils on the durable filesystem",
+    "explicit coreutils entrypoint on a multi-command package",
+    "Python stdlib on the durable filesystem",
+    "LTX restore without the prior runtime directory",
+    "native capability is not resurrected by process restart or LTX restore",
+    "owner process loss restores committed prefix, interrupts command and fences former execution"
+  ],
+  "commands": [
+    {
+      "id": "basic",
+      "status": "succeeded",
+      "result": {
+        "exitCode": 0,
+        "reason": "exited",
+        "statCalls": {
+          "http": 0,
+          "native": 11
+        },
+        "stderr": "guest-stderr\n",
+        "stdout": "guest-ok\n"
+      },
+      "startedAt": 1790110828995,
+      "finishedAt": 1790110829691
+    },
+    {
+      "id": "exit",
+      "status": "failed",
+      "result": {
+        "exitCode": 42,
+        "reason": "exited",
+        "statCalls": {
+          "http": 0,
+          "native": 2
+        },
+        "stderr": "",
+        "stdout": ""
+      },
+      "startedAt": 1790110829716,
+      "finishedAt": 1790110830253
+    },
+    {
+      "id": "trap",
+      "status": "failed",
+      "result": {
+        "exitCode": 45,
+        "reason": "exited",
+        "statCalls": {
+          "http": 0,
+          "native": 2
+        },
+        "stderr": "\nthread 'main' (1) panicked at packages/wasmer-sandbox/test/guest.rs:24:19:\nintentional trap\nnote: run with `RUST_BACKTRACE=1` environment variable to display a backtrace\n",
+        "stdout": ""
+      },
+      "startedAt": 1790110830264,
+      "finishedAt": 1790110830803
+    },
+    {
+      "id": "isolation",
+      "status": "succeeded",
+      "result": {
+        "exitCode": 0,
+        "reason": "exited",
+        "statCalls": {
+          "http": 0,
+          "native": 5
+        },
+        "stderr": "",
+        "stdout": "isolated\n"
+      },
+      "startedAt": 1790110830816,
+      "finishedAt": 1790110831360
+    },
+    {
+      "id": "timeout",
+      "status": "timed_out",
+      "result": {
+        "reason": "timed_out",
+        "exitCode": 124,
+        "stdout": "",
+        "stderr": "execution stopped"
+      },
+      "startedAt": 1790110831373,
+      "finishedAt": 1790110832889
+    },
+    {
+      "id": "output",
+      "status": "failed",
+      "result": {
+        "reason": "failed",
+        "exitCode": 125,
+        "stdout": "",
+        "stderr": "runner terminated without a valid result"
+      },
+      "startedAt": 1790110832899,
+      "finishedAt": 1790110833999
+    },
+    {
+      "id": "quota",
+      "status": "succeeded",
+      "result": {
+        "exitCode": 0,
+        "reason": "exited",
+        "statCalls": {
+          "http": 0,
+          "native": 2
+        },
+        "stderr": "",
+        "stdout": "quota-preserved\n"
+      },
+      "startedAt": 1790110834012,
+      "finishedAt": 1790110834600
+    },
+    {
+      "id": "cancel",
+      "status": "cancelled",
+      "result": {
+        "reason": "cancelled",
+        "exitCode": 124,
+        "stdout": "",
+        "stderr": "execution stopped"
+      },
+      "startedAt": 1790110834613,
+      "finishedAt": 1790110834647
+    },
+    {
+      "id": "bash",
+      "status": "succeeded",
+      "result": {
+        "exitCode": 0,
+        "reason": "exited",
+        "statCalls": {
+          "http": 0,
+          "native": 16
+        },
+        "stderr": "",
+        "stdout": "8\n"
+      },
+      "startedAt": 1790110852384,
+      "finishedAt": 1790110861743
+    },
+    {
+      "id": "coreutils-direct",
+      "status": "succeeded",
+      "result": {
+        "exitCode": 0,
+        "reason": "exited",
+        "statCalls": {
+          "http": 0,
+          "native": 2
+        },
+        "stderr": "",
+        "stdout": "explicit-entrypoint\n"
+      },
+      "startedAt": 1790110861759,
+      "finishedAt": 1790110868790
+    },
+    {
+      "id": "python",
+      "status": "succeeded",
+      "result": {
+        "exitCode": 0,
+        "reason": "exited",
+        "statCalls": {
+          "http": 0,
+          "native": 42
+        },
+        "stderr": "",
+        "stdout": "{\"value\": 42}\n"
+      },
+      "startedAt": 1790110868801,
+      "finishedAt": 1790110917599
+    }
+  ],
+  "benchmark": {
+    "description": "Same guest, cell, file and output gates; alternating HTTP/native order; pair 0 excluded as warmup. Guest interval excludes compilation and command launch. Debug builds; local macOS only.",
+    "count": 1000,
+    "httpMedianMicroseconds": 977655,
+    "ipcMedianMicroseconds": 163489,
+    "ratio": 5.979943604768517,
+    "samples": [
+      {
+        "pair": 0,
+        "warmup": true,
+        "native": false,
+        "count": 1000,
+        "guestMicroseconds": 1135621,
+        "commandMilliseconds": 1709.3711669999993,
+        "statCalls": {
+          "http": 1006,
+          "native": 0
+        }
+      },
+      {
+        "pair": 0,
+        "warmup": true,
+        "native": true,
+        "count": 1000,
+        "guestMicroseconds": 176154,
+        "commandMilliseconds": 732.4526669999996,
+        "statCalls": {
+          "http": 0,
+          "native": 1006
+        }
+      },
+      {
+        "pair": 1,
+        "warmup": false,
+        "native": true,
+        "count": 1000,
+        "guestMicroseconds": 172218,
+        "commandMilliseconds": 611.8185830000002,
+        "statCalls": {
+          "http": 0,
+          "native": 1006
+        }
+      },
+      {
+        "pair": 1,
+        "warmup": false,
+        "native": false,
+        "count": 1000,
+        "guestMicroseconds": 1077926,
+        "commandMilliseconds": 1520.1563339999993,
+        "statCalls": {
+          "http": 1006,
+          "native": 0
+        }
+      },
+      {
+        "pair": 2,
+        "warmup": false,
+        "native": false,
+        "count": 1000,
+        "guestMicroseconds": 1011742,
+        "commandMilliseconds": 1567.3785829999997,
+        "statCalls": {
+          "http": 1006,
+          "native": 0
+        }
+      },
+      {
+        "pair": 2,
+        "warmup": false,
+        "native": true,
+        "count": 1000,
+        "guestMicroseconds": 173628,
+        "commandMilliseconds": 620.4482919999991,
+        "statCalls": {
+          "http": 0,
+          "native": 1006
+        }
+      },
+      {
+        "pair": 3,
+        "warmup": false,
+        "native": true,
+        "count": 1000,
+        "guestMicroseconds": 164197,
+        "commandMilliseconds": 597.2139999999999,
+        "statCalls": {
+          "http": 0,
+          "native": 1006
+        }
+      },
+      {
+        "pair": 3,
+        "warmup": false,
+        "native": false,
+        "count": 1000,
+        "guestMicroseconds": 976872,
+        "commandMilliseconds": 1411.5146670000013,
+        "statCalls": {
+          "http": 1006,
+          "native": 0
+        }
+      },
+      {
+        "pair": 4,
+        "warmup": false,
+        "native": false,
+        "count": 1000,
+        "guestMicroseconds": 977655,
+        "commandMilliseconds": 1523.4921249999989,
+        "statCalls": {
+          "http": 1006,
+          "native": 0
+        }
+      },
+      {
+        "pair": 4,
+        "warmup": false,
+        "native": true,
+        "count": 1000,
+        "guestMicroseconds": 159720,
+        "commandMilliseconds": 589.9856250000012,
+        "statCalls": {
+          "http": 0,
+          "native": 1006
+        }
+      },
+      {
+        "pair": 5,
+        "warmup": false,
+        "native": true,
+        "count": 1000,
+        "guestMicroseconds": 161749,
+        "commandMilliseconds": 593.6086250000008,
+        "statCalls": {
+          "http": 0,
+          "native": 1006
+        }
+      },
+      {
+        "pair": 5,
+        "warmup": false,
+        "native": false,
+        "count": 1000,
+        "guestMicroseconds": 895578,
+        "commandMilliseconds": 1322.2433750000018,
+        "statCalls": {
+          "http": 1006,
+          "native": 0
+        }
+      },
+      {
+        "pair": 6,
+        "warmup": false,
+        "native": false,
+        "count": 1000,
+        "guestMicroseconds": 974801,
+        "commandMilliseconds": 1402.343499999999,
+        "statCalls": {
+          "http": 1006,
+          "native": 0
+        }
+      },
+      {
+        "pair": 6,
+        "warmup": false,
+        "native": true,
+        "count": 1000,
+        "guestMicroseconds": 162302,
+        "commandMilliseconds": 592.086292,
+        "statCalls": {
+          "http": 0,
+          "native": 1006
+        }
+      },
+      {
+        "pair": 7,
+        "warmup": false,
+        "native": true,
+        "count": 1000,
+        "guestMicroseconds": 163489,
+        "commandMilliseconds": 596.4004999999997,
+        "statCalls": {
+          "http": 0,
+          "native": 1006
+        }
+      },
+      {
+        "pair": 7,
+        "warmup": false,
+        "native": false,
+        "count": 1000,
+        "guestMicroseconds": 1014897,
+        "commandMilliseconds": 1443.5295829999995,
+        "statCalls": {
+          "http": 1006,
+          "native": 0
+        }
+      }
+    ]
+  }
+}

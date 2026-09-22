@@ -23,6 +23,7 @@ struct Config {
     callback: String,
     token: String,
     callback_token: String,
+    native_stat: Option<remote::NativeStat>,
     tool: String,
     args: Vec<String>,
     env: BTreeMap<String, String>,
@@ -76,6 +77,7 @@ fn run() -> anyhow::Result<()> {
         "module digest mismatch"
     );
     let mut remote = remote::Remote::new(config.callback, config.token, config.callback_token);
+    remote.set_native_stat(config.native_stat);
     remote
         .call(json!({"op":"heartbeat"}))
         .map_err(|e| anyhow::anyhow!(e))?;
@@ -169,10 +171,10 @@ fn run() -> anyhow::Result<()> {
         if let Some(mounts) = pkg.package_mounts.take() {
             runner.with_mount("/".into(), Arc::new(mounts.to_mount_fs()?));
         }
-        let entry = config
-            .entrypoint
-            .as_deref()
-            .unwrap_or(pkg.infer_entrypoint()?);
+        let entry = match config.entrypoint.as_deref() {
+            Some(entry) => entry,
+            None => pkg.infer_entrypoint()?,
+        };
         let annotation = pkg
             .get_command(entry)
             .ok_or_else(|| anyhow::anyhow!("entrypoint missing"))?
@@ -218,7 +220,7 @@ fn run() -> anyhow::Result<()> {
         .map_err(|e| anyhow::anyhow!(e))?;
     println!(
         "{}",
-        json!({"reason":reason,"exitCode":code,"stdout":String::from_utf8_lossy(&out.bytes.lock().unwrap()),"stderr":String::from_utf8_lossy(&err.bytes.lock().unwrap())})
+        json!({"statCalls":remote.stat_counts(),"reason":reason,"exitCode":code,"stdout":String::from_utf8_lossy(&out.bytes.lock().unwrap()),"stderr":String::from_utf8_lossy(&err.bytes.lock().unwrap())})
     );
     Ok(())
 }

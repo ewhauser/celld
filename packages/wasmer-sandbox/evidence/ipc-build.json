@@ -1,0 +1,82 @@
+{
+  "date": "2026-09-22T21:04:30.612090+00:00",
+  "baseCommit": "21338a4229ca75aff7d6ae23d5d8fa154604cd7b",
+  "branch": "codex/agentfs-wasmer-exploration",
+  "state": "local uncommitted IPC experiment layered on existing review fixes",
+  "rust": "rustc 1.97.0 (2d8144b78 2026-07-07) (Homebrew)",
+  "node": "v26.5.0",
+  "platform": "Darwin arm64",
+  "sourceSha256": {
+    ".github/workflows/wasmer-sandbox.yml": "1007de29d6f2903222a530c91c8b55208e67249d209e684a9f4b6edce3957988",
+    "Cargo.lock": "f804c558c06f6d6bd14c0b99e13b57e374069092d8f20a5564ee472331ab8ead",
+    "Dockerfile": "5b010b3dc79606aa9e0c1c2b362a1507c1bb60090341630299972bda290bf893",
+    "crates/celld/Cargo.toml": "c61750ce794531d8b6daeb81c6a76e0adb08bbf7aca837fa3b310735836815ea",
+    "crates/celld/agentfs.rs": "5ecb33cd052548255611aed27d5da14e87797e4b213f5a12243c300930c2f801",
+    "crates/celld/agentfs_ipc_server.rs": "56bf7e693d4947e7fd218d79ca2dadddd27242dcd338b677f6efe53fbb73047e",
+    "crates/celld/js.rs": "902c37846e48735ea8f04cb742ca586ac0c474e54dc2cecb07d1d8c9f318a1c5",
+    "crates/celld/js/harness.js": "15976e3ccb423ab4ea8dcace7aa45ec39c1871764255f93701dee244671919f2",
+    "crates/celld/js/storage_ops.rs": "8b407009d28c9a320daf2a94f883290642190a9d391c8998b3c28f692bbabaee",
+    "crates/celld/lib.rs": "1e10f08535a8fdcc036167353a71e65beae4f86fa76838b00493b6fa3781ca48",
+    "crates/celld/main.rs": "33a3571f06c90fd00192d9621af723889af4e9ac27af38af8ccf791d506ee86f",
+    "crates/celld/runtime.rs": "f7d314cc5f380864762634cc07a91cd25122fcb49e635cedc782c19d63a62b4a",
+    "crates/celld/storage.rs": "009860f93c29f3ecc9e9a07d05b70c1fde14e1540218101f8434d31ba3eeee3b",
+    "packages/wasmer-sandbox/Dockerfile": "4327845affd1dbfb8bfbb86e25e3896fa8fbe8921361fd3ee53d64c48f393309",
+    "packages/wasmer-sandbox/runner/Cargo.lock": "06a12c9d0c5e9518ed690d1ce065acd4cdeffd924557151fe85ecf6f8961815b",
+    "packages/wasmer-sandbox/runner/Cargo.toml": "e3778b19473a5b8ba5bc678c0611be80ad3b54e20632c0530651b725d4fe8041",
+    "packages/wasmer-sandbox/runner/ipc/Cargo.toml": "f9d98f390047bd507f5e0b40ada9845852498fe1f11e480041ef032b2d4b5919",
+    "packages/wasmer-sandbox/runner/ipc/src/lib.rs": "76f6b402f3ec567d4976231d9cc835a2647cb6c20af828c90e0204a57aae09e6",
+    "packages/wasmer-sandbox/runner/src/main.rs": "0dbd4c118deadbeba9cf8f6cde4c7731a61abbc58b2285c47d5ba79a103b9585",
+    "packages/wasmer-sandbox/runner/src/packages.rs": "a5acb79a161f5a1c3191383abfb08784685619b647e7423b6a945dd870d1e446",
+    "packages/wasmer-sandbox/runner/src/remote.rs": "fdf76d651c438093b88d8ffe40692a9fa270ccd0902913618a6540c7fc56db35",
+    "packages/wasmer-sandbox/service/server.mjs": "9cbaf230bc923d824b6ba0be7d20553215a8e4d8b28021d7e295da56c27b3964",
+    "packages/wasmer-sandbox/src/index.ts": "1b29b1353fbeaf2948f9ad7f354e3d015847eb79383ed956859cbb24c937a924",
+    "packages/wasmer-sandbox/src/protocol.ts": "e08bd6546bb452b53beb596825598a0301aecd6c21e65b097e9f2b5f783808dc",
+    "packages/wasmer-sandbox/src/worker.ts": "e1266fd3b49fd05255cfc99b30a60384eb7a51fefe3ce9b1cd719c45ddd2d87d",
+    "packages/wasmer-sandbox/test/fleet.mjs": "0a21c41d5e3261f18a5a922f7d76ee8cc84329005bb1fb12a1c3fb5e1c7d97aa",
+    "packages/wasmer-sandbox/test/guest.rs": "d3766ee5cb0eb34e2f9bc43e1c45052c394a6146eaf98d701cf41590b8af7515",
+    "packages/wasmer-sandbox/test/integration.mjs": "979d8bd3f82b5f0e7edbd096960b999690ee19bdb8e0cf9a974450f1a9ddbd61",
+    "packages/wasmer-sandbox/test/native-stat.mjs": "a43975a3ccfd40427b39f8cdb3c46a5c89e7227b634c060a59434febd4b169c0",
+    "packages/wasmer-sandbox/test/sandbox.test.ts": "439cd615fbe10f6931ff35cd8a2fbf2e5c105d9546002f730cd9aa7e4e0ec2f3"
+  },
+  "images": {
+    "celld-wasmer-runtime:qualification": "sha256:965454e1d6cf9600687a23cc9b80adeae148acda6e836d20c43fe1b339261c11",
+    "celld-wasmer-sandbox:qualification": "sha256:594b6b8d0384aaa04d606ae9323f026f35cf9addbfd2b87521ca27cd95e1d8e6",
+    "celld-wasmer-linux-tests:qualification": "sha256:c55cb2443bbd5b5d20ea2b47fdd9fe349d6632b7c33633d6c475943201cf72b8"
+  },
+  "containers": {
+    "celld-ipc-final-20260922": {
+      "Status": "exited",
+      "Running": false,
+      "Paused": false,
+      "Restarting": false,
+      "OOMKilled": false,
+      "Dead": false,
+      "Pid": 0,
+      "ExitCode": 0,
+      "Error": "",
+      "StartedAt": "2026-09-22T21:03:09.489633935Z",
+      "FinishedAt": "2026-09-22T21:03:21.771938068Z"
+    },
+    "celld-ipc-http-final-20260922": {
+      "Status": "exited",
+      "Running": false,
+      "Paused": false,
+      "Restarting": false,
+      "OOMKilled": false,
+      "Dead": false,
+      "Pid": 0,
+      "ExitCode": 0,
+      "Error": "",
+      "StartedAt": "2026-09-22T21:03:21.876573756Z",
+      "FinishedAt": "2026-09-22T21:03:32.970756957Z"
+    }
+  },
+  "checks": {
+    "typescript": "passed",
+    "prettier": "passed",
+    "rustFormat": "passed",
+    "celldClippy": "passed with warnings denied",
+    "runnerClippy": "passed with warnings denied",
+    "hostedCI": "not run"
+  }
+}

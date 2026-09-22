@@ -116,7 +116,26 @@ export async function createSupervisor(config) {
       const cmd = command(b),
         tool = tools.get(cmd.tool);
       check(tool, "ENOENT", "tool not configured");
-      const fingerprint = JSON.stringify(cmd);
+      let nativeStat;
+      if (b.nativeStatScope !== undefined) {
+        check(
+          typeof config.nativeStatSocket === "string" &&
+            config.nativeStatSocket.startsWith("/"),
+          "ECONFIG",
+          "native stat socket is not configured",
+        );
+        check(
+          typeof b.nativeStatScope === "string" &&
+            b.nativeStatScope.length <= 1024 &&
+            b.nativeStatScope.endsWith(":" + workspace),
+          "EINVAL",
+        );
+        nativeStat = {
+          socket: config.nativeStatSocket,
+          scope: b.nativeStatScope,
+        };
+      }
+      const fingerprint = JSON.stringify({ cmd, nativeStat });
       const old = jobs.get(key);
       if (old) {
         check(old.fingerprint === fingerprint, "ECONFLICT");
@@ -242,6 +261,7 @@ export async function createSupervisor(config) {
             callback: new URL(`/v1/workspaces/${workspace}/fs`, callback).href,
             token: b.token,
             callbackToken: config.callbackToken,
+            nativeStat,
             development: config.development === true,
           }),
         );

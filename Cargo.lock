@@ -295,6 +295,7 @@ dependencies = [
  "base64 0.22.1",
  "bytes",
  "cbc",
+ "celld-agentfs-ipc",
  "celld-logic",
  "celld-ltx",
  "chrono",
@@ -357,6 +358,10 @@ dependencies = [
  "webpki-roots",
  "x25519-dalek",
 ]
+
+[[package]]
+name = "celld-agentfs-ipc"
+version = "0.1.0"
 
 [[package]]
 name = "celld-logic"

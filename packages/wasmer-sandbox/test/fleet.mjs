@@ -2,7 +2,15 @@
 // native helper, follower-only acknowledgement and former-owner suspension.
 import { spawn, execFileSync } from "node:child_process";
 import { createServer, request as httpRequest } from "node:http";
-import { mkdir, writeFile, readFile, open, rm } from "node:fs/promises";
+import {
+  mkdir,
+  writeFile,
+  readFile,
+  open,
+  rm,
+  mkdtemp,
+  chmod,
+} from "node:fs/promises";
 import { resolve, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { once } from "node:events";
@@ -32,6 +40,7 @@ const env = {
       dir,
       `node_modules/@esbuild/${process.platform}-${process.arch}/bin/esbuild`,
     ),
+  RUST_LOG: "warn,cell_console=info",
   CELLD_READY_FLEET_GATE_MS: "0",
   CELLD_REBALANCE_INTERVAL_MS: "0",
   CELLD_TOKIO_THREADS: "2",
@@ -41,6 +50,11 @@ const guest = resolve(dir, "test/guest.wasm"),
   runner =
     process.env.CELLD_WASMER_RUNNER ??
     resolve(dir, "runner/target/debug/celld-wasmer-runner");
+const nativeStat = process.env.SANDBOX_NATIVE_STAT_FLEET === "1";
+const socketDir = nativeStat
+  ? await mkdtemp("/tmp/celld-fleet-ipc-")
+  : undefined;
+if (socketDir) await chmod(socketDir, 0o700);
 const nodes = [];
 let supervisor,
   proxy,
@@ -157,7 +171,23 @@ try {
   );
   await writeFile(
     resolve(work, "worker.ts"),
-    `export {SandboxWorkspace,default} from ${JSON.stringify(resolve(dir, "example/worker.ts"))};`,
+    `import {SandboxWorkspace as Base,routeWorkspace} from ${JSON.stringify(resolve(dir, "src/worker.ts"))};
+export class SandboxWorkspace extends Base {
+ async fetch(req) {
+  const action=new URL(req.url).pathname.split('/').pop();
+  if(['native-register','native-mutate'].includes(action)) {
+   if(req.headers.get('authorization')!==${JSON.stringify(`Bearer ${token}`)})return new Response('',{status:401});
+   const body=await req.json();
+   if(action==='native-register')return Response.json({scope:this.ctx.experimentalAgentFsStat(body.token,Date.now()+120000)});
+   this.sandbox.fs.writeFile('/workspace/native-gate', new Uint8Array(13));
+   console.log('NATIVE_GATE_WRITE_COMPLETE');
+   await new Promise(r=>setTimeout(r,2000));
+   return Response.json({ok:true});
+  }
+  return super.fetch(req);
+ }
+}
+export default {fetch:routeWorkspace};`,
   );
   execFileSync(bin, ["deploy", work, ...fleetArgs], {
     env,
@@ -242,6 +272,14 @@ try {
       {
         env: {
           ...env,
+          ...(socketDir
+            ? {
+                CELLD_EXPERIMENTAL_AGENTFS_SOCKET: resolve(
+                  socketDir,
+                  `${i}.sock`,
+                ),
+              }
+            : {}),
           CELLD_WATCH: node.path,
           CELLD_NODE: `sandbox-${Date.now()}-${i}`,
         },
@@ -270,6 +308,21 @@ try {
   assert.equal(completed.status, "succeeded", JSON.stringify(completed));
   await sleep(4000); // allow all three node leases to be discovered
   const first = await owner();
+  let nativeCapability;
+  if (nativeStat) {
+    nativeCapability = { token: randomBytes(32).toString("hex") };
+    Object.assign(
+      nativeCapability,
+      await call("native-register", nativeCapability),
+    );
+    const { connect } = await import("./native-stat.mjs");
+    const c = await connect(resolve(socketDir, `${first.index}.sock`));
+    assert.equal(
+      (await c.call(nativeCapability.scope, nativeCapability.token, 1))[0],
+      0,
+    );
+    c.socket.destroy();
+  }
   let followerPath;
   evidence.followerAttempts = [];
   for (let attempt = 1; attempt <= 3; attempt++) {
@@ -321,6 +374,19 @@ try {
   pass(
     "another owner restores acknowledged state after prior owner and disk loss",
   );
+  if (nativeStat) {
+    const current = await owner(),
+      { connect } = await import("./native-stat.mjs");
+    const c = await connect(resolve(socketDir, `${current.index}.sock`));
+    assert.equal(
+      (await c.call(nativeCapability.scope, nativeCapability.token, 2))[0],
+      1,
+    );
+    c.socket.destroy();
+    pass(
+      "native IPC capability rejected on the new owner after prior owner and disk loss",
+    );
+  }
   const pending = post(
     "exec",
     { id: "partition", tool: "guest", args: ["wait"], timeoutMs: 30000 },
@@ -372,6 +438,52 @@ try {
   pass(
     "suspended owner expires, takeover fences old execution, resumed owner self-fences",
   );
+  if (nativeStat) {
+    // Only the takeover owner remains. With the bucket paused there is no
+    // follower or bucket proof available for the next committed write.
+    const current = await owner(),
+      capability = { token: randomBytes(32).toString("hex") };
+    Object.assign(capability, await call("native-register", capability));
+    const { connect } = await import("./native-stat.mjs");
+    const client = await connect(resolve(socketDir, `${current.index}.sock`));
+    docker("pause", name);
+    paused = true;
+    const write = post("native-mutate", {}, 15000).catch((e) => e);
+    let wrote = false;
+    for (let i = 0; i < 100; i++) {
+      if (
+        (
+          await readFile(resolve(work, `node-${current.index}.log`), "utf8")
+        ).includes("NATIVE_GATE_WRITE_COMPLETE")
+      ) {
+        wrote = true;
+        break;
+      }
+      await sleep(25);
+    }
+    assert.ok(
+      wrote,
+      "native gate test write must reach managed SQLite before the IPC read",
+    );
+    let settled = false;
+    const reply = client
+      .call(capability.scope, capability.token, 1, "/workspace/native-gate")
+      .finally(() => {
+        settled = true;
+      });
+    await sleep(500);
+    assert.equal(settled, false, "native stat must wait for durability proof");
+    docker("unpause", name);
+    paused = false;
+    const stat = await reply;
+    assert.equal(stat[0], 0);
+    assert.equal(Number(stat.readBigUInt64LE(9)), 13);
+    assert.equal((await write).status, 200);
+    client.socket.destroy();
+    pass(
+      "native read output is withheld while proof is unavailable and released after bucket recovery",
+    );
+  }
 } finally {
   if (paused) docker("unpause", name);
   for (const n of nodes) await terminate(n);
@@ -381,6 +493,7 @@ try {
     await new Promise((r) => proxy.close(r));
   }
   docker("rm", "-f", name);
+  if (socketDir) await rm(socketDir, { recursive: true, force: true });
   await writeFile(
     resolve(work, "results.json"),
     JSON.stringify(evidence, null, 2),
