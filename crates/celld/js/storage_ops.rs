@@ -1264,3 +1264,41 @@ pub(super) fn op_agentfs_capability(
         throw_storage_error(scope, "AgentFS IPC register", error);
     }
 }
+
+pub(super) fn op_agentfs_operation(
+    scope: &mut v8::PinScope,
+    args: v8::FunctionCallbackArguments,
+    mut rv: v8::ReturnValue<v8::Value>,
+) {
+    let cell = args.get(0).to_rust_string_lossy(scope);
+    let json = args.get(1).to_rust_string_lossy(scope);
+    if json.len() > 16384 {
+        return loader_throw(scope, "AgentFS metadata too large");
+    }
+    let Ok(operation) = serde_json::from_str::<serde_json::Value>(&json) else {
+        return loader_throw(scope, "invalid AgentFS operation");
+    };
+    let mut data = vec![];
+    if !args.get(2).is_null_or_undefined() {
+        let Ok(view) = v8::Local::<v8::ArrayBufferView>::try_from(args.get(2)) else {
+            return loader_throw(scope, "AgentFS data must be bytes");
+        };
+        if view.byte_length() > celld_agentfs_ipc::MAX_DATA {
+            return loader_throw(scope, "AgentFS data too large");
+        }
+        data.resize(view.byte_length(), 0);
+        if view.copy_contents(&mut data) != data.len() {
+            return loader_throw(scope, "unreadable AgentFS data");
+        }
+    }
+    let result = storage::agentfs_execute(&cell, &operation, &data, false);
+    let json = match result {
+        Ok(reply) if matches!(operation["op"].as_str(), Some("read" | "readFile")) => {
+            rv.set(bytes_value(scope, reply.data));
+            return;
+        }
+        Ok(reply) => serde_json::json!({"value":reply.value}).to_string(),
+        Err(error) => serde_json::json!({"code":error.code()}).to_string(),
+    };
+    rv.set(v8::String::new(scope, &json).unwrap().into());
+}

@@ -23,7 +23,7 @@ struct Config {
     callback: String,
     token: String,
     callback_token: String,
-    native_stat: Option<remote::NativeStat>,
+    native_filesystem: Option<remote::NativeFilesystem>,
     tool: String,
     args: Vec<String>,
     env: BTreeMap<String, String>,
@@ -77,7 +77,7 @@ fn run() -> anyhow::Result<()> {
         "module digest mismatch"
     );
     let mut remote = remote::Remote::new(config.callback, config.token, config.callback_token);
-    remote.set_native_stat(config.native_stat);
+    remote.set_native_filesystem(config.native_filesystem);
     remote
         .call(json!({"op":"heartbeat"}))
         .map_err(|e| anyhow::anyhow!(e))?;
@@ -220,7 +220,7 @@ fn run() -> anyhow::Result<()> {
         .map_err(|e| anyhow::anyhow!(e))?;
     println!(
         "{}",
-        json!({"statCalls":remote.stat_counts(),"reason":reason,"exitCode":code,"stdout":String::from_utf8_lossy(&out.bytes.lock().unwrap()),"stderr":String::from_utf8_lossy(&err.bytes.lock().unwrap())})
+        json!({"fsCalls":remote.fs_counts(),"statCalls":remote.stat_counts(),"reason":reason,"exitCode":code,"stdout":String::from_utf8_lossy(&out.bytes.lock().unwrap()),"stderr":String::from_utf8_lossy(&err.bytes.lock().unwrap())})
     );
     Ok(())
 }

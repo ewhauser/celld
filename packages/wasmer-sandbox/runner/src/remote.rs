@@ -14,21 +14,23 @@ use virtual_fs::{
 };
 
 #[derive(Debug, serde::Deserialize)]
-pub struct NativeStat {
+pub struct NativeFilesystem {
     pub socket: String,
     pub scope: String,
 }
 #[derive(Debug)]
 struct NativeConnection {
-    config: NativeStat,
+    config: NativeFilesystem,
     stream: Option<std::os::unix::net::UnixStream>,
     next: u64,
 }
 #[derive(Debug, Clone)]
 pub struct Remote {
-    native_stat: Option<Arc<Mutex<NativeConnection>>>,
+    native_filesystem: Option<Arc<Mutex<NativeConnection>>>,
     native_stat_calls: Arc<std::sync::atomic::AtomicU64>,
     http_stat_calls: Arc<std::sync::atomic::AtomicU64>,
+    native_calls: Arc<std::sync::atomic::AtomicU64>,
+    http_calls: Arc<std::sync::atomic::AtomicU64>,
     url: String,
     token: String,
     sequence: Arc<Mutex<u64>>,
@@ -39,9 +41,11 @@ pub struct Remote {
 impl Remote {
     pub fn new(url: String, token: String, callback_token: String) -> Self {
         Self {
-            native_stat: None,
+            native_filesystem: None,
             native_stat_calls: Default::default(),
             http_stat_calls: Default::default(),
+            native_calls: Default::default(),
+            http_calls: Default::default(),
             url,
             token,
             callback_token,
@@ -54,8 +58,12 @@ impl Remote {
         use std::sync::atomic::Ordering;
         json!({"native":self.native_stat_calls.load(Ordering::Relaxed),"http":self.http_stat_calls.load(Ordering::Relaxed)})
     }
-    pub fn set_native_stat(&mut self, config: Option<NativeStat>) {
-        self.native_stat = config.map(|config| {
+    pub fn fs_counts(&self) -> Value {
+        use std::sync::atomic::Ordering;
+        json!({"native":self.native_calls.load(Ordering::Relaxed),"http":self.http_calls.load(Ordering::Relaxed)})
+    }
+    pub fn set_native_filesystem(&mut self, config: Option<NativeFilesystem>) {
+        self.native_filesystem = config.map(|config| {
             Arc::new(Mutex::new(NativeConnection {
                 config,
                 stream: None,
@@ -63,11 +71,12 @@ impl Remote {
             }))
         });
     }
-    fn native_stat(
+    fn native_filesystem(
         &self,
-        path: &str,
+        operation: Value,
+        data: &[u8],
         state: &Mutex<NativeConnection>,
-    ) -> io::Result<Result<celld_agentfs_ipc::Stat, celld_agentfs_ipc::Error>> {
+    ) -> io::Result<Result<celld_agentfs_ipc::Reply, celld_agentfs_ipc::Error>> {
         let mut state = state
             .lock()
             .map_err(|_| io::Error::other("IPC lock poisoned"))?;
@@ -81,56 +90,64 @@ impl Remote {
             scope: state.config.scope.clone(),
             token: self.token.clone(),
             sequence: state.next,
-            path: path.into(),
+            operation,
+            data: data.to_vec(),
         };
         state.next += 1;
         let stream = state.stream.as_mut().unwrap();
         celld_agentfs_ipc::write_frame(stream, &request.encode()?)?;
         celld_agentfs_ipc::decode_response(&celld_agentfs_ipc::read_frame(stream)?)
     }
-    pub fn call(&self, mut value: Value) -> virtual_fs::Result<Value> {
+    pub fn call(&self, value: Value) -> virtual_fs::Result<Value> {
+        self.exchange(value, &[]).map(|reply| reply.value)
+    }
+    fn exchange(
+        &self,
+        mut value: Value,
+        data: &[u8],
+    ) -> virtual_fs::Result<celld_agentfs_ipc::Reply> {
         use std::sync::atomic::Ordering;
+        // One sequence for all native operations, including heartbeat/sync.
+        // A lost response is ambiguous: poison the command, never retry/fallback.
+        let mut seq = self.sequence.lock().map_err(|_| FsError::IOError)?;
         if self.poisoned.load(Ordering::SeqCst) {
             return Err(FsError::IOError);
         }
-        // Serialize all operations, including heartbeats. No ambiguous request
-        // is retried: the DO caches the previous sequence for transport replay.
-        let mut seq = self.sequence.lock().map_err(|_| FsError::IOError)?;
         if self.mounted {
             for key in ["path", "to"] {
                 if let Some(path) = value[key].as_str() {
-                    let path = format!("/workspace/{}", path.trim_start_matches('/'));
-                    value[key] = json!(path);
+                    value[key] = json!(format!("/workspace/{}", path.trim_start_matches('/')));
                 }
             }
-            if value["op"] == "stat"
-                && let Some(native) = &self.native_stat
-            {
+        }
+        if let Some(native) = &self.native_filesystem {
+            self.native_calls.fetch_add(1, Ordering::Relaxed);
+            if value["op"] == "stat" {
                 self.native_stat_calls.fetch_add(1, Ordering::Relaxed);
-                match self.native_stat(value["path"].as_str().ok_or(FsError::InvalidInput)?, native)
-                {
-                    Ok(Ok(s)) => {
-                        return Ok(
-                            json!({"ino":s.ino,"size":s.size,"mode":s.mode,"dir":s.mode & 0o170000 == 0o40000,"atime":s.atime,"mtime":s.mtime,"ctime":s.ctime}),
-                        );
-                    }
-                    Ok(Err(code)) => {
-                        if matches!(
-                            code,
-                            celld_agentfs_ipc::Error::Stale
-                                | celld_agentfs_ipc::Error::Busy
-                                | celld_agentfs_ipc::Error::Io
-                        ) {
-                            self.poisoned.store(true, Ordering::SeqCst);
-                        }
-                        return Err(fs_error(code.code()));
-                    }
-                    Err(_) => {
+            }
+            match self.native_filesystem(value, data, native) {
+                Ok(Ok(reply)) => return Ok(reply),
+                Ok(Err(code)) => {
+                    if matches!(
+                        code,
+                        celld_agentfs_ipc::Error::Stale
+                            | celld_agentfs_ipc::Error::Busy
+                            | celld_agentfs_ipc::Error::Io
+                    ) {
                         self.poisoned.store(true, Ordering::SeqCst);
-                        return Err(FsError::IOError);
                     }
+                    return Err(fs_error(code.code()));
+                }
+                Err(_) => {
+                    self.poisoned.store(true, Ordering::SeqCst);
+                    return Err(FsError::IOError);
                 }
             }
+        }
+        self.http_calls.fetch_add(1, Ordering::Relaxed);
+        let is_read = value["op"] == "read";
+        if value["op"] == "write" {
+            value["data"] = json!(data);
         }
         if value["op"] == "stat" {
             self.http_stat_calls.fetch_add(1, Ordering::Relaxed);
@@ -170,7 +187,15 @@ impl Remote {
             self.poisoned.store(true, Ordering::SeqCst);
             return Err(FsError::IOError);
         }
-        Ok(v["value"].clone())
+        let data = if is_read {
+            serde_json::from_value(v["value"]["data"].clone()).map_err(|_| FsError::IOError)?
+        } else {
+            vec![]
+        };
+        Ok(celld_agentfs_ipc::Reply {
+            value: v["value"].clone(),
+            data,
+        })
     }
     fn meta(v: Value) -> Metadata {
         Metadata {
@@ -278,9 +303,7 @@ impl AsyncRead for RemoteFile {
         _: &mut Context<'_>,
         b: &mut ReadBuf<'_>,
     ) -> Poll<io::Result<()>> {
-        let v =
-            self.call(json!({"op":"read","offset":self.offset,"size":b.remaining().min(65536)}))?;
-        let bytes: Vec<u8> = serde_json::from_value(v["data"].clone()).map_err(io::Error::other)?;
+        let bytes = self.remote.exchange(json!({"op":"read","handle":self.handle,"offset":self.offset,"size":b.remaining().min(65536)}), &[])?.data;
         if bytes.len() > b.remaining() {
             return Poll::Ready(Err(io::ErrorKind::InvalidData.into()));
         }
@@ -296,7 +319,13 @@ impl AsyncWrite for RemoteFile {
         b: &[u8],
     ) -> Poll<io::Result<usize>> {
         let n = b.len().min(65536);
-        let v = self.call(json!({"op":"write","offset":self.offset,"data":&b[..n]}))?;
+        let v = self
+            .remote
+            .exchange(
+                json!({"op":"write","handle":self.handle,"offset":self.offset}),
+                &b[..n],
+            )?
+            .value;
         let n = v["written"].as_u64().unwrap();
         if n > b.len() as u64 {
             return Poll::Ready(Err(io::ErrorKind::InvalidData.into()));
@@ -428,7 +457,7 @@ mod ipc_tests {
                 )
                 .unwrap();
                 assert_eq!(r.sequence, seq);
-                assert_eq!(r.path, "/workspace/file");
+                assert_eq!(r.operation["path"], "/workspace/file");
                 celld_agentfs_ipc::write_frame(
                     &mut stream,
                     &celld_agentfs_ipc::encode_response(Err(celld_agentfs_ipc::Error::Missing)),
@@ -442,7 +471,7 @@ mod ipc_tests {
             "callback".into(),
         );
         remote.mounted = true;
-        remote.set_native_stat(Some(NativeStat {
+        remote.set_native_filesystem(Some(NativeFilesystem {
             socket: path.clone(),
             scope: "Workspace:test".into(),
         }));
@@ -462,30 +491,41 @@ mod ipc_tests {
         let (path, listener) = socket();
         let server = std::thread::spawn(move || {
             let (mut stream, _) = listener.accept().unwrap();
-            celld_agentfs_ipc::read_frame(&mut stream).unwrap();
+            let r = celld_agentfs_ipc::Request::decode(
+                &celld_agentfs_ipc::read_frame(&mut stream).unwrap(),
+            )
+            .unwrap();
+            assert_eq!(r.operation["op"], "write");
+            assert_eq!(r.data, b"ambiguous mutation");
         });
         let mut remote = Remote::new(
             "http://127.0.0.1:1".into(),
             "token".into(),
             "callback".into(),
         );
-        remote.set_native_stat(Some(NativeStat {
+        remote.set_native_filesystem(Some(NativeFilesystem {
             socket: path.clone(),
             scope: "Workspace:test".into(),
         }));
         assert!(
             remote
-                .call(json!({"op":"stat","path":"/workspace/file"}))
+                .exchange(
+                    json!({"op":"write","handle":1,"offset":0}),
+                    b"ambiguous mutation"
+                )
                 .is_err()
         );
         server.join().unwrap();
         assert!(remote.poisoned.load(Ordering::SeqCst));
         assert!(
             remote
-                .call(json!({"op":"stat","path":"/workspace/file"}))
+                .exchange(
+                    json!({"op":"write","handle":1,"offset":0}),
+                    b"ambiguous mutation"
+                )
                 .is_err()
         );
-        assert_eq!(remote.stat_counts(), json!({"native":1,"http":0}));
+        assert_eq!(remote.fs_counts(), json!({"native":1,"http":0}));
         std::fs::remove_file(path).unwrap();
     }
 }

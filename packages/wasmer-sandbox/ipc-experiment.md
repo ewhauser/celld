@@ -1,3 +1,8 @@
+# Historical stat-only experiment
+
+Superseded by the [full native filesystem](native-filesystem.md). The configuration
+names, protocol version and benchmark below describe the earlier stat-only commit.
+
 # Native AgentFS stat over local IPC
 
 This opt-in experiment sends Wasmer **path `stat` operations only** to native

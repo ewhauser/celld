@@ -1,19 +1,38 @@
 // Copyright 2026 Deno Land Inc. Apache-2.0 license.
-
-//! Experimental, bounded AgentFS stat protocol. All integers are little endian.
-//! Each message is prefixed by a u32 payload length. No negotiated extensions,
-//! implicit retries, JSON, SQL, or filesystem paths outside /workspace.
+//! Version 2 local AgentFS protocol: bounded JSON metadata followed by raw bytes.
+//! Outer frames and metadata lengths are u32 little endian. No file data is JSON.
+use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use std::io::{self, Read, Write};
-pub const MAX_FRAME: usize = 8192;
+pub const MAX_FRAME: usize = 2 * 1024 * 1024;
+pub const MAX_DATA: usize = 1024 * 1024;
 pub const MAX_REQUESTS: u64 = 100_000;
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Request {
     pub scope: String,
     pub token: String,
     pub sequence: u64,
-    pub path: String,
+    pub operation: Value,
+    #[serde(skip)]
+    pub data: Vec<u8>,
 }
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Reply {
+    pub value: Value,
+    #[serde(skip)]
+    pub data: Vec<u8>,
+}
+impl Reply {
+    pub fn new(value: Value) -> Self {
+        Self {
+            value,
+            data: vec![],
+        }
+    }
+}
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct Stat {
     pub ino: u64,
     pub size: u64,
@@ -22,18 +41,49 @@ pub struct Stat {
     pub mtime: u64,
     pub ctime: u64,
 }
-#[repr(u8)]
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+impl Stat {
+    pub fn value(&self) -> Value {
+        let mut value = serde_json::to_value(self).unwrap();
+        value["dir"] = Value::Bool(self.mode & 0o170000 == 0o40000);
+        value
+    }
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Error {
-    Stale = 1,
-    Invalid = 2,
-    Access = 3,
-    Missing = 4,
-    NotDirectory = 5,
-    Loop = 6,
-    Unsupported = 7,
-    Io = 8,
-    Busy = 9,
+    #[serde(rename = "ESTALE")]
+    Stale,
+    #[serde(rename = "EINVAL")]
+    Invalid,
+    #[serde(rename = "EACCES")]
+    Access,
+    #[serde(rename = "ENOENT")]
+    Missing,
+    #[serde(rename = "ENOTDIR")]
+    NotDirectory,
+    #[serde(rename = "ELOOP")]
+    Loop,
+    #[serde(rename = "ENOTSUP")]
+    Unsupported,
+    #[serde(rename = "EIO")]
+    Io,
+    #[serde(rename = "EBUSY")]
+    Busy,
+    #[serde(rename = "EEXIST")]
+    Exists,
+    #[serde(rename = "EBADF")]
+    BadHandle,
+    #[serde(rename = "EMFILE")]
+    Handles,
+    #[serde(rename = "ENOSPC")]
+    Space,
+    #[serde(rename = "EISDIR")]
+    IsDirectory,
+    #[serde(rename = "ENOTEMPTY")]
+    NotEmpty,
+    #[serde(rename = "EFBIG")]
+    Big,
+    #[serde(rename = "ENAMETOOLONG")]
+    Name,
 }
 impl Error {
     pub fn code(self) -> &'static str {
@@ -47,104 +97,80 @@ impl Error {
             Self::Unsupported => "ENOTSUP",
             Self::Io => "EIO",
             Self::Busy => "EBUSY",
+            Self::Exists => "EEXIST",
+            Self::BadHandle => "EBADF",
+            Self::Handles => "EMFILE",
+            Self::Space => "ENOSPC",
+            Self::IsDirectory => "EISDIR",
+            Self::NotEmpty => "ENOTEMPTY",
+            Self::Big => "EFBIG",
+            Self::Name => "ENAMETOOLONG",
         }
     }
 }
 fn invalid() -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, "invalid AgentFS IPC frame")
 }
-fn string(out: &mut Vec<u8>, value: &str, max: usize) -> io::Result<()> {
-    if value.len() > max {
+fn pack(metadata: &impl Serialize, data: &[u8]) -> io::Result<Vec<u8>> {
+    let json = serde_json::to_vec(metadata)?;
+    if data.len() > MAX_DATA || json.len() + data.len() + 5 > MAX_FRAME {
         return Err(invalid());
     }
-    out.extend_from_slice(&(value.len() as u16).to_le_bytes());
-    out.extend_from_slice(value.as_bytes());
-    Ok(())
+    let mut out = Vec::with_capacity(5 + json.len() + data.len());
+    out.push(2);
+    out.extend_from_slice(&(json.len() as u32).to_le_bytes());
+    out.extend(json);
+    out.extend_from_slice(data);
+    Ok(out)
 }
-fn take_string(input: &mut &[u8], max: usize) -> io::Result<String> {
-    let mut len = [0; 2];
-    input.read_exact(&mut len)?;
-    let len = u16::from_le_bytes(len) as usize;
-    if len > max || len > input.len() {
+fn unpack(input: &[u8], max_metadata: usize) -> io::Result<(&[u8], &[u8])> {
+    if input.len() < 5 || input.len() > MAX_FRAME || input[0] != 2 {
         return Err(invalid());
     }
-    let value = std::str::from_utf8(&input[..len])
-        .map_err(|_| invalid())?
-        .to_owned();
-    *input = &input[len..];
-    Ok(value)
+    let n = u32::from_le_bytes(input[1..5].try_into().unwrap()) as usize;
+    if n > max_metadata || n > input.len() - 5 || input.len() - 5 - n > MAX_DATA {
+        return Err(invalid());
+    }
+    Ok((&input[5..5 + n], &input[5 + n..]))
 }
 impl Request {
     pub fn encode(&self) -> io::Result<Vec<u8>> {
-        let mut out = vec![1, 1]; // version, stat opcode
-        string(&mut out, &self.scope, 1024)?;
-        string(&mut out, &self.token, 128)?;
-        out.extend_from_slice(&self.sequence.to_le_bytes());
-        string(&mut out, &self.path, 4096)?;
+        let out = pack(self, &self.data)?;
+        Self::decode(&out)?;
         Ok(out)
     }
-    pub fn decode(mut input: &[u8]) -> io::Result<Self> {
-        let mut header = [0; 2];
-        input.read_exact(&mut header)?;
-        if header != [1, 1] {
+    pub fn decode(input: &[u8]) -> io::Result<Self> {
+        let (json, data) = unpack(input, 16384)?;
+        let mut r: Self = serde_json::from_slice(json)?;
+        if r.scope.len() > 1024 || r.token.len() > 128 || !r.operation.is_object() {
             return Err(invalid());
         }
-        let scope = take_string(&mut input, 1024)?;
-        let token = take_string(&mut input, 128)?;
-        let mut seq = [0; 8];
-        input.read_exact(&mut seq)?;
-        let path = take_string(&mut input, 4096)?;
-        if !input.is_empty() {
-            return Err(invalid());
-        }
-        Ok(Self {
-            scope,
-            token,
-            sequence: u64::from_le_bytes(seq),
-            path,
-        })
+        r.data = data.to_vec();
+        Ok(r)
     }
 }
-pub fn encode_response(result: Result<Stat, Error>) -> Vec<u8> {
-    match result {
-        Err(error) => vec![error as u8],
-        Ok(s) => {
-            let mut out = vec![0];
-            for n in [s.ino, s.size, s.mode, s.atime, s.mtime, s.ctime] {
-                out.extend_from_slice(&n.to_le_bytes());
-            }
-            out
-        }
-    }
+pub fn encode_response(result: Result<Reply, Error>) -> Vec<u8> {
+    let encoded = match result {
+        Ok(r) => pack(&serde_json::json!({"value":r.value}), &r.data),
+        Err(e) => pack(&serde_json::json!({"code":e}), &[]),
+    };
+    encoded.unwrap_or_else(|_| pack(&serde_json::json!({"code":Error::Big}), &[]).unwrap())
 }
-pub fn decode_response(input: &[u8]) -> io::Result<Result<Stat, Error>> {
-    if input.len() == 1 {
-        return Ok(Err(match input[0] {
-            1 => Error::Stale,
-            2 => Error::Invalid,
-            3 => Error::Access,
-            4 => Error::Missing,
-            5 => Error::NotDirectory,
-            6 => Error::Loop,
-            7 => Error::Unsupported,
-            8 => Error::Io,
-            9 => Error::Busy,
-            _ => return Err(invalid()),
-        }));
-    }
-    if input.len() != 49 || input[0] != 0 {
+pub fn decode_response(input: &[u8]) -> io::Result<Result<Reply, Error>> {
+    let (json, data) = unpack(input, MAX_FRAME)?;
+    let v: Value = serde_json::from_slice(json)?;
+    if v.as_object().is_none_or(|v| v.len() != 1) {
         return Err(invalid());
     }
-    let mut values = input[1..]
-        .chunks_exact(8)
-        .map(|b| u64::from_le_bytes(b.try_into().unwrap()));
-    Ok(Ok(Stat {
-        ino: values.next().unwrap(),
-        size: values.next().unwrap(),
-        mode: values.next().unwrap(),
-        atime: values.next().unwrap(),
-        mtime: values.next().unwrap(),
-        ctime: values.next().unwrap(),
+    if let Some(code) = v.get("code") {
+        if !data.is_empty() {
+            return Err(invalid());
+        }
+        return Ok(Err(serde_json::from_value(code.clone())?));
+    }
+    Ok(Ok(Reply {
+        value: v.get("value").ok_or_else(invalid)?.clone(),
+        data: data.to_vec(),
     }))
 }
 pub fn read_frame(reader: &mut impl Read) -> io::Result<Vec<u8>> {
@@ -169,45 +195,38 @@ pub fn write_frame(writer: &mut impl Write, bytes: &[u8]) -> io::Result<()> {
 mod tests {
     use super::*;
     #[test]
-    fn bounded_strict_frames() {
-        let request = Request {
+    fn binary_roundtrip_and_bounds() {
+        let r = Request {
             scope: "Workspace:test".into(),
             token: "secret".into(),
             sequence: 1,
-            path: "/workspace/file".into(),
+            operation: serde_json::json!({"op":"write","handle":1,"offset":0}),
+            data: (0..=255).collect(),
         };
-        let bytes = request.encode().unwrap();
-        assert_eq!(Request::decode(&bytes).unwrap(), request);
-        for n in 0..bytes.len() {
-            assert!(Request::decode(&bytes[..n]).is_err());
+        let b = r.encode().unwrap();
+        assert_eq!(Request::decode(&b).unwrap(), r);
+        for n in 0..5 {
+            assert!(Request::decode(&b[..n]).is_err());
         }
-        let mut extra = bytes.clone();
-        extra.push(0);
-        assert!(Request::decode(&extra).is_err());
-        assert!(read_frame(&mut &(u32::MAX.to_le_bytes())[..]).is_err());
-        assert!(read_frame(&mut &[0, 0, 0, 0][..]).is_err());
-        let mut bad = bytes;
-        bad[0] = 2;
+        let mut bad = b.clone();
+        bad[0] = 1;
         assert!(Request::decode(&bad).is_err());
-    }
-    #[test]
-    fn replies_round_trip_and_reject_truncation() {
-        let s = Stat {
-            ino: 4,
-            size: 9,
-            mode: 0o100644,
-            atime: 1,
-            mtime: 2,
-            ctime: 3,
+        let mut big = r;
+        big.data = vec![0; MAX_DATA + 1];
+        assert!(big.encode().is_err());
+        assert!(read_frame(&mut &u32::MAX.to_le_bytes()[..]).is_err());
+        let reply = Reply {
+            value: Value::Null,
+            data: vec![0, 255, 1],
         };
-        let bytes = encode_response(Ok(s.clone()));
-        assert_eq!(decode_response(&bytes).unwrap(), Ok(s));
-        for n in 0..bytes.len() {
-            assert!(decode_response(&bytes[..n]).is_err());
-        }
+        assert_eq!(
+            decode_response(&encode_response(Ok(reply.clone()))).unwrap(),
+            Ok(reply)
+        );
         assert_eq!(
             decode_response(&encode_response(Err(Error::Stale))).unwrap(),
             Err(Error::Stale)
         );
+        assert!(decode_response(&[2, 255, 255, 255, 255]).is_err());
     }
 }

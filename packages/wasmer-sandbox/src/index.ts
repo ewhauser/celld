@@ -1,3 +1,4 @@
+import { NativeWorkspaceFS } from "./native-filesystem.ts";
 import { Buffer } from "buffer";
 import { WorkspaceFS, type Limits, type OpenFlags } from "./filesystem.ts";
 import { check, integer, SandboxError, type Storage } from "./storage.ts";
@@ -14,10 +15,11 @@ export type { Command, Storage };
 export interface State {
   storage: Storage;
   assertCanAwaitCallback(): void;
-  experimentalAgentFsStat?(token: string | null, deadline?: number): string;
+  agentFsOperation?(operation: unknown, data?: Uint8Array): string | Uint8Array;
+  agentFsCapability?(token: string | null, deadline?: number): string;
 }
 export interface SandboxOptions {
-  experimentalNativeStat?: boolean;
+  nativeFilesystem?: boolean;
   supervisorURL: string;
   supervisorToken: string;
   workspace: string;
@@ -71,14 +73,32 @@ export class WasmerSandbox {
     );
     integer(options.maxCommands ?? 10000, 100000);
     this.state = state;
-    this.options = options;
-    this.fs = new WorkspaceFS(state.storage, options.limits, () =>
+    this.options = {
+      ...options,
+      nativeFilesystem: options.nativeFilesystem !== false,
+    };
+    const guard = () =>
       check(
         !this.active || this.guestOperation,
         "EBUSY",
         "workspace has an active command",
-      ),
-    );
+      );
+    if (this.options.nativeFilesystem) {
+      check(
+        typeof state.agentFsOperation === "function" &&
+          typeof state.agentFsCapability === "function",
+        "EPROTONOSUPPORT",
+        "native AgentFS support is required",
+      );
+      this.fs = new NativeWorkspaceFS(
+        state.storage,
+        options.limits,
+        (op, data) => state.agentFsOperation!(op, data),
+        guard,
+      );
+    } else {
+      this.fs = new WorkspaceFS(state.storage, options.limits, guard);
+    }
     state.storage.transactionSync(() => {
       this
         .rows(`CREATE TABLE IF NOT EXISTS celld_sandbox_commands(id TEXT PRIMARY KEY, payload TEXT NOT NULL,
@@ -165,12 +185,12 @@ export class WasmerSandbox {
     this.active = active;
     let nativeScope: string | undefined;
     try {
-      if (this.options.experimentalNativeStat) {
+      if (this.options.nativeFilesystem) {
         check(
-          typeof this.state.experimentalAgentFsStat === "function",
+          typeof this.state.agentFsCapability === "function",
           "EPROTONOSUPPORT",
         );
-        nativeScope = this.state.experimentalAgentFsStat(
+        nativeScope = this.state.agentFsCapability(
           active.token,
           active.deadline,
         );
@@ -183,7 +203,7 @@ export class WasmerSandbox {
           ...cmd,
           workspace: this.options.workspace,
           token: active.token,
-          nativeStatScope: nativeScope,
+          nativeFilesystemScope: nativeScope,
         },
         cmd.timeoutMs + 10000,
       );
@@ -230,7 +250,7 @@ export class WasmerSandbox {
     } finally {
       // Revokes callbacks before releasing the execution slot, including on a
       // lost helper response. A fresh activation never adopts old tokens.
-      if (nativeScope) this.state.experimentalAgentFsStat!(null);
+      if (nativeScope) this.state.agentFsCapability!(null);
       this.active = null;
       this.fs.closeAll();
     }
@@ -242,8 +262,7 @@ export class WasmerSandbox {
     const active = this.active;
     if (active?.id === id) {
       active.cancelled = true; // admission closes immediately, before remote I/O
-      if (this.options.experimentalNativeStat)
-        this.state.experimentalAgentFsStat?.(null);
+      if (this.options.nativeFilesystem) this.state.agentFsCapability?.(null);
       try {
         await this.supervisor(
           "/v1/cancel",
@@ -257,6 +276,12 @@ export class WasmerSandbox {
   }
   async callback(request: Request): Promise<Response> {
     try {
+      check(
+        !this.options.nativeFilesystem,
+        "ENOTSUP",
+        "filesystem callbacks require the HTTP backend",
+      );
+
       check(request.method === "POST", "EINVAL");
       const b = await boundedJSON(request);
       const a = this.active;

@@ -52,10 +52,10 @@ jobs:
         run: SANDBOX_TEST_TOOLS="$PWD/tools/tools.json" npm run test:integration
       - name: Native IPC integration and paired stat benchmark
         working-directory: packages/wasmer-sandbox
-        run: SANDBOX_NATIVE_STAT=1 SANDBOX_BENCH=1 SANDBOX_TEST_TOOLS="$PWD/tools/tools.json" npm run test:integration
+        run: SANDBOX_NATIVE_FILESYSTEM=1 SANDBOX_BENCH=1 SANDBOX_TEST_TOOLS="$PWD/tools/tools.json" npm run test:integration
       - name: Three-node durability and fencing
         working-directory: packages/wasmer-sandbox
-        run: SANDBOX_NATIVE_STAT_FLEET=1 npm run test:fleet
+        run: SANDBOX_NATIVE_FILESYSTEM_FLEET=1 npm run test:fleet
       - name: Retain non-secret results
         if: always()
         uses: actions/upload-artifact@v4

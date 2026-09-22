@@ -2,22 +2,14 @@ import { createConnection } from "node:net";
 import { once } from "node:events";
 import assert from "node:assert/strict";
 import { performance } from "node:perf_hooks";
-function field(value) {
-  const bytes = Buffer.from(value),
-    size = Buffer.alloc(2);
-  size.writeUInt16LE(bytes.length);
-  return Buffer.concat([size, bytes]);
-}
-function request(scope, token, sequence, path) {
-  const seq = Buffer.alloc(8);
-  seq.writeBigUInt64LE(BigInt(sequence));
-  return Buffer.concat([
-    Buffer.from([1, 1]),
-    field(scope),
-    field(token),
-    seq,
-    field(path),
-  ]);
+function request(scope, token, sequence, operation, data = Buffer.alloc(0)) {
+  const metadata = Buffer.from(
+    JSON.stringify({ scope, token, sequence, operation }),
+  );
+  const header = Buffer.alloc(5);
+  header[0] = 2;
+  header.writeUInt32LE(metadata.length, 1);
+  return Buffer.concat([header, metadata, data]);
 }
 function frame(bytes) {
   const size = Buffer.alloc(4);
@@ -33,7 +25,7 @@ export async function connect(socketPath) {
     bytes = Buffer.concat([bytes, chunk]);
     if (bytes.length < 4) return;
     const size = bytes.readUInt32LE(0);
-    if (size > 8192) {
+    if (size > 2 * 1024 * 1024) {
       socket.destroy(new Error("unbounded reply"));
       return;
     }
@@ -42,7 +34,12 @@ export async function connect(socketPath) {
     bytes = bytes.subarray(size + 4);
     const p = pending;
     pending = null;
-    p?.resolve(body);
+    assert.equal(body[0], 2);
+    const n = body.readUInt32LE(1);
+    p?.resolve({
+      ...JSON.parse(body.subarray(5, 5 + n)),
+      data: body.subarray(5 + n),
+    });
   });
   socket.on("error", (e) => {
     pending?.reject(e);
@@ -55,52 +52,133 @@ export async function connect(socketPath) {
   socket.setTimeout(6000, () => socket.destroy(new Error("IPC timeout")));
   return {
     socket,
-    call(scope, token, sequence, path = "/workspace/input.txt") {
+    call(
+      scope,
+      token,
+      sequence,
+      operation = { op: "stat", path: "/workspace/input.txt" },
+      data,
+    ) {
+      if (typeof operation === "string")
+        operation = { op: "stat", path: operation };
       assert.equal(pending, null);
       return new Promise((resolve, reject) => {
         pending = { resolve, reject };
-        socket.write(frame(request(scope, token, sequence, path)));
+        socket.write(frame(request(scope, token, sequence, operation, data)));
       });
     },
   };
 }
 export async function ipcChecks({ socketPath, call, post, token, record }) {
+  const app = await call("native-app-checks", {});
   const { scope } = await call("native-register", { token });
   const client = await connect(socketPath);
   const valid = await client.call(scope, token, 1);
-  assert.equal(valid.length, 49);
-  assert.equal(valid[0], 0);
-  assert.equal(Number(valid.readBigUInt64LE(9)), 15);
+  assert.equal(valid.value.size, 15);
   assert.equal(
-    (await client.call(scope, token, 2, "/workspace/missing"))[0],
-    4,
+    (await client.call(scope, token, 2, "/workspace/missing")).code,
+    "ENOENT",
   );
   assert.equal(
-    (await client.call(scope, token, 3, "/workspace/../outside"))[0],
-    3,
+    (await client.call(scope, token, 3, "/workspace/../outside")).code,
+    "EACCES",
   );
-  assert.equal((await client.call(scope, "wrong", 4))[0], 1);
-  assert.equal((await client.call(scope, token, 4))[0], 0);
-  assert.equal((await client.call(scope, token, 4))[0], 1);
+  assert.equal((await client.call(scope, "wrong", 4)).code, "ESTALE");
+  assert.equal((await client.call(scope, token, 4)).code, undefined);
+  assert.equal((await client.call(scope, token, 4)).code, "ESTALE");
   // A closed input gate must not be bypassed by the native path.
   const busy = post("native-busy", {});
   await new Promise((r) => setTimeout(r, 100));
-  assert.equal((await client.call(scope, "wrong", 5))[0], 1);
-  assert.equal((await client.call(scope, token, 5))[0], 9);
+  assert.equal((await client.call(scope, "wrong", 5)).code, "ESTALE");
+  assert.equal((await client.call(scope, token, 5)).code, "EBUSY");
   assert.equal((await busy).status, 200);
-  assert.equal((await client.call(scope, token, 5))[0], 0);
+  assert.equal((await client.call(scope, token, 5)).code, undefined);
+  assert.equal(
+    (await client.call(scope, token, 6, { op: "fstat", handle: app.handle }))
+      .code,
+    "EBADF",
+  );
+  assert.equal(
+    (
+      await client.call(scope, token, 7, {
+        op: "unlink",
+        path: "/workspace/app-handle",
+      })
+    ).code,
+    "EBUSY",
+  );
+  let seq = 8;
+  const fs = async (op, data) => {
+    const r = await client.call(scope, token, seq++, op, data);
+    assert.equal(r.code, undefined, JSON.stringify(r));
+    return r;
+  };
+  await fs({ op: "mkdir", path: "/workspace/ipc" });
+  const handle = (
+    await fs({
+      op: "open",
+      path: "/workspace/ipc/raw",
+      read: true,
+      write: true,
+      create: true,
+    })
+  ).value.handle;
+  const binary = Buffer.from(Array.from({ length: 65536 }, (_, i) => i % 256));
+  await fs({ op: "write", handle, offset: 513 }, binary);
+  assert.deepEqual(
+    (await fs({ op: "read", handle, offset: 513, size: 65536 })).data,
+    binary,
+  );
+  await fs({ op: "truncate", handle, size: 514 });
+  await fs({
+    op: "rename",
+    path: "/workspace/ipc/raw",
+    to: "/workspace/ipc/renamed",
+  });
+  assert.equal((await fs({ op: "fstat", handle })).value.size, 514);
+  assert.equal(
+    (
+      await client.call(scope, token, seq++, {
+        op: "unlink",
+        path: "/workspace/ipc/renamed",
+      })
+    ).code,
+    "EBUSY",
+  );
+  await fs({ op: "close", handle });
+  assert.equal(
+    (await fs({ op: "list", path: "/workspace/ipc" })).value[0].name,
+    "renamed",
+  );
+  await fs({ op: "unlink", path: "/workspace/ipc/renamed" });
+  await fs({ op: "rmdir", path: "/workspace/ipc" });
+  await fs({ op: "heartbeat" });
+  await fs({ op: "sync" });
+  record(
+    "all native IPC filesystem operations: raw 64 KiB binary I/O, handles, sparse offsets, truncate, rename, directories, sync and heartbeat",
+  );
   await call("native-revoke", {});
-  assert.equal((await client.call(scope, token, 6))[0], 1);
+  assert.equal((await client.call(scope, token, 6)).code, "ESTALE");
   client.socket.destroy();
+  await call("native-app-close", app);
+  record(
+    "native TypeScript rollback, transaction handle guard and app/guest handle isolation",
+  );
   const expiring = await call("native-register", { token, ttl: 300 });
   const expiryClient = await connect(socketPath);
-  assert.equal((await expiryClient.call(expiring.scope, token, 1))[0], 0);
+  assert.equal(
+    (await expiryClient.call(expiring.scope, token, 1)).code,
+    undefined,
+  );
   await new Promise((r) => setTimeout(r, 350));
-  assert.equal((await expiryClient.call(expiring.scope, token, 2))[0], 1);
+  assert.equal(
+    (await expiryClient.call(expiring.scope, token, 2)).code,
+    "ESTALE",
+  );
   expiryClient.socket.destroy();
   await call("native-revoke", {});
   record(
-    "native stat: persistent binary connection, metadata, path confinement, auth, ordering, input gate, expiry and revocation",
+    "native filesystem: persistent binary connection, metadata, path confinement, auth, ordering, input gate, expiry and revocation",
   );
   for (const bytes of [
     Buffer.from([255, 255, 255, 255]),

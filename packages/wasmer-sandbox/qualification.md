@@ -141,7 +141,40 @@ must authorize tenant access before forwarding requests.
 
 ## Native IPC experiment
 
-The later stat-only IPC work is tracked separately in [ipc-experiment.md](ipc-experiment.md),
+The earlier stat-only IPC work is tracked separately in [ipc-experiment.md](ipc-experiment.md),
 with its own paired benchmark and fault evidence. The results above describe the
 HTTP implementation and review fixes; they do not by themselves qualify a full
 native filesystem backend.
+
+## Full native filesystem IPC (2026-09-22)
+
+The SDK now defaults to the [native filesystem](native-filesystem.md). Every
+helper filesystem operation, including sync and heartbeat, uses IPC. TypeScript
+uses the same native backend through a synchronous host call. Native-mode
+supervisors can run without any filesystem callback URL/token, and helpers never
+receive those credentials. The HTTP implementation remains an explicit reference
+backend. The previous stat-only benchmark does not measure this full migration.
+
+| Validation | Result | Retained evidence |
+| --- | --- | --- |
+| TypeScript unit tests | 16 passed, including IPC-only supervisor admission/cancellation | [checks](evidence/native-fs-validation.txt) |
+| Native filesystem unit tests | 6 passed, including 400 operations against an independent dense model, sparse I/O, handle isolation, quotas and rollback on injected SQL failure | [checks](evidence/native-fs-validation.txt) |
+| Wire and helper tests | 1 wire + 10 runner tests passed; ambiguous write response loss poisons the helper without replay or HTTP fallback | [checks](evidence/native-fs-validation.txt) |
+| macOS native integration | 14 checks passed, including nested TypeScript rollback and handle guards; no HTTP filesystem configured | [results](evidence/native-fs-macos.json) |
+| macOS Bash/coreutils/Python | 16 checks passed during full migration | [results](evidence/native-fs-macos-tools.json) |
+| Restricted Linux arm64 container | 17 checks passed, Bash/coreutils/Python, exit 0, no OOM kill | [results](evidence/native-fs-linux.json) |
+| Three-node fleet faults | 6 checks passed, including stale capability rejection for writes and withholding native reads/write acknowledgements until bucket recovery | [results](evidence/native-fs-fleet.json) |
+
+The full guest integration reports `fsCalls.http = 0` for native execution.
+The fleet's shared executor explicitly uses the HTTP reference backend; direct
+native IPC exercises capability fencing and native read/write output gates on
+the owning nodes. It is not evidence of an automatically scheduled per-node
+executor deployment. [Container settings and image IDs](evidence/native-fs-qualification.json)
+record the local qualification. CI/configuration is updated but has not run on
+GitHub. No push, release or production deployment was performed.
+
+The native backend additionally caps configurations at 4,096 inodes and handles.
+Handle lifecycle operations are rejected inside outer SQL transactions; pathname
+mutations support nested rollback. Capabilities currently exclude embedded facets.
+See the native filesystem document for the complete contract and the deployment
+boundary above for remaining target-environment qualification.

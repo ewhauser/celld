@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import { WasmerSandbox } from "../src/index.ts";
 import { memoryStorage } from "./storage.ts";
 const options = {
+  nativeFilesystem: false,
   workspace: "test",
   supervisorURL: "http://127.0.0.1:19877",
   supervisorToken: "x".repeat(64),
@@ -285,7 +286,7 @@ test("execution snapshots caller arguments before hashing or awaiting durability
   }
 });
 
-test("native stat capability is registered before launch and revoked on completion, loss and cancellation", async () => {
+test("native filesystem capability is registered before launch and revoked on completion, loss and cancellation", async () => {
   for (const outcome of ["success", "lost", "cancel"]) {
     const storage = memoryStorage(),
       events: string[] = [];
@@ -293,13 +294,19 @@ test("native stat capability is registered before launch and revoked on completi
       {
         storage,
         assertCanAwaitCallback() {},
-        experimentalAgentFsStat(token, deadline) {
+        agentFsOperation(operation: any) {
+          // Lifecycle unit fixture; native filesystem semantics are tested in Rust and integration.
+          if (operation.op === "stat")
+            return JSON.stringify({ value: { dir: true } });
+          return JSON.stringify({ value: null });
+        },
+        agentFsCapability(token, deadline) {
           events.push(token === null ? "revoke" : "grant");
           if (token !== null) assert.ok(deadline! > Date.now());
           return "Workspace:test";
         },
       },
-      { ...options, experimentalNativeStat: true },
+      { ...options, nativeFilesystem: true },
     );
     const original = globalThis.fetch;
     globalThis.fetch = async (url, init) => {
@@ -309,7 +316,7 @@ test("native stat capability is registered before launch and revoked on completi
         return Response.json({ ok: true });
       }
       const config = JSON.parse(init!.body as string);
-      assert.equal(config.nativeStatScope, "Workspace:test");
+      assert.equal(config.nativeFilesystemScope, "Workspace:test");
       assert.equal(events[0], "grant");
       events.push("launch");
       if (outcome === "cancel") await sandbox.cancel("native");

@@ -15,10 +15,10 @@ services:
     volumes:
       - ./config.json:/etc/celld-sandbox/config.json:ro
       - ../tools:/tools:ro
+      - ${CELLD_AGENTFS_DIRECTORY:?set the owning celld socket directory}:/run/celld-agentfs:ro
     environment:
       CELLD_SANDBOX_CONFIG: /etc/celld-sandbox/config.json
       CELLD_SANDBOX_TOKEN: ${CELLD_SANDBOX_TOKEN:?set a random supervisor token}
-      CELLD_SANDBOX_CALLBACK_TOKEN: ${CELLD_SANDBOX_CALLBACK_TOKEN:?set a distinct random callback token}
     ports: ["127.0.0.1:19877:19877"]
     healthcheck:
       test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:19877/healthz').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]

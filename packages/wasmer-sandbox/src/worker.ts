@@ -6,14 +6,14 @@ import { boundedJSON, identifier } from "./protocol.ts";
 import { check } from "./storage.ts";
 
 export interface Env {
-  SANDBOX_EXPERIMENTAL_NATIVE_STAT?: string;
+  SANDBOX_NATIVE_FILESYSTEM?: string;
   WORKSPACES: any;
   SANDBOX_API_TOKEN: string;
-  SANDBOX_CALLBACK_TOKEN: string;
+  SANDBOX_CALLBACK_TOKEN?: string;
   SANDBOX_SUPERVISOR_TOKEN: string;
   SANDBOX_SUPERVISOR_URL: string;
 }
-function auth(request: Request, expected: string) {
+function auth(request: Request, expected: string | undefined) {
   check(typeof expected === "string" && expected.length >= 32, "ECONFIG");
   // Tokens stay within authenticated TLS or loopback. Do not use this shared
   // service token as end-user authorization: apply your tenant policy upstream.
@@ -43,7 +43,7 @@ export class SandboxWorkspace extends DurableObject {
   constructor(ctx: any, env: Env) {
     super(ctx, env);
     this.sandbox = new WasmerSandbox(ctx, {
-      experimentalNativeStat: env.SANDBOX_EXPERIMENTAL_NATIVE_STAT === "1",
+      nativeFilesystem: env.SANDBOX_NATIVE_FILESYSTEM !== "0",
       workspace: ctx.id.toString(),
       supervisorURL: env.SANDBOX_SUPERVISOR_URL,
       supervisorToken: env.SANDBOX_SUPERVISOR_TOKEN,

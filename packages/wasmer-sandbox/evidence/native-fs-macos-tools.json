@@ -1,0 +1,220 @@
+{
+  "date": "2026-09-22T21:50:50.496Z",
+  "platform": "darwin",
+  "checks": [
+    "unauthorized control and stale callbacks rejected",
+    "real DO/shared Wasmer sparse I/O, shrink/growth, append, rename, stdin/env/stdout/stderr",
+    "durable replay and payload conflict",
+    "real celld transactionSync, transaction and blockConcurrencyWhile deadlock guards",
+    "exit status, traps, host/network isolation, CPU timeout and bounded output",
+    "temporary quota rejects repeated/huge growth atomically and reclaims capacity",
+    "cancellation fences writes and preserves committed prefix",
+    "all native IPC filesystem operations: raw 64 KiB binary I/O, handles, sparse offsets, truncate, rename, directories, sync and heartbeat",
+    "native filesystem: persistent binary connection, metadata, path confinement, auth, ordering, input gate, expiry and revocation",
+    "native IPC rejects oversized, empty, unknown-version and truncated requests",
+    "Bash, pipeline and coreutils on the durable filesystem",
+    "explicit coreutils entrypoint on a multi-command package",
+    "Python stdlib on the durable filesystem",
+    "LTX restore without the prior runtime directory",
+    "native capability is not resurrected by process restart or LTX restore",
+    "owner process loss restores committed prefix, interrupts command and fences former execution"
+  ],
+  "commands": [
+    {
+      "id": "basic",
+      "status": "succeeded",
+      "result": {
+        "exitCode": 0,
+        "fsCalls": {
+          "http": 0,
+          "native": 51
+        },
+        "reason": "exited",
+        "statCalls": {
+          "http": 0,
+          "native": 11
+        },
+        "stderr": "guest-stderr\n",
+        "stdout": "guest-ok\n"
+      },
+      "startedAt": 1790113850864,
+      "finishedAt": 1790113851621
+    },
+    {
+      "id": "exit",
+      "status": "failed",
+      "result": {
+        "exitCode": 42,
+        "fsCalls": {
+          "http": 0,
+          "native": 5
+        },
+        "reason": "exited",
+        "statCalls": {
+          "http": 0,
+          "native": 2
+        },
+        "stderr": "",
+        "stdout": ""
+      },
+      "startedAt": 1790113851647,
+      "finishedAt": 1790113852052
+    },
+    {
+      "id": "trap",
+      "status": "failed",
+      "result": {
+        "exitCode": 45,
+        "fsCalls": {
+          "http": 0,
+          "native": 5
+        },
+        "reason": "exited",
+        "statCalls": {
+          "http": 0,
+          "native": 2
+        },
+        "stderr": "\nthread 'main' (1) panicked at packages/wasmer-sandbox/test/guest.rs:24:19:\nintentional trap\nnote: run with `RUST_BACKTRACE=1` environment variable to display a backtrace\n",
+        "stdout": ""
+      },
+      "startedAt": 1790113852063,
+      "finishedAt": 1790113852462
+    },
+    {
+      "id": "isolation",
+      "status": "succeeded",
+      "result": {
+        "exitCode": 0,
+        "fsCalls": {
+          "http": 0,
+          "native": 8
+        },
+        "reason": "exited",
+        "statCalls": {
+          "http": 0,
+          "native": 5
+        },
+        "stderr": "",
+        "stdout": "isolated\n"
+      },
+      "startedAt": 1790113852474,
+      "finishedAt": 1790113852980
+    },
+    {
+      "id": "timeout",
+      "status": "timed_out",
+      "result": {
+        "reason": "timed_out",
+        "exitCode": 124,
+        "stdout": "",
+        "stderr": "execution stopped"
+      },
+      "startedAt": 1790113852990,
+      "finishedAt": 1790113854504
+    },
+    {
+      "id": "output",
+      "status": "failed",
+      "result": {
+        "reason": "failed",
+        "exitCode": 125,
+        "stdout": "",
+        "stderr": "runner terminated without a valid result"
+      },
+      "startedAt": 1790113854516,
+      "finishedAt": 1790113855613
+    },
+    {
+      "id": "quota",
+      "status": "succeeded",
+      "result": {
+        "exitCode": 0,
+        "fsCalls": {
+          "http": 0,
+          "native": 5
+        },
+        "reason": "exited",
+        "statCalls": {
+          "http": 0,
+          "native": 2
+        },
+        "stderr": "",
+        "stdout": "quota-preserved\n"
+      },
+      "startedAt": 1790113855624,
+      "finishedAt": 1790113856174
+    },
+    {
+      "id": "cancel",
+      "status": "cancelled",
+      "result": {
+        "reason": "cancelled",
+        "exitCode": 124,
+        "stdout": "",
+        "stderr": "execution stopped"
+      },
+      "startedAt": 1790113856186,
+      "finishedAt": 1790113856325
+    },
+    {
+      "id": "bash",
+      "status": "succeeded",
+      "result": {
+        "exitCode": 0,
+        "fsCalls": {
+          "http": 0,
+          "native": 46
+        },
+        "reason": "exited",
+        "statCalls": {
+          "http": 0,
+          "native": 16
+        },
+        "stderr": "",
+        "stdout": "8\n"
+      },
+      "startedAt": 1790113857338,
+      "finishedAt": 1790113868860
+    },
+    {
+      "id": "coreutils-direct",
+      "status": "succeeded",
+      "result": {
+        "exitCode": 0,
+        "fsCalls": {
+          "http": 0,
+          "native": 11
+        },
+        "reason": "exited",
+        "statCalls": {
+          "http": 0,
+          "native": 2
+        },
+        "stderr": "",
+        "stdout": "explicit-entrypoint\n"
+      },
+      "startedAt": 1790113868875,
+      "finishedAt": 1790113875221
+    },
+    {
+      "id": "python",
+      "status": "succeeded",
+      "result": {
+        "exitCode": 0,
+        "fsCalls": {
+          "http": 0,
+          "native": 100
+        },
+        "reason": "exited",
+        "statCalls": {
+          "http": 0,
+          "native": 42
+        },
+        "stderr": "",
+        "stdout": "{\"value\": 42}\n"
+      },
+      "startedAt": 1790113875232,
+      "finishedAt": 1790113918547
+    }
+  ]
+}

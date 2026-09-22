@@ -20,8 +20,10 @@ const dir = resolve(dirname(fileURLToPath(import.meta.url)), ".."),
 const artifacts = resolve(dir, "test/artifacts"),
   work = resolve(artifacts, `run-${Date.now()}`);
 await mkdir(work, { recursive: true });
-const nativeStat = process.env.SANDBOX_NATIVE_STAT === "1";
-const socketDir = nativeStat ? await mkdtemp("/tmp/celld-ipc-") : undefined;
+const nativeFilesystem = process.env.SANDBOX_NATIVE_FILESYSTEM === "1";
+const socketDir = nativeFilesystem
+  ? await mkdtemp("/tmp/celld-ipc-")
+  : undefined;
 if (socketDir) await chmod(socketDir, 0o700);
 const socketPath = socketDir && resolve(socketDir, "fs.sock");
 const token = randomBytes(32).toString("hex"),
@@ -34,11 +36,12 @@ const guest = resolve(dir, "test/guest.wasm"),
     process.env.CELLD_WASMER_RUNNER ??
     resolve(dir, "runner/target/debug/celld-wasmer-runner");
 const config = {
-  nativeStatSocket: socketPath,
+  filesystemSocket: socketPath,
   development: process.platform !== "linux",
   token,
-  callbackToken,
-  callbackOrigin: url,
+  ...(nativeFilesystem && !process.env.SANDBOX_BENCH
+    ? {}
+    : { callbackToken, callbackOrigin: url }),
   runner,
   tools: {
     guest: {
@@ -82,7 +85,7 @@ await writeFile(
     },
     migrations: [{ tag: "v1", new_sqlite_classes: ["Workspace"] }],
     vars: {
-      SANDBOX_EXPERIMENTAL_NATIVE_STAT: nativeStat ? "1" : "0",
+      SANDBOX_NATIVE_FILESYSTEM: nativeFilesystem ? "1" : "0",
       SANDBOX_API_TOKEN: token,
       SANDBOX_CALLBACK_TOKEN: callbackToken,
       SANDBOX_SUPERVISOR_TOKEN: token,
@@ -98,13 +101,23 @@ import { WasmerSandbox } from ${JSON.stringify(resolve(dir, "src/index.ts"))};
 export class Workspace extends SandboxWorkspace {
  async fetch(req) {
   const action=new URL(req.url).pathname.split('/').pop();
-  if(['bench','native-register','native-revoke','native-busy'].includes(action)) {
+  if(['bench','native-register','native-revoke','native-busy','native-app-checks','native-app-close'].includes(action)) {
    if(req.headers.get('authorization')!==${JSON.stringify(`Bearer ${token}`)})return new Response('',{status:401});
    const body=await req.json();
-   if(action==='native-register') return Response.json({scope:this.ctx.experimentalAgentFsStat(body.token, Date.now()+(body.ttl ?? 10000))});
-   if(action==='native-revoke') {this.ctx.experimentalAgentFsStat(null);return Response.json({ok:true});}
+   if(action==='native-app-checks') {
+    const fs=this.sandbox.fs;
+    fs.writeFile('/workspace/rollback',new Uint8Array([1,2,3]));
+    try {this.ctx.storage.transactionSync(()=>{fs.writeFile('/workspace/rollback',new Uint8Array([4]));throw Error('rollback');});}catch(e){if(e.message!=='rollback')throw e;}
+    if(fs.readFile('/workspace/rollback').join(',')!=='1,2,3')throw Error('native nested rollback failed');
+    const blocked=this.ctx.storage.transactionSync(()=>JSON.parse(this.ctx.agentFsOperation({op:'open',path:'/workspace/rollback',read:true})));
+    if(blocked.code!=='EBUSY')throw Error('handle escaped rollback domain');
+    return Response.json({handle:fs.open('/workspace/app-handle',{read:true,write:true,create:true})});
+   }
+   if(action==='native-app-close') {this.sandbox.fs.fstat(body.handle);this.sandbox.fs.close(body.handle);return Response.json({ok:true});}
+   if(action==='native-register') return Response.json({scope:this.ctx.agentFsCapability(body.token, Date.now()+(body.ttl ?? 10000))});
+   if(action==='native-revoke') {this.ctx.agentFsCapability(null);return Response.json({ok:true});}
    if(action==='native-busy') {await this.ctx.blockConcurrencyWhile(async()=>{await new Promise(r=>setTimeout(r,500));});return Response.json({ok:true});}
-   const sandbox=new WasmerSandbox(this.ctx, {workspace:this.ctx.id.toString(),supervisorURL:this.env.SANDBOX_SUPERVISOR_URL,supervisorToken:this.env.SANDBOX_SUPERVISOR_TOKEN,experimentalNativeStat:body.native});
+   const sandbox=new WasmerSandbox(this.ctx, {workspace:this.ctx.id.toString(),supervisorURL:this.env.SANDBOX_SUPERVISOR_URL,supervisorToken:this.env.SANDBOX_SUPERVISOR_TOKEN,nativeFilesystem:body.native});
    const prior=this.sandbox;this.sandbox=sandbox;
    try {return Response.json(await sandbox.exec({id:body.id,tool:'guest',args:['stat-bench',String(body.count)],timeoutMs:120000}));}
    finally {this.sandbox=prior;}
@@ -144,9 +157,7 @@ async function start() {
       detached: true,
       env: {
         ...process.env,
-        ...(socketPath
-          ? { CELLD_EXPERIMENTAL_AGENTFS_SOCKET: socketPath }
-          : {}),
+        ...(socketPath ? { CELLD_AGENTFS_SOCKET: socketPath } : {}),
         CELLD_ESBUILD:
           process.env.CELLD_ESBUILD ??
           resolve(
@@ -240,8 +251,10 @@ try {
   });
   assert.equal(v.status, "succeeded", JSON.stringify(v));
   assert.equal(v.result.stdout, "guest-ok\n");
-  assert.ok(v.result.statCalls[nativeStat ? "native" : "http"] > 0);
-  assert.equal(v.result.statCalls[nativeStat ? "http" : "native"], 0);
+  assert.ok(v.result.fsCalls[nativeFilesystem ? "native" : "http"] > 0);
+  assert.equal(v.result.fsCalls[nativeFilesystem ? "http" : "native"], 0);
+  assert.ok(v.result.statCalls[nativeFilesystem ? "native" : "http"] > 0);
+  assert.equal(v.result.statCalls[nativeFilesystem ? "http" : "native"], 0);
   assert.equal(v.result.stderr, "guest-stderr\n");
   const read = await call("read", { path: "/workspace/renamed.txt" });
   assert.deepEqual(
@@ -307,8 +320,8 @@ try {
   await call("cancel", { id: "cancel" });
   assert.equal((await pending).status, "cancelled");
   record("cancellation fences writes and preserves committed prefix");
-  if (nativeStat) {
-    const { ipcChecks, benchmark } = await import("./native-stat.mjs");
+  if (nativeFilesystem) {
+    const { ipcChecks, benchmark } = await import("./native-filesystem.mjs");
     await ipcChecks({
       socketPath,
       call,
@@ -376,17 +389,17 @@ try {
     record("Python stdlib on the durable filesystem");
   }
   let restartCapability;
-  if (nativeStat) {
+  if (nativeFilesystem) {
     restartCapability = { token: randomBytes(32).toString("hex") };
     Object.assign(
       restartCapability,
       await call("native-register", restartCapability),
     );
-    const { connect } = await import("./native-stat.mjs");
+    const { connect } = await import("./native-filesystem.mjs");
     const c = await connect(socketPath);
     assert.equal(
-      (await c.call(restartCapability.scope, restartCapability.token, 1))[0],
-      0,
+      (await c.call(restartCapability.scope, restartCapability.token, 1)).code,
+      undefined,
     );
     c.socket.destroy();
   }
@@ -403,11 +416,11 @@ try {
   assert.equal((await call("status", { id: "basic" })).status, "succeeded");
   record("LTX restore without the prior runtime directory");
   if (restartCapability) {
-    const { connect } = await import("./native-stat.mjs");
+    const { connect } = await import("./native-filesystem.mjs");
     const c = await connect(socketPath);
     assert.equal(
-      (await c.call(restartCapability.scope, restartCapability.token, 2))[0],
-      1,
+      (await c.call(restartCapability.scope, restartCapability.token, 2)).code,
+      "ESTALE",
     );
     c.socket.destroy();
     record(

@@ -1,0 +1,134 @@
+Native filesystem tests
+$ cargo test --locked -p celld --lib agentfs::tests
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.22s
+     Running unittests lib.rs (target/debug/deps/celld-52f85debb7a4962f)
+<jemalloc>: option background_thread currently supports pthread only
+
+running 6 tests
+test agentfs::tests::capability_ordering_and_expiry ... ok
+test agentfs::tests::handles_shared_for_busy_but_isolated_by_caller_and_revoked ... ok
+test agentfs::tests::sparse_truncate_append_and_raw_bytes ... ok
+test agentfs::tests::directory_rename_replace_and_confinement ... ok
+test agentfs::tests::quotas_and_sql_errors_roll_back_atomic_operations ... ok
+test agentfs::tests::random_native_operations_match_independent_dense_model ... ok
+
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 3 filtered out; finished in 0.02s
+
+Exit: 0
+
+Wire protocol tests
+$ cargo test --locked -p celld-agentfs-ipc
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.05s
+     Running unittests src/lib.rs (target/debug/deps/celld_agentfs_ipc-04441cbea42c5587)
+
+running 1 test
+test tests::binary_roundtrip_and_bounds ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests celld_agentfs_ipc
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+Exit: 0
+
+Runner tests
+$ cargo test --locked --manifest-path runner/Cargo.toml
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.18s
+warning: the following packages contain code that will be rejected by a future version of Rust: proc-macro-error2 v2.0.1
+note: to see what the problems were, use the option `--future-incompat-report`, or run `cargo report future-incompatibilities --id 1`
+     Running unittests src/main.rs (/Users/ewhauser/working/celld/examples/agentfs-wasmer/native/target/debug/deps/celld_wasmer_runner-0a0c03b65721eddc)
+
+running 10 tests
+test packages::tests::allocator_failure_releases_reserved_quota ... ok
+test policy::tests::mutation_domains_follow_normalized_paths ... ok
+test packages::tests::rejected_growth_preserves_bytes_and_accounting ... ok
+test remote::ipc_tests::lost_response_poisons_execution_without_retry_or_http_fallback ... ok
+test output::tests::bounded_output_remembers_overflow ... ok
+test remote::ipc_tests::native_errors_preserve_connection_and_do_not_advance_http_sequence ... ok
+test memory::tests::guest_growth_is_limited_even_with_large_declared_maximum ... ok
+test memory::tests::oversized_minimum_is_rejected ... ok
+test packages::tests::append_split_and_clone_reserve_shared_quota_before_mutation ... ok
+test packages::tests::failed_temporary_file_growth_is_atomic_and_quota_is_reusable ... ok
+
+test result: ok. 10 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.05s
+
+Exit: 0
+
+TypeScript tests
+$ npm test
+
+> @celld/wasmer-sandbox@0.1.0 test
+> node --test test/*.test.ts
+
+✔ sparse writes, truncate growth, shrink/regrowth and EOF preserve byte positions (2.536417ms)
+✔ append is atomic, handles survive rename, open unlink/replacement fails safely (2.478041ms)
+✔ path confinement, type checks, directory cycles, exclusivity and handle rights (1.284041ms)
+✔ quota failures roll back an entire operation; independent instances preserve AgentFS schema (0.945ms)
+✔ random offset operations match an independent dense byte model (11.8895ms)
+✔ command replay/conflict, single writer, sequenced callbacks, stale tokens and durable terminal result (18.49675ms)
+✔ unknown completion remains interrupted across activation and is never automatically rerun (1.99575ms)
+✔ deadlock guard runs before any hash, mutation or launch (0.657041ms)
+✔ invalid configuration and oversized/invalid input fail closed (0.508ms)
+✔ replay survives removal of its former working directory (1.385834ms)
+✔ command transport bounds count UTF-8 bytes and preserve special environment keys (0.5395ms)
+✔ cancellation during the pre-launch durability barrier never starts a guest (1.088958ms)
+✔ execution snapshots caller arguments before hashing or awaiting durability (0.902416ms)
+✔ native filesystem capability is registered before launch and revoked on completion, loss and cancellation (2.035792ms)
+✔ supervisor HTTP: authenticates, pins modules, bounds admission, cancels and deduplicates (199.312708ms)
+✔ supervisor IPC without HTTP credentials: authenticates, pins modules, bounds admission, cancels and deduplicates (167.468792ms)
+ℹ tests 16
+ℹ suites 0
+ℹ pass 16
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 449.686916
+Exit: 0
+
+TypeScript types
+$ npm run check
+
+> @celld/wasmer-sandbox@0.1.0 check
+> tsc --noEmit
+
+Exit: 0
+
+TypeScript formatting
+$ npm run format:check
+
+> @celld/wasmer-sandbox@0.1.0 format:check
+> prettier --check "src/**/*.ts" "service/*.mjs" "test/*.{ts,mjs}" "example/*.ts"
+
+Checking formatting...
+All matched files use Prettier code style!
+Exit: 0
+
+Rust formatting
+$ cargo fmt --all --check
+Exit: 0
+
+Runner formatting
+$ cargo fmt --manifest-path runner/Cargo.toml --check
+Exit: 0
+
+Native clippy
+$ cargo clippy --locked -p celld --lib --bin celld -- -D warnings
+    Checking celld v0.5.1-ewhauser.1 (/Users/ewhauser/working/celld/crates/celld)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 6.29s
+Exit: 0
+
+Runner clippy
+$ cargo clippy --locked --all-targets --manifest-path runner/Cargo.toml -- -D warnings
+    Checking celld-wasmer-runner v0.1.0 (/Users/ewhauser/working/celld/packages/wasmer-sandbox/runner)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.61s
+warning: the following packages contain code that will be rejected by a future version of Rust: proc-macro-error2 v2.0.1
+note: to see what the problems were, use the option `--future-incompat-report`, or run `cargo report future-incompatibilities --id 1`
+Exit: 0
+
+Diff whitespace
+$ git diff --check
+Exit: 0

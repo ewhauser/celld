@@ -50,8 +50,8 @@ const guest = resolve(dir, "test/guest.wasm"),
   runner =
     process.env.CELLD_WASMER_RUNNER ??
     resolve(dir, "runner/target/debug/celld-wasmer-runner");
-const nativeStat = process.env.SANDBOX_NATIVE_STAT_FLEET === "1";
-const socketDir = nativeStat
+const nativeFilesystem = process.env.SANDBOX_NATIVE_FILESYSTEM_FLEET === "1";
+const socketDir = nativeFilesystem
   ? await mkdtemp("/tmp/celld-fleet-ipc-")
   : undefined;
 if (socketDir) await chmod(socketDir, 0o700);
@@ -163,6 +163,7 @@ try {
       migrations: [{ tag: "v1", new_sqlite_classes: ["SandboxWorkspace"] }],
       vars: {
         SANDBOX_API_TOKEN: token,
+        SANDBOX_NATIVE_FILESYSTEM: "0", // The shared executor is a remote HTTP reference backend.
         SANDBOX_CALLBACK_TOKEN: token,
         SANDBOX_SUPERVISOR_TOKEN: token,
         SANDBOX_SUPERVISOR_URL: `http://127.0.0.1:${port + 1}`,
@@ -178,7 +179,7 @@ export class SandboxWorkspace extends Base {
   if(['native-register','native-mutate'].includes(action)) {
    if(req.headers.get('authorization')!==${JSON.stringify(`Bearer ${token}`)})return new Response('',{status:401});
    const body=await req.json();
-   if(action==='native-register')return Response.json({scope:this.ctx.experimentalAgentFsStat(body.token,Date.now()+120000)});
+   if(action==='native-register') { this.ctx.agentFsOperation({op:'configure',limits:{maxBytes:67108864,maxFileBytes:16777216,maxInodes:4096,maxHandles:128}}); return Response.json({scope:this.ctx.agentFsCapability(body.token,Date.now()+120000)}); }
    this.sandbox.fs.writeFile('/workspace/native-gate', new Uint8Array(13));
    console.log('NATIVE_GATE_WRITE_COMPLETE');
    await new Promise(r=>setTimeout(r,2000));
@@ -274,10 +275,7 @@ export default {fetch:routeWorkspace};`,
           ...env,
           ...(socketDir
             ? {
-                CELLD_EXPERIMENTAL_AGENTFS_SOCKET: resolve(
-                  socketDir,
-                  `${i}.sock`,
-                ),
+                CELLD_AGENTFS_SOCKET: resolve(socketDir, `${i}.sock`),
               }
             : {}),
           CELLD_WATCH: node.path,
@@ -309,17 +307,17 @@ export default {fetch:routeWorkspace};`,
   await sleep(4000); // allow all three node leases to be discovered
   const first = await owner();
   let nativeCapability;
-  if (nativeStat) {
+  if (nativeFilesystem) {
     nativeCapability = { token: randomBytes(32).toString("hex") };
     Object.assign(
       nativeCapability,
       await call("native-register", nativeCapability),
     );
-    const { connect } = await import("./native-stat.mjs");
+    const { connect } = await import("./native-filesystem.mjs");
     const c = await connect(resolve(socketDir, `${first.index}.sock`));
     assert.equal(
-      (await c.call(nativeCapability.scope, nativeCapability.token, 1))[0],
-      0,
+      (await c.call(nativeCapability.scope, nativeCapability.token, 1)).code,
+      undefined,
     );
     c.socket.destroy();
   }
@@ -374,13 +372,25 @@ export default {fetch:routeWorkspace};`,
   pass(
     "another owner restores acknowledged state after prior owner and disk loss",
   );
-  if (nativeStat) {
+  if (nativeFilesystem) {
     const current = await owner(),
-      { connect } = await import("./native-stat.mjs");
+      { connect } = await import("./native-filesystem.mjs");
     const c = await connect(resolve(socketDir, `${current.index}.sock`));
     assert.equal(
-      (await c.call(nativeCapability.scope, nativeCapability.token, 2))[0],
-      1,
+      (await c.call(nativeCapability.scope, nativeCapability.token, 2)).code,
+      "ESTALE",
+    );
+    assert.equal(
+      (
+        await c.call(
+          nativeCapability.scope,
+          nativeCapability.token,
+          2,
+          { op: "write", handle: 1, offset: 0 },
+          Buffer.from("stale"),
+        )
+      ).code,
+      "ESTALE",
     );
     c.socket.destroy();
     pass(
@@ -438,13 +448,13 @@ export default {fetch:routeWorkspace};`,
   pass(
     "suspended owner expires, takeover fences old execution, resumed owner self-fences",
   );
-  if (nativeStat) {
+  if (nativeFilesystem) {
     // Only the takeover owner remains. With the bucket paused there is no
     // follower or bucket proof available for the next committed write.
     const current = await owner(),
       capability = { token: randomBytes(32).toString("hex") };
     Object.assign(capability, await call("native-register", capability));
-    const { connect } = await import("./native-stat.mjs");
+    const { connect } = await import("./native-filesystem.mjs");
     const client = await connect(resolve(socketDir, `${current.index}.sock`));
     docker("pause", name);
     paused = true;
@@ -476,10 +486,55 @@ export default {fetch:routeWorkspace};`,
     docker("unpause", name);
     paused = false;
     const stat = await reply;
-    assert.equal(stat[0], 0);
-    assert.equal(Number(stat.readBigUInt64LE(9)), 13);
+    assert.equal(stat.code, undefined);
+    assert.equal(stat.value.size, 13);
     assert.equal((await write).status, 200);
+    const opened = await client.call(capability.scope, capability.token, 2, {
+      op: "open",
+      path: "/workspace/native-gate",
+      write: true,
+    });
+    assert.equal(opened.code, undefined);
+    docker("pause", name);
+    paused = true;
+    let writeSettled = false;
+    const nativeWrite = client
+      .call(
+        capability.scope,
+        capability.token,
+        3,
+        { op: "write", handle: opened.value.handle, offset: 13 },
+        Buffer.from("durable"),
+      )
+      .finally(() => {
+        writeSettled = true;
+      });
+    await sleep(500);
+    assert.equal(
+      writeSettled,
+      false,
+      "native mutation acknowledgement must wait for durability proof",
+    );
+    docker("unpause", name);
+    paused = false;
+    const written = await nativeWrite;
+    assert.equal(written.code, undefined);
+    assert.equal(written.value.offset, 20);
+    assert.equal(
+      (
+        await client.call(
+          capability.scope,
+          capability.token,
+          4,
+          "/workspace/native-gate",
+        )
+      ).value.size,
+      20,
+    );
     client.socket.destroy();
+    pass(
+      "native write acknowledgement is withheld until bucket durability recovers",
+    );
     pass(
       "native read output is withheld while proof is unavailable and released after bucket recovery",
     );

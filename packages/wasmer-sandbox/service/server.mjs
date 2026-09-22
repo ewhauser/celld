@@ -31,15 +31,25 @@ function kill(child) {
 }
 export async function createSupervisor(config) {
   check(typeof config.token === "string" && config.token.length >= 32);
+  let callback;
+  if (config.callbackOrigin !== undefined) {
+    check(
+      typeof config.callbackToken === "string" &&
+        config.callbackToken.length >= 32,
+    );
+    callback = serviceURL(config.callbackOrigin);
+    check(
+      callback.pathname === "/",
+      "EINVAL",
+      "callbackOrigin must be an origin",
+    );
+  }
   check(
-    typeof config.callbackToken === "string" &&
-      config.callbackToken.length >= 32,
-  );
-  const callback = serviceURL(config.callbackOrigin);
-  check(
-    callback.pathname === "/",
-    "EINVAL",
-    "callbackOrigin must be an origin",
+    callback ||
+      (typeof config.filesystemSocket === "string" &&
+        config.filesystemSocket.startsWith("/")),
+    "ECONFIG",
+    "configure a local filesystemSocket or an explicit HTTP callback origin",
   );
   check(
     process.platform === "linux" || config.development === true,
@@ -116,26 +126,31 @@ export async function createSupervisor(config) {
       const cmd = command(b),
         tool = tools.get(cmd.tool);
       check(tool, "ENOENT", "tool not configured");
-      let nativeStat;
-      if (b.nativeStatScope !== undefined) {
+      let nativeFilesystem;
+      if (b.nativeFilesystemScope !== undefined) {
         check(
-          typeof config.nativeStatSocket === "string" &&
-            config.nativeStatSocket.startsWith("/"),
+          typeof config.filesystemSocket === "string" &&
+            config.filesystemSocket.startsWith("/"),
           "ECONFIG",
-          "native stat socket is not configured",
+          "native filesystem socket is not configured",
         );
         check(
-          typeof b.nativeStatScope === "string" &&
-            b.nativeStatScope.length <= 1024 &&
-            b.nativeStatScope.endsWith(":" + workspace),
+          typeof b.nativeFilesystemScope === "string" &&
+            b.nativeFilesystemScope.length <= 1024 &&
+            b.nativeFilesystemScope.endsWith(":" + workspace),
           "EINVAL",
         );
-        nativeStat = {
-          socket: config.nativeStatSocket,
-          scope: b.nativeStatScope,
+        nativeFilesystem = {
+          socket: config.filesystemSocket,
+          scope: b.nativeFilesystemScope,
         };
       }
-      const fingerprint = JSON.stringify({ cmd, nativeStat });
+      check(
+        nativeFilesystem || callback,
+        "ENOTSUP",
+        "HTTP filesystem is not configured",
+      );
+      const fingerprint = JSON.stringify({ cmd, nativeFilesystem });
       const old = jobs.get(key);
       if (old) {
         check(old.fingerprint === fingerprint, "ECONFLICT");
@@ -258,10 +273,12 @@ export async function createSupervisor(config) {
             packages: [...tools.values()].filter((t) =>
               t.path.endsWith(".webc"),
             ),
-            callback: new URL(`/v1/workspaces/${workspace}/fs`, callback).href,
+            callback: nativeFilesystem
+              ? ""
+              : new URL(`/v1/workspaces/${workspace}/fs`, callback).href,
             token: b.token,
-            callbackToken: config.callbackToken,
-            nativeStat,
+            callbackToken: nativeFilesystem ? "" : config.callbackToken,
+            nativeFilesystem,
             development: config.development === true,
           }),
         );

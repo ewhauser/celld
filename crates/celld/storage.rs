@@ -128,7 +128,8 @@ pub struct Cells {
 /// prevents asynchronous object-store work from recovering an epoch through a
 /// later ownership lookup after a takeover.
 struct OpenCell {
-    agentfs_stat: Option<crate::agentfs::Capability>,
+    agentfs_capability: Option<crate::agentfs::Capability>,
+    agentfs_workspace: crate::agentfs::Workspace,
     connection: Connection,
     epoch: u64,
     replicated_wake: bool,
@@ -928,7 +929,8 @@ fn finish_open(
         d.borrow_mut().insert(
             scope.to_string(),
             OpenCell {
-                agentfs_stat: None,
+                agentfs_capability: None,
+                agentfs_workspace: Default::default(),
                 connection: c,
                 epoch,
                 replicated_wake,
@@ -4762,10 +4764,10 @@ pub(crate) fn agentfs_register(scope: &str, token: String, deadline: u64) -> any
             .get_mut(scope)
             .ok_or_else(|| anyhow::anyhow!("cell is not resident"))?;
         anyhow::ensure!(
-            cell.agentfs_stat.is_none(),
+            cell.agentfs_capability.is_none(),
             "AgentFS IPC capability already active"
         );
-        cell.agentfs_stat = Some(crate::agentfs::Capability {
+        cell.agentfs_capability = Some(crate::agentfs::Capability {
             token,
             deadline,
             next: 1,
@@ -4776,7 +4778,8 @@ pub(crate) fn agentfs_register(scope: &str, token: String, deadline: u64) -> any
 pub(crate) fn agentfs_revoke(scope: &str) {
     dbs(|dbs| {
         if let Some(cell) = dbs.borrow_mut().get_mut(scope) {
-            cell.agentfs_stat = None;
+            cell.agentfs_capability = None;
+            cell.agentfs_workspace.revoke();
         }
     });
 }
@@ -4785,26 +4788,112 @@ pub(crate) fn agentfs_authorized(request: &celld_agentfs_ipc::Request) -> bool {
     dbs(|dbs| {
         dbs.borrow()
             .get(&request.scope)
-            .and_then(|cell| cell.agentfs_stat.as_ref())
+            .and_then(|cell| cell.agentfs_capability.as_ref())
             .is_some_and(|cap| {
                 cap.validate(request, crate::ownership_store::now_ms())
                     .is_ok()
             })
     })
 }
-pub(crate) fn agentfs_stat(
+pub(crate) fn agentfs_operation(
     request: &celld_agentfs_ipc::Request,
-) -> Result<celld_agentfs_ipc::Stat, celld_agentfs_ipc::Error> {
+) -> Result<celld_agentfs_ipc::Reply, celld_agentfs_ipc::Error> {
     use celld_agentfs_ipc::Error;
     require_sql_healthy(&request.scope).map_err(|_| Error::Io)?;
     dbs(|dbs| {
         let mut dbs = dbs.borrow_mut();
         let cell = dbs.get_mut(&request.scope).ok_or(Error::Stale)?;
-        let cap = cell.agentfs_stat.as_mut().ok_or(Error::Stale)?;
-        cap.admit(request, crate::ownership_store::now_ms())?;
+        cell.agentfs_capability
+            .as_mut()
+            .ok_or(Error::Stale)?
+            .admit(request, crate::ownership_store::now_ms())?;
         if !cell.connection.is_autocommit() {
             return Err(Error::Busy);
         }
-        crate::agentfs::stat(&cell.connection, &request.path)
+        Ok(())
+    })?;
+    agentfs_execute(&request.scope, &request.operation, &request.data, true)
+}
+
+/// Uses the same transaction controls and critical-error classification as SQL.
+/// Clone small handle state and publish it only after a successful operation.
+pub(crate) fn agentfs_execute(
+    scope: &str,
+    operation: &serde_json::Value,
+    data: &[u8],
+    guest: bool,
+) -> Result<celld_agentfs_ipc::Reply, celld_agentfs_ipc::Error> {
+    use celld_agentfs_ipc::Error;
+    require_sql_healthy(scope).map_err(|_| Error::Io)?;
+    let mutation = crate::agentfs::mutates(operation);
+    let (mut workspace, nested) = dbs(|dbs| {
+        let dbs = dbs.borrow();
+        let cell = dbs.get(scope).ok_or(Error::Stale)?;
+        if !guest
+            && cell.agentfs_capability.is_some()
+            && (mutation || operation["op"] == "configure")
+        {
+            return Err(Error::Busy);
+        }
+        Ok((
+            cell.agentfs_workspace.clone(),
+            !cell.connection.is_autocommit(),
+        ))
+    })?;
+    // Handle lifetimes are process-local, so they cannot be rolled back by an
+    // enclosing application SQL transaction. Reject lifecycle changes there.
+    if nested
+        && matches!(
+            operation["op"].as_str(),
+            Some("open" | "close" | "closeAll" | "configure")
+        )
+    {
+        return Err(Error::Busy);
+    }
+    // Unfinished write cursors must not cross this transaction boundary.
+    if mutation {
+        with(scope, ensure_no_unfinished_write_cursor)
+            .ok_or(Error::Stale)?
+            .map_err(|_| Error::Busy)?;
+    }
+    let savepoint = "cells_tx_18446744073709551615";
+    if mutation {
+        transaction_control(scope, "start", nested, savepoint).map_err(|_| Error::Io)?;
+    }
+    let result = with(scope, |db| {
+        let result = workspace.execute(db, operation, data, guest);
+        if let Err(crate::agentfs::Failure::Sql(rusqlite::Error::SqliteFailure(failure, _))) =
+            &result
+        {
+            // SAFETY: this connection remains live under the owning cell turn.
+            let database = unsafe { db.handle() };
+            let _ = sqlite_operation_failure(
+                scope,
+                database,
+                mutation || nested,
+                failure.extended_code,
+                "AgentFS operation",
+            );
+        }
+        result
     })
+    .ok_or(Error::Stale)?;
+    if mutation {
+        if result.is_ok() {
+            if transaction_control(scope, "commit", nested, savepoint).is_err() {
+                let _ = transaction_control(scope, "rollback", nested, savepoint);
+                return Err(Error::Io);
+            }
+        } else if transaction_control(scope, "rollback", nested, savepoint).is_err() {
+            return Err(Error::Io);
+        }
+    }
+    let reply = result.map_err(|e| e.code())?;
+    dbs(|dbs| {
+        let mut dbs = dbs.borrow_mut();
+        let cell = dbs.get_mut(scope).ok_or(Error::Stale)?;
+        cell.agentfs_workspace = workspace;
+        Ok(())
+    })?;
+    Ok(reply)
 }

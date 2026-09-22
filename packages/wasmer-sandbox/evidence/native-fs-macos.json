@@ -1,0 +1,158 @@
+{
+  "date": "2026-09-22T21:58:41.058Z",
+  "platform": "darwin",
+  "checks": [
+    "unauthorized control and stale callbacks rejected",
+    "real DO/shared Wasmer sparse I/O, shrink/growth, append, rename, stdin/env/stdout/stderr",
+    "durable replay and payload conflict",
+    "real celld transactionSync, transaction and blockConcurrencyWhile deadlock guards",
+    "exit status, traps, host/network isolation, CPU timeout and bounded output",
+    "temporary quota rejects repeated/huge growth atomically and reclaims capacity",
+    "cancellation fences writes and preserves committed prefix",
+    "all native IPC filesystem operations: raw 64 KiB binary I/O, handles, sparse offsets, truncate, rename, directories, sync and heartbeat",
+    "native TypeScript rollback, transaction handle guard and app/guest handle isolation",
+    "native filesystem: persistent binary connection, metadata, path confinement, auth, ordering, input gate, expiry and revocation",
+    "native IPC rejects oversized, empty, unknown-version and truncated requests",
+    "LTX restore without the prior runtime directory",
+    "native capability is not resurrected by process restart or LTX restore",
+    "owner process loss restores committed prefix, interrupts command and fences former execution"
+  ],
+  "commands": [
+    {
+      "id": "basic",
+      "status": "succeeded",
+      "result": {
+        "exitCode": 0,
+        "fsCalls": {
+          "http": 0,
+          "native": 51
+        },
+        "reason": "exited",
+        "statCalls": {
+          "http": 0,
+          "native": 11
+        },
+        "stderr": "guest-stderr\n",
+        "stdout": "guest-ok\n"
+      },
+      "startedAt": 1790114321488,
+      "finishedAt": 1790114322135
+    },
+    {
+      "id": "exit",
+      "status": "failed",
+      "result": {
+        "exitCode": 42,
+        "fsCalls": {
+          "http": 0,
+          "native": 5
+        },
+        "reason": "exited",
+        "statCalls": {
+          "http": 0,
+          "native": 2
+        },
+        "stderr": "",
+        "stdout": ""
+      },
+      "startedAt": 1790114322165,
+      "finishedAt": 1790114322705
+    },
+    {
+      "id": "trap",
+      "status": "failed",
+      "result": {
+        "exitCode": 45,
+        "fsCalls": {
+          "http": 0,
+          "native": 5
+        },
+        "reason": "exited",
+        "statCalls": {
+          "http": 0,
+          "native": 2
+        },
+        "stderr": "\nthread 'main' (1) panicked at packages/wasmer-sandbox/test/guest.rs:24:19:\nintentional trap\nnote: run with `RUST_BACKTRACE=1` environment variable to display a backtrace\n",
+        "stdout": ""
+      },
+      "startedAt": 1790114322718,
+      "finishedAt": 1790114323141
+    },
+    {
+      "id": "isolation",
+      "status": "succeeded",
+      "result": {
+        "exitCode": 0,
+        "fsCalls": {
+          "http": 0,
+          "native": 8
+        },
+        "reason": "exited",
+        "statCalls": {
+          "http": 0,
+          "native": 5
+        },
+        "stderr": "",
+        "stdout": "isolated\n"
+      },
+      "startedAt": 1790114323154,
+      "finishedAt": 1790114323580
+    },
+    {
+      "id": "timeout",
+      "status": "timed_out",
+      "result": {
+        "reason": "timed_out",
+        "exitCode": 124,
+        "stdout": "",
+        "stderr": "execution stopped"
+      },
+      "startedAt": 1790114323591,
+      "finishedAt": 1790114325222
+    },
+    {
+      "id": "output",
+      "status": "failed",
+      "result": {
+        "reason": "failed",
+        "exitCode": 125,
+        "stdout": "",
+        "stderr": "runner terminated without a valid result"
+      },
+      "startedAt": 1790114325235,
+      "finishedAt": 1790114326340
+    },
+    {
+      "id": "quota",
+      "status": "succeeded",
+      "result": {
+        "exitCode": 0,
+        "fsCalls": {
+          "http": 0,
+          "native": 5
+        },
+        "reason": "exited",
+        "statCalls": {
+          "http": 0,
+          "native": 2
+        },
+        "stderr": "",
+        "stdout": "quota-preserved\n"
+      },
+      "startedAt": 1790114326353,
+      "finishedAt": 1790114326934
+    },
+    {
+      "id": "cancel",
+      "status": "cancelled",
+      "result": {
+        "reason": "cancelled",
+        "exitCode": 124,
+        "stdout": "",
+        "stderr": "execution stopped"
+      },
+      "startedAt": 1790114326946,
+      "finishedAt": 1790114327093
+    }
+  ]
+}

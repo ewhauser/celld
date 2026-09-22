@@ -2,7 +2,6 @@
   "host": "0.0.0.0",
   "port": 19877,
   "runner": "/usr/local/bin/celld-wasmer-runner",
-  "callbackOrigin": "https://YOUR-CELLD-ROUTER.example",
   "maxConcurrent": 2,
   "tools": {
     "bash": {
@@ -23,5 +22,6 @@
       "sha256": "a9fa8202f1bf6a4eca8d31ee5f2b1970c8f45af5c5520cc954d28a133333d8e7",
       "entrypoint": "python"
     }
-  }
+  },
+  "filesystemSocket": "/run/celld-agentfs/fs.sock"
 }

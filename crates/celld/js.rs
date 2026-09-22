@@ -6499,7 +6499,7 @@ pub struct HeapBytes {
 impl Worker {
     /// Called only under the cell turn scheduler and isolate permit. No JS
     /// callback or second SQLite connection is involved.
-    pub(crate) fn agentfs_stat(
+    pub(crate) fn agentfs_operation(
         &mut self,
         request: &celld_agentfs_ipc::Request,
     ) -> Result<crate::agentfs::Answer> {
@@ -6512,9 +6512,10 @@ impl Worker {
             return Ok(crate::agentfs::Answer {
                 result: Err(celld_agentfs_ipc::Error::Stale),
                 observed: None,
+                written: None,
             });
         }
-        // This experiment fails closed instead of queueing behind JS input
+        // IPC fails closed instead of queueing behind JS input
         // gates. It must never observe an application's critical section.
         let busy = cell_gates()
             .lock()
@@ -6526,12 +6527,17 @@ impl Worker {
             return Ok(crate::agentfs::Answer {
                 result: Err(celld_agentfs_ipc::Error::Busy),
                 observed: None,
+                written: None,
             });
         }
-        let result = storage::agentfs_stat(request);
-        let sample = storage::write_position(&request.scope)?;
-        let observed = storage::observed_position(&request.scope, sample);
-        Ok(crate::agentfs::Answer { result, observed })
+        let before = storage::write_position(&request.scope)?;
+        let result = storage::agentfs_operation(request);
+        let (written, observed) = gate_positions(&request.scope, before)?;
+        Ok(crate::agentfs::Answer {
+            result,
+            observed,
+            written,
+        })
     }
     /// The heap V8 reports for this isolate. Takes the isolate lock, so the
     /// caller must hold the pool's permit for this worker, exactly as a turn
@@ -9217,6 +9223,7 @@ ops! { OP_NAMES, install_op_functions,
         "__storage_flush_pending_puts" => storage_ops::op_storage_flush_pending_puts,
         "__storage_sync" => storage_ops::op_storage_sync,
         "__agentfs_capability" => storage_ops::op_agentfs_capability,
+        "__agentfs_operation" => storage_ops::op_agentfs_operation,
         "__storage_cancel_pending_puts" => storage_ops::op_storage_cancel_pending_puts,
         "__actor_abort" => op_actor_abort,
         "__cron_plan" => op_cron_plan,

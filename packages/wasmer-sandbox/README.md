@@ -2,8 +2,10 @@
 
 Run configured WASI/WASIX tools against the same AgentFS tables used by a
 TypeScript Durable Object. celld owns the database, placement and replication.
-The executor is a separate, supervised Linux service. It never opens a cell
-database or receives bucket credentials.
+The executor is a separate, supervised Linux service colocated with the owning
+celld node. Every filesystem operation uses a private Unix socket into celld.
+TypeScript and Wasmer share the native AgentFS backend and one managed SQLite
+connection. The executor never opens a cell database or receives bucket credentials.
 
 This is a constrained backend: Bash/coreutils, Python's standard library and
 custom WASI modules; one active command per workspace; buffered UTF-8 stdio;
@@ -31,18 +33,28 @@ WASMER_BIN=/path/to/wasmer node service/fetch-tools.mjs tools
 cp service/config.example.json service/config.json
 ```
 
-Set `callbackOrigin` in `service/config.json` to the HTTPS origin of your celld
-Worker router. The executor uses only that configured origin; command requests
-cannot choose callback URLs. Configure these Worker bindings through your normal
-celld deployment configuration/secret-management process:
+Create a private socket directory owned by the UID running celld and the
+executor (UID 10001 in the supplied Compose file). Start **each owning celld
+node** with `CELLD_AGENTFS_SOCKET=/run/celld-agentfs/fs.sock`. The directory
+must already exist with mode 0700; the socket is created with mode 0600.
+Mount that same directory into its local executor at `/run/celld-agentfs` and
+set `filesystemSocket` in the supervisor config to `/run/celld-agentfs/fs.sock`.
+Do not mount the SQLite database into the executor. After a crash, remove a
+stale socket only after confirming its owning process has stopped.
+
+Configure these Worker bindings through your normal deployment process:
 
 | Binding | Value |
 | --- | --- |
 | `SANDBOX_API_TOKEN` | A random service API token, at least 32 characters |
-| `SANDBOX_CALLBACK_TOKEN` | A distinct random executor-to-Worker token |
 | `SANDBOX_SUPERVISOR_TOKEN` | A distinct random Worker-to-executor token |
-| `SANDBOX_SUPERVISOR_URL` | HTTPS executor origin, or `http://127.0.0.1:19877` for a local executor |
+| `SANDBOX_SUPERVISOR_URL` | The owning node's local executor, usually `http://127.0.0.1:19877` |
 | `WORKSPACES` | Durable Object namespace for `SandboxWorkspace` |
+
+IPC is the SDK default. Each possible owner needs a local executor and private
+socket. In Kubernetes use colocated containers, matching UIDs and a shared socket
+volume; loopback must reach the executor on that owner. The socket never forwards
+to another node. The external API can still route to the owning cell normally.
 
 [example/worker.ts](example/worker.ts) and
 [example/wrangler.json](example/wrangler.json) provide the Worker and namespace.
@@ -51,21 +63,21 @@ generated config outside version control. celld stores Worker configuration in
 the fleet bucket; access to that bucket is administrator access. No credentials
 are embedded in this repository. Generate tokens with `openssl rand -hex 32`.
 
-Start the executor with the matching supervisor/callback tokens:
+Start the executor with the matching supervisor token and socket directory:
 
 ```sh
 export CELLD_SANDBOX_TOKEN='YOUR_SUPERVISOR_TOKEN'
-export CELLD_SANDBOX_CALLBACK_TOKEN='YOUR_CALLBACK_TOKEN'
+export CELLD_AGENTFS_DIRECTORY='/run/celld-agentfs'
 docker compose -f service/compose.yaml up -d --build
 ```
 
 The Compose service runs as UID 10001 with a read-only root filesystem, no Linux
 capabilities, no privilege escalation, 2 GiB memory, two CPUs and 256 PIDs.
-Tool files are mounted read-only. Keep the executor separate from celld's memory
-budget. For remote executors put an authenticated TLS reverse proxy in front of
-the loopback listener. Only the celld Worker should possess the supervisor token.
-Restrict executor egress to the callback router using your network policy; the
-guest's virtual networking implementation independently denies network access.
+Tool files and the socket directory are mounted read-only. Keep the executor's
+memory budget separate from celld. Only the celld Worker should possess the
+supervisor token. Control requests (execute/cancel and buffered results) still
+use authenticated HTTP; filesystem data and heartbeat/sync use local IPC.
+The guest's virtual networking implementation denies network access.
 
 Deploy the Worker with your ordinary `celld deploy` workflow. This repository
 does not publish images, install cloud infrastructure or alter an existing fleet.
@@ -106,9 +118,8 @@ already committed file changes.
 Other actions: `read`/`write` (`{path,data}` with base64 data), `stat`, `list`,
 `mkdir`, `unlink`, `rmdir` (`{path}`), and `rename` (`{path,to}`). Read returns
 `{data}` in base64. Read/write convenience operations are limited to 1 MiB;
-guest file descriptors support larger files in bounded chunks. `/fs` is a
-private protocol using the callback token plus an activation-scoped execution
-capability. Never forward end-user requests to it as trusted callback traffic.
+guest file descriptors support larger files in bounded chunks. `/fs` is reserved for the explicit HTTP reference backend. IPC mode rejects
+filesystem callbacks; the helper is not given an HTTP filesystem URL or token.
 
 ## Use TypeScript inside the agent's Durable Object
 
@@ -135,10 +146,9 @@ export default { fetch: routeWorkspace };
 ```
 
 Bind `WORKSPACES` to your `Agent` class. Its inherited fetch handler serves
-callbacks to the same cell ID. `runAnalysis` is an application method; expose it
+the workspace API. `runAnalysis` is an application method; expose it
 through your own authorized application handler/RPC boundary. `WasmerSandbox`
-is also available as a composition API for existing DO classes, provided their
-callback router resolves its `workspace` option to that **same** DO.
+is also available as a composition API for existing DO classes on the same owner.
 
 `fs` implements synchronous `readFile`, `writeFile`, `stat`, `list`, `mkdir`,
 `rename`, `unlink`, `rmdir`, `open`, `read`, `write`, `truncate`, `fstat` and
@@ -155,11 +165,11 @@ of the supported contract.
   filesystem operations while `exec` is awaiting. SDK application mutations
   return `EBUSY` during execution. Handles are execution/activation scoped.
 - Each write, append, truncate, rename, unlink and bounded file replacement
-  commits in a short `transactionSync`. Append resolves EOF in that transaction.
+  commits in a short managed SQLite transaction. Append resolves EOF in that transaction.
   Growth is sparse and reads synthesize zeroes. A multi-call write can leave a
   committed prefix after a trap, cancellation or machine failure.
-- Explicit guest sync invokes celld's real durability barrier. Every callback
-  response and terminal result follows celld's output gates. Healthy fleets may
+- Every native operation, including explicit guest sync, reads and errors,
+  follows celld's output gates; terminal results do too. Healthy fleets may
   acknowledge from follower fsync; object-store upload is not required per chunk.
 - Never hold `transactionSync`, an async storage transaction,
   `blockConcurrencyWhile`, or an application mutex needed by callbacks across
@@ -208,7 +218,7 @@ crash can interrupt all its active commands, so choose its capacity and cgroup
 budget together. Runner diagnostics are bounded and available through the
 `runnerDiagnostic` event and emitted as JSON on the service stderr; guest
 stdout/stderr remain separate from those logs.
-Keep tokens and callback bodies out of access logs. Rotate by draining commands,
+Keep capabilities and filesystem payloads out of access logs. Rotate by draining commands,
 updating both ends, and restarting the executor.
 
 ```sh
@@ -232,9 +242,13 @@ and pauses only its isolated MinIO container. Ports 19876–19877 and 19970–19
 must be free (overridable with `SANDBOX_TEST_PORT`/`SANDBOX_FLEET_PORT`). See the
 Linux test Dockerfile and CI workflow for container qualification.
 
-## Local IPC experiment
+## Native filesystem IPC
 
-An opt-in [native stat experiment](ipc-experiment.md) uses a persistent binary
-Unix socket into celld’s managed storage turn. It includes a paired HTTP/native
-benchmark and capability/failure tests. It currently accelerates path metadata
-only; the default service continues to use HTTP for all filesystem operations.
+![Native filesystem architecture](native-filesystem.png)
+
+See [native-filesystem.md](native-filesystem.md) for the wire protocol, shared
+handle authority, transaction boundaries and failure behavior. `nativeFilesystem: false` on the composition API, or `SANDBOX_NATIVE_FILESYSTEM=0` on the supplied
+Worker, selects the HTTP reference backend explicitly. That backend additionally
+requires `callbackOrigin` and `CELLD_SANDBOX_CALLBACK_TOKEN` on the supervisor and
+the matching `SANDBOX_CALLBACK_TOKEN` Worker binding. There is no automatic
+fallback from IPC to HTTP.

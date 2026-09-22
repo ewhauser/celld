@@ -2534,7 +2534,7 @@ impl RuntimeManager {
 
     /// The caller owns the actor request/output gate. Pin the existing cell,
     /// honor its admission limit, and enter its normal serialized turn lane.
-    pub async fn agentfs_stat(
+    pub async fn agentfs_operation(
         &self,
         request: &celld_agentfs_ipc::Request,
     ) -> anyhow::Result<crate::agentfs::Answer> {
@@ -2544,7 +2544,7 @@ impl RuntimeManager {
         admitted
             .affiliation
             .slot()
-            .turn_cell(&request.scope, |worker| worker.agentfs_stat(request))
+            .turn_cell(&request.scope, |worker| worker.agentfs_operation(request))
             .await
     }
 

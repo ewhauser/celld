@@ -1,12 +1,12 @@
 // Copyright 2026 Deno Land Inc. Apache-2.0 license.
-//! Opt-in production-shell adapter for the stat-only IPC experiment.
+//! Local Unix-socket adapter for the native AgentFS filesystem.
 use crate::*;
 use celld_agentfs_ipc::{encode_response, Error as FsError, Request as FsRequest, MAX_FRAME};
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 pub(super) fn start(app: AppHandle) -> anyhow::Result<()> {
-    let Some(path) = std::env::var_os("CELLD_EXPERIMENTAL_AGENTFS_SOCKET") else {
+    let Some(path) = std::env::var_os("CELLD_AGENTFS_SOCKET") else {
         return Ok(());
     };
     let path = std::path::PathBuf::from(path);
@@ -78,7 +78,10 @@ async fn connection(mut stream: tokio::net::UnixStream, app: AppHandle) -> anyho
     }
     Ok(())
 }
-async fn dispatch(app: &AppHandle, request: FsRequest) -> Result<celld_agentfs_ipc::Stat, FsError> {
+async fn dispatch(
+    app: &AppHandle,
+    request: FsRequest,
+) -> Result<celld_agentfs_ipc::Reply, FsError> {
     if app.draining.load(Ordering::Acquire) {
         return Err(FsError::Stale);
     }
@@ -104,7 +107,7 @@ async fn dispatch(app: &AppHandle, request: FsRequest) -> Result<celld_agentfs_i
                 runtime.published_epoch(&request.scope) == Some(epoch),
                 "IPC owner changed"
             );
-            runtime.agentfs_stat(&request).await
+            runtime.agentfs_operation(&request).await
         })
         .await;
     // Gate failure releases no filesystem data (including state-dependent errors).

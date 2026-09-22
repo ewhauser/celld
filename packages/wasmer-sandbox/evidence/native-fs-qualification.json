@@ -1,0 +1,52 @@
+{
+  "date": "2026-09-22",
+  "baseCommit": "012ec6c6e2b3f536e260bd15c1ceac44fdef298f",
+  "scope": "Uncommitted full native filesystem IPC migration on codex/agentfs-wasmer-exploration",
+  "linux": {
+    "architecture": "arm64",
+    "images": {
+      "celld-wasmer-runtime:qualification": "sha256:6d34feac54d031c2b2de67acf5811e15aa2a2dea6dc0e846101d945d26f64638",
+      "celld-wasmer-sandbox:qualification": "sha256:8334112bf272ad244ea106d682c23b8413f03b664f3f073665dc282883350ba2",
+      "celld-wasmer-linux-tests:qualification": "sha256:677613ef142e1f7decd28145d50299622a3b00034fac03a6e811c4992287749e"
+    },
+    "state": {
+      "Status": "exited",
+      "Running": false,
+      "Paused": false,
+      "Restarting": false,
+      "OOMKilled": false,
+      "Dead": false,
+      "Pid": 0,
+      "ExitCode": 0,
+      "Error": "",
+      "StartedAt": "2026-09-22T22:03:38.2854412Z",
+      "FinishedAt": "2026-09-22T22:03:50.254020109Z"
+    },
+    "memoryBytes": 2147483648,
+    "nanoCpus": 2000000000,
+    "pidsLimit": 256,
+    "readonlyRootfs": true,
+    "capDrop": [
+      "ALL"
+    ],
+    "securityOpt": [
+      "no-new-privileges"
+    ]
+  },
+  "counts": {
+    "typescriptUnit": 16,
+    "nativeFilesystemUnit": 6,
+    "wireUnit": 1,
+    "runnerUnit": 10,
+    "macosIntegration": 14,
+    "macosToolsIntegration": 16,
+    "linuxIntegration": 17,
+    "fleetFaultChecks": 6
+  },
+  "limitations": [
+    "No hosted CI run or external deployment",
+    "Linux qualification is arm64",
+    "Fleet helper uses explicit HTTP reference backend; native capability and read/write durability gates tested directly on the owners",
+    "No full-I/O performance claim"
+  ]
+}
