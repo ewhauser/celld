@@ -358,6 +358,7 @@ pub mod ownership_store;
 pub mod peer_auth;
 pub mod peer_probe;
 pub mod pool;
+pub mod preview_cli;
 pub mod preview_seed;
 pub mod protocol;
 pub(crate) mod queue_batching;
