@@ -128,7 +128,8 @@ pub struct ActivationOptions<'a> {
     pub cell: &'a str,
     pub epoch: u64,
     /// The epoch-one ownership record was created conditionally by this
-    /// activation. No earlier replica can exist for this cell.
+    /// activation. Only an operator-installed epoch-zero preview baseline may
+    /// precede it; no earlier writer replica can exist for this cell.
     pub fresh: bool,
     /// This activation seized the cell from a DIFFERENT node. When false the
     /// ownership record still named us at `epoch - 1`, so no other process
