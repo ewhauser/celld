@@ -3627,6 +3627,7 @@ async fn async_main(telemetry_config: Option<celld::telemetry::Config>) -> anyho
     // able to read whether that cleanup thread started.
     celld::memory::tune_allocator();
     let mut settings = match action {
+        Action::Preview(arguments) => return celld::preview_cli::run(arguments).await,
         Action::Deploy(arguments) => return fleet::run_deploy(arguments).await,
         Action::Dev(arguments) => return celld::dev::run(arguments).await,
         Action::Cell(arguments) => return celld::cell_cli::run(arguments).await,
