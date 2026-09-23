@@ -1356,14 +1356,13 @@ pub struct LtxRepl {
 
 impl LtxRepl {
     /// Cfg-gated constructor over an injected store.
-    #[cfg(celld_internal_tests)]
+    #[cfg(any(test, celld_internal_tests))]
     pub fn start_with_store_for_test(watch: &Path, store: Arc<dyn ObjectStore>) -> Self {
         Self::start_with_store(watch, store, None, 0)
     }
 
-    /// Build the production loop topology over an injected object store,
-    /// with the settings that production reads from the environment.
-    #[cfg(celld_internal_tests)]
+    /// Build the production loop topology over an injected object store.
+    #[cfg(any(test, celld_internal_tests))]
     pub fn start_with_store(
         watch: &Path,
         store: Arc<dyn ObjectStore>,
@@ -1380,10 +1379,9 @@ impl LtxRepl {
         )
     }
 
-    /// Build the same loop topology with `config`, and route managed SQLite
-    /// through `vfs`. A simulated fleet passes each node its own config.
-    #[cfg(celld_internal_tests)]
-    pub(crate) fn start_with_store_on_vfs(
+    /// Build the same loop topology and route managed SQLite through `vfs`.
+    #[cfg(any(test, celld_internal_tests))]
+    pub fn start_with_store_on_vfs(
         watch: &Path,
         store: Arc<dyn ObjectStore>,
         compaction: Option<CompactionConfig>,
@@ -1401,7 +1399,7 @@ impl LtxRepl {
         )
     }
 
-    #[cfg(celld_internal_tests)]
+    #[cfg(any(test, celld_internal_tests))]
     fn start_with_store_and_optional_vfs(
         watch: &Path,
         store: Arc<dyn ObjectStore>,
@@ -2324,6 +2322,23 @@ impl LtxRepl {
                 "managed replica close is incomplete for {cell} epoch {epoch}"
             );
         }
+        // Preview initialization writes a complete, immutable epoch-zero LTX
+        // before any runtime exists. First ownership still uses epoch one, but
+        // must restore that baseline instead of treating the cell as empty.
+        let fresh = if fresh {
+            let key = celld_ltx::object_store::path::Path::from(format!(
+                "{}{}",
+                self.prefix,
+                crate::preview_seed::bootstrap_key(cell)
+            ));
+            match self.store.head(&key).await {
+                Ok(_) => false,
+                Err(celld_ltx::object_store::Error::NotFound { .. }) => true,
+                Err(error) => return Err(error.into()),
+            }
+        } else {
+            false
+        };
         let dst = self.db_path(cell, epoch);
         self.ltx_host.create_dir_all(dst.parent().unwrap())?;
 
@@ -5471,7 +5486,7 @@ fn production_ltx_host() -> LtxHost {
     execution_domain_ltx_host()
 }
 
-#[cfg(celld_internal_tests)]
+#[cfg(any(test, celld_internal_tests))]
 fn deterministic_ltx_host() -> LtxHost {
     execution_domain_ltx_host()
 }
