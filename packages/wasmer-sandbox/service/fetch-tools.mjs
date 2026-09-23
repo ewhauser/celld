@@ -51,7 +51,7 @@ for (const [name, entry] of Object.entries(lock)) {
     }
   }
   await chmod(path, 0o644); // Public, hash-verified artifacts must be readable by the unprivileged container UID.
-  tools[name] = { ...entry, path };
+  tools[name] = { ...entry, path, public: true, envAllowlist: [] };
   console.log("Verified", entry.package);
 }
 await writeFile(

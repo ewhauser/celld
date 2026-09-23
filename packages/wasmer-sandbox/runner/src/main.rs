@@ -30,6 +30,9 @@ struct Config {
     cwd: String,
     stdin: String,
     timeout_ms: u64,
+    #[cfg(target_os = "linux")]
+    supervisor_pid: u32,
+    #[cfg(not(target_os = "linux"))]
     development: bool,
     entrypoint: Option<String>,
     #[serde(default)]
@@ -39,6 +42,20 @@ struct Config {
 fn limits(config: &Config) -> anyhow::Result<()> {
     #[cfg(target_os = "linux")]
     unsafe {
+        let parent = libc::getppid();
+        anyhow::ensure!(
+            parent > 1 && parent as u32 == config.supervisor_pid,
+            "supervisor exited before admission"
+        );
+        anyhow::ensure!(
+            libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL) == 0,
+            "parent-death signal failed"
+        );
+        anyhow::ensure!(
+            libc::getppid() == parent,
+            "supervisor exited during admission"
+        );
+        libc::umask(0o077);
         // Defense in depth under a service-level cgroup/container memory and
         // PID budget. Wasmer reserves a large virtual address range for Wasm.
         for (resource, value) in [
@@ -64,7 +81,16 @@ fn limits(config: &Config) -> anyhow::Result<()> {
 }
 
 fn run() -> anyhow::Result<()> {
-    let config: Config = serde_json::from_reader(std::io::stdin().take(256 * 1024))?;
+    let mut config: Config = serde_json::from_reader(std::io::stdin().take(256 * 1024))?;
+    for (key, value) in [
+        ("HOME", "/tmp/home"),
+        ("TMPDIR", "/tmp"),
+        ("XDG_CACHE_HOME", "/tmp/home/.cache"),
+        ("XDG_CONFIG_HOME", "/tmp/home/.config"),
+        ("XDG_DATA_HOME", "/tmp/home/.local"),
+    ] {
+        config.env.insert(key.into(), value.into());
+    }
     anyhow::ensure!(
         (100..=120000).contains(&config.timeout_ms),
         "invalid deadline"
@@ -108,6 +134,10 @@ fn run() -> anyhow::Result<()> {
         wasmer_wasix::runtime::task_manager::tokio::TokioTaskManager::new(runtime.handle().clone()),
     );
     let mut rt = wasmer_wasix::runtime::PluggableRuntime::new(tasks);
+    // Never persist private compiled modules or resolve packages through a
+    // process-global host cache. Each exec owns this runtime and drops it whole.
+    rt.set_module_cache(wasmer_wasix::runtime::module_cache::in_memory());
+    rt.http_client = None;
     rt.set_networking_implementation(virtual_net::UnsupportedVirtualNetworking::default());
     rt.engine = store.engine().clone();
     let mut caps = wasmer_wasix::capabilities::Capabilities::default();

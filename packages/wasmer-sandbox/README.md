@@ -18,7 +18,9 @@ for retained evidence and deployment boundaries.
 Use the celld binary built from this checkout. Older releases lack the
 `ctx.assertCanAwaitCallback()` deadlock guard and are rejected by the SDK.
 The executor requires Linux, Node 24.12+ and the pinned Rust dependencies.
-macOS is supported only for development tests.
+Production also requires delegated cgroup v2 CPU, memory and PID controllers.
+macOS is supported only for development tests. See [agent isolation](agent-isolation.md)
+for the trust model, deployment profile and configuration changes.
 
 ```sh
 # From the repository root:
@@ -30,7 +32,9 @@ docker build -t celld-wasmer-sandbox:local .
 # Use a trusted Wasmer CLI; 7.4.2 was qualified. Downloads happen at setup,
 # never during guest execution. Every artifact is checked against tools.lock.json.
 WASMER_BIN=/path/to/wasmer node service/fetch-tools.mjs tools
-cp service/config.example.json service/config.json
+# Production systemd profile: install config.example.json under /etc/celld-sandbox.
+# Portable Compose development profile:
+cp service/config.development.example.json service/config.json
 ```
 
 Create a private socket directory owned by the UID running celld and the
@@ -65,7 +69,11 @@ generated config outside version control. celld stores Worker configuration in
 the fleet bucket; access to that bucket is administrator access. No credentials
 are embedded in this repository. Generate tokens with `openssl rand -hex 32`.
 
-Start the executor with the matching supervisor token and socket directory:
+For production, install the [delegated systemd service](agent-isolation.md#production-setup)
+or supply an equivalent dedicated cgroup subtree. The executor fails startup if
+production cgroup delegation is absent.
+
+For local development, start Compose with the matching supervisor token and socket directory:
 
 ```sh
 export CELLD_SANDBOX_TOKEN='YOUR_SUPERVISOR_TOKEN'
@@ -73,7 +81,8 @@ export CELLD_AGENTFS_DIRECTORY='/run/celld-agentfs'
 docker compose -f service/compose.yaml up -d --build
 ```
 
-The Compose service runs as UID 10001 with a read-only root filesystem, no Linux
+The Compose development service has aggregate limits only, not per-command
+cgroups. It runs as UID 10001 with a read-only root filesystem, no Linux
 capabilities, no privilege escalation, 2 GiB memory, two CPUs and 256 PIDs.
 Tool files and the socket directory are mounted read-only. Keep the executor's
 memory budget separate from celld. Only the celld Worker should possess the
@@ -151,7 +160,9 @@ curl "$WORKER/v1/workspaces/agent-42/status" \
 ```
 
 `exec` accepts `id`, configured `tool`, `args`, `cwd`, `env`, `stdin` and
-`timeoutMs`. No shell interpolation is performed: use the configured Bash tool
+`timeoutMs`. Each tool has an explicit `envAllowlist` (empty by default);
+unlisted environment keys are rejected. HOME, TMPDIR and XDG directories are
+fixed to fresh private temporary paths. No shell interpolation is performed: use the configured Bash tool
 and `-c` explicitly when desired. The result contains `status`, `startedAt`,
 `finishedAt` and `result: {reason, exitCode, stdout, stderr}`. `status` returns
 null for an unknown ID. `cancel` accepts `{id}` and closes filesystem admission
@@ -247,8 +258,11 @@ Default limits: 64 MiB logical workspace, 16 MiB/file, 4,096 inodes, 128 handles
 Each Wasm memory is capped at 512 MiB and each table at 1,000,000 elements.
 Linux also applies a 128 GiB virtual-address ceiling (reserved address space, not
 physical memory), CPU-time limit, 256 file
-descriptors and disabled core dumps/no-new-privileges. The service container's
-memory/PID limits cover runtime overhead and temporary filesystem metadata.
+descriptors and disabled core dumps/no-new-privileges. Production places each
+command tree in its own cgroup before sending its launch configuration: 1 GiB
+physical memory with swap disabled, one CPU and 64 processes/threads by default.
+Configure the enclosing service budget to include supervisor overhead and all
+concurrent command budgets. These cgroups cover runtime/compiler memory too.
 Limits are rejection boundaries, not quotas silently truncated on success.
 Temporary buffer capacity is released when the underlying file is deleted and
 its handles are closed; truncation may retain allocated capacity. The pinned
@@ -266,9 +280,11 @@ expired IDs. The SDK deliberately does not silently expire successful IDs.
 while the supervisor is full or shutting down. SIGTERM stops admission and kills
 active execution groups; the DO records interruption/cancellation. A supervisor
 crash can interrupt all its active commands, so choose its capacity and cgroup
-budget together. Runner diagnostics are bounded and available through the
-`runnerDiagnostic` event and emitted as JSON on the service stderr; guest
-stdout/stderr remain separate from those logs.
+budget together. Runner diagnostics are discarded; `runnerDiagnostic` emits
+only an opaque workspace ID, random execution ID and discarded byte count.
+Guest stdout/stderr remain in the authorized command result, never shared logs.
+Startup reaps orphan command cgroups and private scratch before admission.
+`/healthz` reports `perCommandResources`; it must be true in production.
 Keep capabilities and filesystem payloads out of access logs. Rotate by draining commands,
 updating both ends, and restarting the executor.
 

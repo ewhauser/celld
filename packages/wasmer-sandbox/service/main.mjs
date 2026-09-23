@@ -5,6 +5,8 @@ if (!path) throw new Error("CELLD_SANDBOX_CONFIG is required");
 const config = JSON.parse(await readFile(path, "utf8"));
 config.token = process.env.CELLD_SANDBOX_TOKEN;
 config.callbackToken = process.env.CELLD_SANDBOX_CALLBACK_TOKEN;
+config.cgroupParent =
+  process.env.CELLD_SANDBOX_CGROUP_PARENT ?? config.cgroupParent;
 const service = await createSupervisor(config);
 service.server.on("runnerDiagnostic", (event) =>
   console.error(JSON.stringify({ event: "runner_diagnostic", ...event })),

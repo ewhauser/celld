@@ -5,6 +5,29 @@ use std::{
 fn main() {
     let mode = std::env::args().nth(1).unwrap_or("basic".into());
     match mode.as_str() {
+        "agent-check" | "agent-hold" => {
+            let secret = std::env::var("AGENT_SECRET").unwrap();
+            assert_eq!(fs::read_to_string("/workspace/agent-private").unwrap(), secret);
+            assert_eq!(std::env::var("HOME").unwrap(), "/tmp/home");
+            assert_eq!(std::env::var("TMPDIR").unwrap(), "/tmp");
+            assert!(std::env::var("CELLD_SANDBOX_TOKEN").is_err());
+            assert!(std::env::var("PRIVATE_PARENT_SECRET").is_err());
+            for path in ["/tmp/agent-private", "/tmp/home/.cache/agent-private"] {
+                assert!(fs::read(path).is_err(), "private state survived another execution");
+                fs::write(path, &secret).unwrap();
+            }
+            fs::write("/workspace/agent-ready", b"ready").unwrap();
+            if mode == "agent-hold" {
+                let until = std::time::Instant::now() + std::time::Duration::from_secs(6);
+                while std::time::Instant::now() < until {
+                    assert_eq!(fs::read_to_string("/tmp/agent-private").unwrap(), secret);
+                    assert_eq!(fs::read_to_string("/tmp/home/.cache/agent-private").unwrap(), secret);
+                    std::thread::sleep(std::time::Duration::from_millis(25));
+                }
+            }
+            println!("{secret}");
+            eprintln!("private-stderr-{secret}");
+        }
         "stat-bench" => {
             let count: u32 = std::env::args().nth(2).unwrap_or("1000".into()).parse().unwrap();
             let started = std::time::Instant::now();

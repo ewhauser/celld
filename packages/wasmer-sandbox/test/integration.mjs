@@ -16,6 +16,12 @@ import { createHash, randomBytes } from "node:crypto";
 import assert from "node:assert/strict";
 import { authFixture } from "./auth-fixture.mjs";
 import { createSupervisor } from "../service/server.mjs";
+import {
+  concurrentAgentChecks,
+  verifyAgentState,
+  agentClient,
+  agents,
+} from "./agent-isolation.mjs";
 const dir = resolve(dirname(fileURLToPath(import.meta.url)), ".."),
   repo = resolve(dir, "../..");
 const artifacts = resolve(dir, "test/artifacts"),
@@ -41,7 +47,11 @@ const guest = resolve(dir, "test/guest.wasm"),
     resolve(dir, "runner/target/debug/celld-wasmer-runner");
 const config = {
   filesystemSocket: socketPath,
-  development: process.platform !== "linux",
+  development: !process.env.SANDBOX_TEST_CGROUP_PARENT,
+  cgroupParent: process.env.SANDBOX_TEST_CGROUP_PARENT,
+  runtimeDirectory: process.env.SANDBOX_TEST_CGROUP_PARENT
+    ? resolve(work, "executor")
+    : undefined,
   token,
   ...(nativeFilesystem && !process.env.SANDBOX_BENCH
     ? {}
@@ -49,6 +59,8 @@ const config = {
   runner,
   tools: {
     guest: {
+      public: true,
+      envAllowlist: ["TEST_VALUE", "AGENT_SECRET"],
       path: guest,
       sha256: createHash("sha256")
         .update(await readFile(guest))
@@ -63,7 +75,7 @@ if (process.env.SANDBOX_TEST_TOOLS)
   );
 const service = await createSupervisor(config);
 service.server.on("runnerDiagnostic", (event) =>
-  console.error("runner:", event.text),
+  console.error("runner:", JSON.stringify(event)),
 );
 let oldToken;
 service.server.prependListener("request", (req) => {
@@ -421,6 +433,7 @@ try {
     record("Python stdlib on the durable filesystem");
   }
   let restartCapability;
+  await concurrentAgentChecks(url, auth, record);
   if (nativeFilesystem) {
     restartCapability = { token: randomBytes(32).toString("hex") };
     Object.assign(
@@ -447,6 +460,21 @@ try {
   );
   assert.equal((await call("status", { id: "basic" })).status, "succeeded");
   record("LTX restore without the prior runtime directory");
+  await verifyAgentState(
+    url,
+    auth,
+    record,
+    "after runtime-directory loss and restart",
+  );
+  for (const agent of agents) {
+    const result = await agentClient(url, auth)(agent, "exec", {
+      id: "fresh-after-restart",
+      tool: "guest",
+      args: ["agent-check"],
+      env: { AGENT_SECRET: `canary-${agent}` },
+    });
+    assert.equal(result.status, "succeeded", JSON.stringify(result));
+  }
   if (restartCapability) {
     const { connect } = await import("./native-filesystem.mjs");
     const c = await connect(socketPath);
@@ -510,6 +538,12 @@ try {
   );
   record(
     "owner process loss restores committed prefix, interrupts command and fences former execution",
+  );
+  await verifyAgentState(
+    url,
+    auth,
+    record,
+    "after interrupted execution and owner restart",
   );
 } finally {
   await stop();

@@ -50,9 +50,12 @@ jobs:
       - name: Real runtime and tool integration
         working-directory: packages/wasmer-sandbox
         run: SANDBOX_TEST_TOOLS="$PWD/tools/tools.json" npm run test:integration
+      - name: Per-command kernel limits and orphan cleanup
+        working-directory: packages/wasmer-sandbox
+        run: sudo sh test/resources-linux.sh "$(command -v node)" "$PWD" "$(id -u)" "$(id -g)"
       - name: Native IPC integration and paired stat benchmark
         working-directory: packages/wasmer-sandbox
-        run: SANDBOX_NATIVE_FILESYSTEM=1 SANDBOX_BENCH=1 SANDBOX_TEST_TOOLS="$PWD/tools/tools.json" npm run test:integration
+        run: sudo env CELLD_BIN="$CELLD_BIN" CELLD_WASMER_RUNNER="$CELLD_WASMER_RUNNER" SANDBOX_NATIVE_FILESYSTEM=1 SANDBOX_BENCH=1 SANDBOX_TEST_TOOLS="$PWD/tools/tools.json" sh test/resources-linux.sh "$(command -v node)" "$PWD" "$(id -u)" "$(id -g)" test/integration.mjs
       - name: Three-node durability and fencing
         working-directory: packages/wasmer-sandbox
         run: SANDBOX_NATIVE_FILESYSTEM_FLEET=1 npm run test:fleet

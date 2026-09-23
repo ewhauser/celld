@@ -1,5 +1,5 @@
 {
-  "host": "127.0.0.1",
+  "host": "0.0.0.0",
   "port": 19877,
   "runner": "/usr/local/bin/celld-wasmer-runner",
   "maxConcurrent": 2,
@@ -30,11 +30,5 @@
     }
   },
   "filesystemSocket": "/run/celld-agentfs/fs.sock",
-  "runtimeDirectory": "/run/celld-executor",
-  "cgroupParent": "/sys/fs/cgroup/celld-executor/commands",
-  "resources": {
-    "memoryBytes": 1073741824,
-    "cpuMillis": 1000,
-    "pids": 64
-  }
+  "development": true
 }

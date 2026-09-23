@@ -1,0 +1,83 @@
+{
+  "baseline": "b429b2785fed24652b3e63001fac9e2cc9196481",
+  "changes": "uncommitted",
+  "platform": "Linux arm64 in Colima",
+  "executionUid": 10001,
+  "rootUsage": "test-only delegated cgroup setup; all resource tests and celld/Wasmer integration run as UID 10001",
+  "perCommandResources": {
+    "memoryBytes": 1073741824,
+    "cpuMillis": 1000,
+    "pids": 64
+  },
+  "images": {
+    "celld-wasmer-sandbox:agent-isolation": "sha256:9f1802a1ebf766421fb0d13a83176abba1e8e8928c53e2bfce4d4c80ae2d9539",
+    "celld-wasmer-runtime:agent-isolation": "sha256:69fed2a3f6f0c6e389714641fe7896586135bab08a74dd42e9420d6e62cea3cf",
+    "celld-wasmer-linux-tests:agent-isolation": "sha256:ed2824a69aa8b26e2a8970513152e729d0ed1b2cbc92a22ab07c1e9f60081c3d"
+  },
+  "containerState": {
+    "Status": "exited",
+    "Running": false,
+    "Paused": false,
+    "Restarting": false,
+    "OOMKilled": false,
+    "Dead": false,
+    "Pid": 0,
+    "ExitCode": 0,
+    "Error": "",
+    "StartedAt": "2026-09-23T00:47:11.388458529Z",
+    "FinishedAt": "2026-09-23T00:47:46.682073137Z"
+  },
+  "checks": {
+    "typecheck": "passed",
+    "prettier": "passed",
+    "rustfmt": "passed",
+    "clippy": "passed; warnings denied",
+    "typescriptTests": 22,
+    "rustTests": 11
+  },
+  "evidence": {
+    "agent-isolation-fleet.json": 8,
+    "agent-isolation-linux.json": 25,
+    "agent-isolation-macos.json": 25,
+    "agent-isolation-resources.json": 5
+  },
+  "sourceSha256": {
+    "src/authorization.ts": "237765553e3c0765b1bc2495d3cf914318d0f36aea48fe2c2d13967dd1bb943b",
+    "src/filesystem.ts": "5ae72940988daef11bf4ebbf34428b811bea8a65e1c32d3c0024171b7ede6fc9",
+    "src/index.ts": "5f464133dc45f4ca07f719fba21bcad5bd7f642380bf373a3acfc5511353d0c1",
+    "src/native-filesystem.ts": "2f9fd4ff2f60a6c536f90627b58cd2b9db7322adad4ad6cbe409d9ab0f6ac364",
+    "src/protocol.ts": "e08bd6546bb452b53beb596825598a0301aecd6c21e65b097e9f2b5f783808dc",
+    "src/storage.ts": "763bacd05af70dc607847c6979d80049365325c498b822dda2e83007277fb0dc",
+    "src/worker.ts": "17127c7de388fcd2dab462a739c1eba3b888ec021bfa1dd03f8e7aa066f42b60",
+    "service/fetch-tools.mjs": "cc717871a66021b0743c7bf1fead8e050d76c8a07039c2919eb231296239fca3",
+    "service/main.mjs": "43d1b7dde03e535d4af18761120fdb1f4a33a4cf2d9d9ac8219aad618af26807",
+    "service/resources.mjs": "e6a30e729538aa15a06fe426f38e9b17c5d15666e446e5d926e19b0ada2aefb7",
+    "service/server.mjs": "cdfa4f15eded3e7c13d110a9d177a68e261975b4c9dfd7c2dc583a00c9d9261a",
+    "service/start-delegated.sh": "9c2ac2c6deccc70b1ddde39766bec6c8e3bdd219685f63a4a06e024325c0d086",
+    "service/celld-sandbox.service": "e5a9a2808bc5eb651a82b7504741709740f65648e170ce03141d8803a8a09617",
+    "service/config.development.example.json": "bf78e01265ec3a501f96dea2ba54c0fc1cc3e6e27a3d44aecf1d9d3efa4ebbc5",
+    "service/config.example.json": "04e5f1b3da80ec49064d40ed1219c000ed912365e58c75e01276727f7a3e6c56",
+    "runner/src/main.rs": "59c63c3cf429184d8ba2b16fa86cba70d0525f7ef8d2be7ceba7ee02a74dd80e",
+    "runner/src/memory.rs": "ce140869eb75877415a7133c23e3ac9471dfd07af2b730dd78874a86fd96c7de",
+    "runner/src/output.rs": "971c0f63653cd8bd6ff22a4b188e199db8f531218e8cdac1a49bf434970df599",
+    "runner/src/packages.rs": "45007f10d07465ccb576aaf58cb1224cb812a09abb0f0a6a86ba742050893b1c",
+    "runner/src/policy.rs": "1856df3f63eb7072b57e6965603b2e88412b657373774ff3239f7f97d716884f",
+    "runner/src/remote.rs": "7e3dae8a506f0072aff082a6f7b9bebf0fdf35a9a8f36a340e9f1ee001c392ae",
+    "test/agent-isolation.mjs": "1030ee9555288d7d2ccf8c8b10cb9485c53d16c9bf7892763e8cdcb404c3ae28",
+    "test/auth-fixture.mjs": "3c525325f291bc1a4e4c7a812de90a95c078c8f15d7d953c7e783ec4e277856f",
+    "test/authorization-integration.mjs": "3316ac2c4f114e26d9b52fe18ae338faf8bbcdfee8f1344d5fd37953f44c5b3b",
+    "test/fleet.mjs": "da933c940301e9f72e6c01203659af4209ececf248b7bbf97d5a97ff20dcad42",
+    "test/integration.mjs": "f56f845b0888aaaee14165fbe43657a17a14152c8c66e6e4da256bba845e0e0c",
+    "test/native-filesystem.mjs": "345c000a6031ee62dbc3147b7176cef7a5835785dbb057c8ea06cadb955292cf",
+    "test/resources-linux.mjs": "cb1c51452e5fa4ed1756561f140e270451d8aef11597920236efd586775e931b",
+    "test/authorization.test.ts": "b6e4b1da7c4bbbf9cc6e37f71d8dde5b68ec78fd548f61e9a71bea5c473f7474",
+    "test/executor-isolation.test.ts": "eecb284559a9bf92d0a57eadf4b8608fcd085e7af1dce5f20572ff270f245157",
+    "test/filesystem.test.ts": "7a1f174a3d4b0a0682e8342e2bc31334a8a626229457e3dd55322b8f1ffdf132",
+    "test/sandbox.test.ts": "c03203235e120615245a55a66cf20803b8cc7142046a97b3527a9931627ad4be",
+    "test/storage.ts": "4a6aa8e0a242f463af9029f78819ee129a3190ca5557878edd28e49d6f7c5fe5",
+    "test/supervisor.test.ts": "5cf6687021a30db2f4679036a9f0e816aaa91c3937e93f209d5aeb97e3fd2160",
+    "test/resources-linux.sh": "f04287c839a0318e76216f4852e5178c24e9d78ddebf531567369243a7c7d9ee",
+    "test/guest.rs": "21758fc821e8b5c86af7767221ef4d40f6c2159f9b1c0651ab0424074bdd0c27",
+    "test/Linux.Dockerfile": "a098d879a104d7f9357103f15d8b4d2d479c0a957c66afe078adad97222e2260"
+  }
+}

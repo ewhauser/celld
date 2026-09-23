@@ -1,4 +1,6 @@
 services:
+  # Portable development/reference profile. Production uses the delegated
+  # systemd service (or an equivalent per-command cgroup delegation).
   executor:
     build: ..
     init: true

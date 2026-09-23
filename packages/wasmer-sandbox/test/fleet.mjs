@@ -18,6 +18,7 @@ import { randomBytes, createHash } from "node:crypto";
 import assert from "node:assert/strict";
 import { authFixture } from "./auth-fixture.mjs";
 import { createSupervisor } from "../service/server.mjs";
+import { seedAgentState, verifyAgentState } from "./agent-isolation.mjs";
 const dir = resolve(dirname(fileURLToPath(import.meta.url)), ".."),
   repo = resolve(dir, "../..");
 const work = resolve(dir, `test/artifacts/fleet-${Date.now()}`);
@@ -108,8 +109,7 @@ async function owner() {
     const r = await fetch(`http://127.0.0.1:${n.internal}/state`);
     const state = await r.json();
     evidence.states.push({ node: n.index, state });
-    if (state.residents.some((s) => s.startsWith("SandboxWorkspace:")))
-      return n;
+    if (state.residents.includes("SandboxWorkspace:" + workspaceId)) return n;
   }
   throw Error("owner missing");
 }
@@ -232,13 +232,19 @@ export default {fetch:routeWorkspace};`,
   proxy.listen(port, "127.0.0.1");
   await once(proxy, "listening");
   supervisor = await createSupervisor({
-    development: process.platform !== "linux",
+    development: !process.env.SANDBOX_TEST_CGROUP_PARENT,
+    cgroupParent: process.env.SANDBOX_TEST_CGROUP_PARENT,
+    runtimeDirectory: process.env.SANDBOX_TEST_CGROUP_PARENT
+      ? resolve(work, "executor")
+      : undefined,
     token,
     callbackToken: token,
     callbackOrigin: url,
     runner,
     tools: {
       guest: {
+        public: true,
+        envAllowlist: ["TEST_VALUE", "AGENT_SECRET"],
         path: guest,
         sha256: createHash("sha256")
           .update(await readFile(guest))
@@ -314,6 +320,7 @@ export default {fetch:routeWorkspace};`,
     stdin: "stdin-data",
   });
   assert.equal(completed.status, "succeeded", JSON.stringify(completed));
+  await seedAgentState(url, auth);
   await sleep(4000); // allow all three node leases to be discovered
   const first = await owner();
   let nativeCapability;
@@ -382,6 +389,7 @@ export default {fetch:routeWorkspace};`,
   pass(
     "another owner restores acknowledged state after prior owner and disk loss",
   );
+  await verifyAgentState(url, auth, pass, "after owner takeover and disk loss");
   if (nativeFilesystem) {
     const current = await owner(),
       { connect } = await import("./native-filesystem.mjs");
@@ -461,6 +469,12 @@ export default {fetch:routeWorkspace};`,
   await pending;
   pass(
     "suspended owner expires, takeover fences old execution, resumed owner self-fences",
+  );
+  await verifyAgentState(
+    url,
+    auth,
+    pass,
+    "after partition and stale-owner fencing",
   );
   if (nativeFilesystem) {
     // Only the takeover owner remains. With the bucket paused there is no

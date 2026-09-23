@@ -1,0 +1,229 @@
+{
+  "date": "2026-09-23T00:47:21.747Z",
+  "platform": "linux",
+  "checks": [
+    "real router and direct DO reject cross-agent IDs, aliases, headers and service credentials for every action",
+    "agent command results and identical command IDs are isolated; authorized execution works",
+    "cross-agent cancellation cannot interrupt another agent; own cancellation succeeds",
+    "unauthorized control and stale callbacks rejected",
+    "real DO/shared Wasmer sparse I/O, shrink/growth, append, rename, stdin/env/stdout/stderr",
+    "durable replay and payload conflict",
+    "real celld transactionSync, transaction and blockConcurrencyWhile deadlock guards",
+    "exit status, traps, host/network isolation, CPU timeout and bounded output",
+    "temporary quota rejects repeated/huge growth atomically and reclaims capacity",
+    "cancellation fences writes and preserves committed prefix",
+    "all native IPC filesystem operations: raw 64 KiB binary I/O, handles, sparse offsets, truncate, rename, directories, sync and heartbeat",
+    "native IPC binds one socket to one grant; disconnect revokes and reconnect fails",
+    "native IPC rejects cross-command handles, forged command IDs and out-of-order requests",
+    "native TypeScript rollback, transaction handle guard and app/guest handle isolation",
+    "native filesystem: persistent binary connection, metadata, path confinement, auth, ordering, input gate, expiry and revocation",
+    "native IPC rejects oversized, empty, unknown-version and truncated requests",
+    "Bash, pipeline and coreutils on the durable filesystem",
+    "explicit coreutils entrypoint on a multi-command package",
+    "Python stdlib on the durable filesystem",
+    "concurrent real guests isolate identical paths, private temporary/cache files, environment, command IDs, stdout/stderr and cancellation",
+    "LTX restore without the prior runtime directory",
+    "agent-private files remain separated after runtime-directory loss and restart",
+    "native capability is not resurrected by process restart or LTX restore",
+    "owner process loss restores committed prefix, interrupts command and fences former execution",
+    "agent-private files remain separated after interrupted execution and owner restart"
+  ],
+  "commands": [
+    {
+      "id": "basic",
+      "status": "succeeded",
+      "result": {
+        "reason": "exited",
+        "exitCode": 0,
+        "stdout": "guest-ok\n",
+        "stderr": "guest-stderr\n",
+        "fsCalls": {
+          "http": 0,
+          "native": 51
+        },
+        "statCalls": {
+          "http": 0,
+          "native": 11
+        }
+      },
+      "startedAt": 1790124442215,
+      "finishedAt": 1790124442318
+    },
+    {
+      "id": "exit",
+      "status": "failed",
+      "result": {
+        "reason": "exited",
+        "exitCode": 42,
+        "stdout": "",
+        "stderr": "",
+        "fsCalls": {
+          "http": 0,
+          "native": 5
+        },
+        "statCalls": {
+          "http": 0,
+          "native": 2
+        }
+      },
+      "startedAt": 1790124442329,
+      "finishedAt": 1790124442402
+    },
+    {
+      "id": "trap",
+      "status": "failed",
+      "result": {
+        "reason": "exited",
+        "exitCode": 45,
+        "stdout": "",
+        "stderr": "\nthread 'main' (1) panicked at test/guest.rs:47:19:\nintentional trap\nnote: run with `RUST_BACKTRACE=1` environment variable to display a backtrace\n",
+        "fsCalls": {
+          "http": 0,
+          "native": 5
+        },
+        "statCalls": {
+          "http": 0,
+          "native": 2
+        }
+      },
+      "startedAt": 1790124442407,
+      "finishedAt": 1790124442483
+    },
+    {
+      "id": "isolation",
+      "status": "succeeded",
+      "result": {
+        "reason": "exited",
+        "exitCode": 0,
+        "stdout": "isolated\n",
+        "stderr": "",
+        "fsCalls": {
+          "http": 0,
+          "native": 8
+        },
+        "statCalls": {
+          "http": 0,
+          "native": 5
+        }
+      },
+      "startedAt": 1790124442488,
+      "finishedAt": 1790124442566
+    },
+    {
+      "id": "timeout",
+      "status": "timed_out",
+      "result": {
+        "reason": "timed_out",
+        "exitCode": 124,
+        "stdout": "",
+        "stderr": "execution stopped"
+      },
+      "startedAt": 1790124442571,
+      "finishedAt": 1790124444076
+    },
+    {
+      "id": "output",
+      "status": "failed",
+      "result": {
+        "reason": "failed",
+        "exitCode": 125,
+        "stdout": "",
+        "stderr": "runner terminated without a valid result"
+      },
+      "startedAt": 1790124444082,
+      "finishedAt": 1790124445105
+    },
+    {
+      "id": "quota",
+      "status": "succeeded",
+      "result": {
+        "reason": "exited",
+        "exitCode": 0,
+        "stdout": "quota-preserved\n",
+        "stderr": "",
+        "fsCalls": {
+          "http": 0,
+          "native": 5
+        },
+        "statCalls": {
+          "http": 0,
+          "native": 2
+        }
+      },
+      "startedAt": 1790124445111,
+      "finishedAt": 1790124445190
+    },
+    {
+      "id": "cancel",
+      "status": "cancelled",
+      "result": {
+        "reason": "cancelled",
+        "exitCode": 124,
+        "stdout": "",
+        "stderr": "execution stopped"
+      },
+      "startedAt": 1790124445195,
+      "finishedAt": 1790124445214
+    },
+    {
+      "id": "bash",
+      "status": "succeeded",
+      "result": {
+        "reason": "exited",
+        "exitCode": 0,
+        "stdout": "8\n",
+        "stderr": "",
+        "fsCalls": {
+          "http": 0,
+          "native": 38
+        },
+        "statCalls": {
+          "http": 0,
+          "native": 16
+        }
+      },
+      "startedAt": 1790124446170,
+      "finishedAt": 1790124449481
+    },
+    {
+      "id": "coreutils-direct",
+      "status": "succeeded",
+      "result": {
+        "reason": "exited",
+        "exitCode": 0,
+        "stdout": "explicit-entrypoint\n",
+        "stderr": "",
+        "fsCalls": {
+          "http": 0,
+          "native": 6
+        },
+        "statCalls": {
+          "http": 0,
+          "native": 2
+        }
+      },
+      "startedAt": 1790124449488,
+      "finishedAt": 1790124451461
+    },
+    {
+      "id": "python",
+      "status": "succeeded",
+      "result": {
+        "reason": "exited",
+        "exitCode": 0,
+        "stdout": "{\"value\": 42}\n",
+        "stderr": "",
+        "fsCalls": {
+          "http": 0,
+          "native": 74
+        },
+        "statCalls": {
+          "http": 0,
+          "native": 48
+        }
+      },
+      "startedAt": 1790124451467,
+      "finishedAt": 1790124459710
+    }
+  ]
+}

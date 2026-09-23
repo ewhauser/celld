@@ -104,7 +104,7 @@ interfere. Only the three public WebC files and their catalog are mounted here.
 node --input-type=module -e '
 import {readFile,writeFile} from "node:fs/promises";
 const catalog=JSON.parse(await readFile("service/tools.lock.json","utf8"));
-for(const [name,tool] of Object.entries(catalog)) tool.path="/tools/"+name+".webc";
+for(const [name,tool] of Object.entries(catalog)) Object.assign(tool,{path:"/tools/"+name+".webc",public:true,envAllowlist:[]});
 await writeFile("tools/tools-linux.json",JSON.stringify(catalog));'
 docker volume create celld-wasmer-linux-evidence
 docker run --name celld-wasmer-linux-qualification --read-only \
@@ -115,6 +115,10 @@ docker run --name celld-wasmer-linux-qualification --read-only \
   celld-wasmer-linux-tests:qualification
 # Copy the printed results.json path out before removing your test container/volume.
 ```
+
+The portable container invocation above uses development mode and aggregate
+container limits. For per-command enforcement, use the delegated cgroup tests
+described in [agent-isolation.md](agent-isolation.md).
 
 The [CI workflow](../../.github/workflows/wasmer-sandbox.yml) repeats native
 Linux unit, integration and three-node checks with pinned tool downloads. It has
@@ -200,3 +204,40 @@ reused. No Rust runtime code was changed by this authorization stage. Linux CI
 already runs these suites but has not run for this change. This evidence covers
 API access control, not adversarial OS isolation or arbitrary untrusted Worker
 code. The issuer's application ownership checks remain a deployment prerequisite.
+
+## Private execution state and per-command resources (2026-09-22)
+
+Implemented on baseline `b429b27` (native IPC migration, per-agent authorization
+and execution-scoped native grants), with the current uncommitted isolation
+changes. See [agent-isolation.md](agent-isolation.md) for the trust boundary,
+production setup and configuration migration. This stage keeps Wasmer in a
+separate process per command and does not introduce a microVM.
+
+| Validation | Result | Retained evidence |
+| --- | --- | --- |
+| JavaScript/TypeScript unit tests | 22 passed, including concurrent private environments/results, cache pressure, diagnostics and scratch cleanup | [build record](evidence/agent-isolation-build.json) |
+| Rust runner tests | 11 passed, including independent temporary home/cache roots | [build record](evidence/agent-isolation-build.json) |
+| Typecheck, Prettier, Rust fmt, Clippy with warnings denied, diff whitespace | Passed | [build record](evidence/agent-isolation-build.json) |
+| Linux arm64 real celld/Wasmer, per-command cgroups, UID 10001 | 25 integration checks passed, including Bash/coreutils/Python and concurrent agents | [Linux results](evidence/agent-isolation-linux.json) |
+| Linux real kernel limits, UID 10001 | 5 passed: memory OOM with surviving peer, fork limit/tree cleanup, CPU throttling, orphan restart, SIGKILL lease recovery | [resource results](evidence/agent-isolation-resources.json) |
+| macOS native IPC development profile | 25 checks passed, including concurrent guests and private state after restart | [macOS results](evidence/agent-isolation-macos.json) |
+| Three-node MinIO fault run | 8 passed, including distinct agent files after owner/disk loss and stale-owner fencing | [fleet results](evidence/agent-isolation-fleet.json) |
+
+The Linux test container used root only for test setup and cgroup delegation;
+all kernel assertions and the full integration ran as UID 10001. It mounted the
+Linux VM's cgroup tree to exercise real controllers; it was not a production
+container privilege qualification. The resource script creates and removes only
+its own subtree. The final container exited 0 without an aggregate OOM kill.
+Per-command OOM kills are intentional in the adversarial resource test.
+
+The final Linux run includes the parent-PID admission check and fail-closed
+resource cleanup changes. The macOS and fleet runs preceded those Linux resource
+cleanup refinements and establish the unchanged guest/state-isolation behavior.
+The [build record](evidence/agent-isolation-build.json) records image IDs, source
+hashes, limits and exact evidence counts. The systemd unit is an installation
+template; its complete service-manager lifecycle has not been exercised here.
+CI now repeats the non-root kernel tests and runs native IPC integration under
+delegated command cgroups, but hosted CI has not run for this change.
+
+No code was pushed, released or deployed. These tests do not establish isolation
+from a compromised Wasmer runtime, native bindings or trusted celld Worker code.

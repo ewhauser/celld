@@ -26,6 +26,8 @@ for (const native of [false, true])
       maxConcurrent: 1,
       tools: {
         guest: {
+          public: true,
+          envAllowlist: ["TEST_VALUE", "AGENT_SECRET"],
           path: dir + "/tool",
           sha256: createHash("sha256").update("synthetic module").digest("hex"),
         },

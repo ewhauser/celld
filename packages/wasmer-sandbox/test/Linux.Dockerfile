@@ -1,7 +1,10 @@
-FROM celld-wasmer-sandbox:qualification
+ARG SANDBOX_IMAGE=celld-wasmer-sandbox:qualification
+ARG RUNTIME_IMAGE=celld-wasmer-runtime:qualification
+FROM ${RUNTIME_IMAGE} AS runtime
+FROM ${SANDBOX_IMAGE}
 USER root
-RUN apt-get update && apt-get install -y --no-install-recommends procps && rm -rf /var/lib/apt/lists/*
-COPY --from=celld-wasmer-runtime:qualification /out/celld /usr/local/bin/celld
+RUN apt-get update && apt-get install -y --no-install-recommends procps util-linux && rm -rf /var/lib/apt/lists/*
+COPY --from=runtime /out/celld /usr/local/bin/celld
 RUN npm ci --ignore-scripts
 COPY test ./test
 RUN mkdir -p /app/test/artifacts && chown -R sandbox:sandbox /app/test/artifacts

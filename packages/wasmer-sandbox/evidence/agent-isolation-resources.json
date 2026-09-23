@@ -1,0 +1,10 @@
+{
+  "platform": "linux",
+  "checks": [
+    "per-command memory.max kills an allocating command without killing its peer",
+    "pids.max rejects a fork storm; cleanup kills and reaps the entire process tree",
+    "cpu.max throttles CPU-bound work independently of healthy commands",
+    "restart reaping kills orphan commands before deleting private scratch or admitting new work",
+    "SIGKILL releases the supervisor lease; restart reaps its live orphan and private files"
+  ]
+}

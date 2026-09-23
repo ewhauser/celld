@@ -1,5 +1,6 @@
 use sha2::{Digest, Sha256};
 use std::{collections::HashMap, sync::Arc};
+use virtual_fs::FileSystem;
 use wasmer_wasix::{
     bin_factory::BinaryPackage,
     runtime::{
@@ -115,6 +116,15 @@ pub fn root(
         .with_stderr(Box::new(err.clone()))
         .with_tty(Box::<virtual_fs::NullFile>::default())
         .build();
+    for directory in [
+        "/tmp/home",
+        "/tmp/home/.cache",
+        "/tmp/home/.config",
+        "/tmp/home/.local",
+    ] {
+        root.create_dir(std::path::Path::new(directory))
+            .expect("fresh per-execution home");
+    }
     wasmer_wasix::fs::WasiFsRoot::from_mount_fs(root).with_memory_limiter_opt(Some(limiter))
 }
 
@@ -188,6 +198,35 @@ mod tests {
         bytes.extend_from_slice(b"ok").unwrap();
         drop(bytes);
         assert_eq!(limit.0.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn temporary_roots_and_home_caches_are_private_and_disposable() {
+        let a = root(&Default::default(), &Default::default(), "");
+        let b = root(&Default::default(), &Default::default(), "");
+        let path = "/tmp/home/.cache/private";
+        let mut file = a
+            .new_open_options()
+            .write(true)
+            .create(true)
+            .open(path)
+            .unwrap();
+        file.write_all(b"agent-a-secret").await.unwrap();
+        assert!(b.new_open_options().read(true).open(path).is_err());
+        let mut other = b
+            .new_open_options()
+            .write(true)
+            .create(true)
+            .open(path)
+            .unwrap();
+        other.write_all(b"agent-b-secret").await.unwrap();
+        let mut read = a.new_open_options().read(true).open(path).unwrap();
+        let mut bytes = Vec::new();
+        read.read_to_end(&mut bytes).await.unwrap();
+        assert_eq!(bytes, b"agent-a-secret");
+        drop(a);
+        let next = root(&Default::default(), &Default::default(), "");
+        assert!(next.new_open_options().read(true).open(path).is_err());
     }
 
     #[tokio::test]
