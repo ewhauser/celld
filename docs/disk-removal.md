@@ -91,6 +91,15 @@ a blocker. An append reply advertises `quiesced: true` after this cut, including
 idle probes, so a quiet leader can permanently degrade the shipper and release
 its last follower obligation without waiting for another application write.
 
+Strict removal drains cells through the existing durability, runtime-stop and
+ownership-release barriers. It leaves each released cell available for a later
+request to recover, without requiring a live successor to adopt it immediately.
+This permits a populated last member or the whole fleet to stop. A successor
+adoption already in flight becomes stale only after that cell has passed those
+same barriers. Ordinary shutdown still waits for successor adoption. None of
+these release observations substitute for the following disk-wide proof or the
+actor and durability task joins.
+
 The existing node lease's folded log gains `bucket_complete` (default false for
 old records). A leader publishes it for the exact log epoch only after permanent
 shipper degradation, zero outstanding batches, and complete bucket coverage of

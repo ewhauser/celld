@@ -5276,7 +5276,11 @@ async fn async_main(telemetry_config: Option<celld::telemetry::Config>) -> anyho
             );
         }
         if admitted_drained {
-            let _ = app.tx.send(Message::ReleaseAll);
+            let _ = app.tx.send(if strict {
+                Message::ReleaseAllForDiskRemoval
+            } else {
+                Message::ReleaseAll
+            });
         }
         admitted_drained
     } else {
@@ -5288,7 +5292,7 @@ async fn async_main(telemetry_config: Option<celld::telemetry::Config>) -> anyho
     // deadline. A deadline-cut cell keeps its durable owner record and follows
     // the same lease-expiry recovery path as an abrupt process loss.
     let mut stall_deadline = (tokio::time::Instant::now() + stall_window).min(handoff_deadline);
-    let mut handed_off = 0;
+    let mut drain_progress = 0;
     let mut process_deadline_fired = false;
     let mut handoff = tokio::time::interval(std::time::Duration::from_millis(50));
     let mut containers_reaped = false;
@@ -5312,9 +5316,9 @@ async fn async_main(telemetry_config: Option<celld::telemetry::Config>) -> anyho
             .await
             .and_then(Result::ok);
             if shutdown_mode == ShutdownMode::Handoff
-                && status.is_some_and(|status| status.handed_off > handed_off)
+                && status.is_some_and(|status| status.progress > drain_progress)
             {
-                handed_off = status.expect("checked drain status").handed_off;
+                drain_progress = status.expect("checked drain status").progress;
                 stall_deadline = (tokio::time::Instant::now() + stall_window).min(handoff_deadline);
             }
             // A drain that makes progress can outlive the token TTL, so the
