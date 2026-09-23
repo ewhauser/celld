@@ -911,6 +911,7 @@ fn start_pointer_watcher(
             };
             let outcome = match fleet::read_current_pointer(&bucket).await {
                 Err(error) => {
+                    app.application_observation.lock().unwrap().unavailable();
                     tracing::warn!(event = "deployment_pointer_unreadable", %error);
                     ReloadOutcome::Failed {
                         version: String::new(),
@@ -918,21 +919,38 @@ fn start_pointer_watcher(
                         error: format!("{error:#}"),
                     }
                 }
-                Ok(pointer) => match &failed {
-                    Some(ReloadOutcome::Failed {
-                        version, prefix, ..
-                    }) if !request.force
-                        && version == &pointer.version
-                        && prefix == &pointer.prefix =>
-                    {
-                        failed.clone().expect("matched above")
+                Ok(pointer) => {
+                    app.application_observation.lock().unwrap().observed(
+                        pointer.version.clone(),
+                        pointer.prefix.clone(),
+                        now_ms(),
+                    );
+                    match &failed {
+                        Some(ReloadOutcome::Failed {
+                            version, prefix, ..
+                        }) if !request.force
+                            && version == &pointer.version
+                            && prefix == &pointer.prefix =>
+                        {
+                            failed.clone().expect("matched above")
+                        }
+                        _ => {
+                            adopt_deployment(&app, &bucket, &node, &region, pointer, request.force)
+                                .await
+                        }
                     }
-                    _ => {
-                        adopt_deployment(&app, &bucket, &node, &region, pointer, request.force)
-                            .await
-                    }
-                },
+                }
             };
+            if app.application_observation.lock().unwrap().pointer_status == "observed" {
+                app.application_observation
+                    .lock()
+                    .unwrap()
+                    .finished(match &outcome {
+                        ReloadOutcome::Adopted { .. } => "adopted",
+                        ReloadOutcome::Unchanged { .. } => "unchanged",
+                        ReloadOutcome::Failed { .. } => "failed",
+                    });
+            }
             match &outcome {
                 ReloadOutcome::Adopted {
                     generation,
@@ -2918,6 +2936,17 @@ async fn handle_internal(
         "/peer/probe" => internal_probe(request, app).await,
         "/peer/handoff" => internal_handoff(request, app).await,
         _ if path.starts_with("/peer/log/") => internal_log(request, app, path.clone()).await,
+        "/state" if request.uri().query() == Some("view=application") => {
+            if request.method() != hyper::Method::GET {
+                response(StatusCode::METHOD_NOT_ALLOWED, "method not allowed")
+            } else {
+                response(
+                    StatusCode::OK,
+                    serde_json::to_string(&app.application_snapshot().await)
+                        .expect("application snapshot"),
+                )
+            }
+        }
         "/state" => {
             let mut state = if app
                 .disk_removal
@@ -4307,6 +4336,7 @@ async fn async_main(telemetry_config: Option<celld::telemetry::Config>) -> anyho
             .then(|| Arc::new(celld::node_log::FollowerStore::new(&data_dir, None, &node)))
     });
     let app = AppHandle {
+        application_observation: Default::default(),
         disk_removal: Arc::new(celld::disk_removal::State::new(
             process_generation.clone(),
             settings.bucket.is_some() && follower.is_some(),

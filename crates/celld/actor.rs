@@ -489,6 +489,9 @@ pub enum Message {
         epoch: u64,
         reply: oneshot::Sender<()>,
     },
+    ApplicationCensus {
+        reply: oneshot::Sender<crate::deployment_status::Census>,
+    },
     Snapshot {
         reply: oneshot::Sender<(String, Vec<celld_logic::DrainPin>, SwapCensus)>,
     },
@@ -1232,6 +1235,7 @@ pub struct SwapCensus {
 #[derive(Clone)]
 pub struct AppHandle {
     pub disk_removal: Arc<crate::disk_removal::State>,
+    pub application_observation: Arc<std::sync::Mutex<crate::deployment_status::Observation>>,
     pub tx: mpsc::UnboundedSender<Message>,
     pub runtime: Option<RuntimeManager>,
     #[cfg(all(test, celld_internal_tests))]
@@ -1674,6 +1678,44 @@ impl AppHandle {
         {
             let _ = receive.await;
         }
+    }
+
+    /// Compact observations avoid exporting one entry per resident cell.
+    pub async fn application_snapshot(&self) -> crate::deployment_status::Snapshot {
+        use crate::deployment_status::{Deployment, Snapshot};
+        let before = self.application_observation.lock().unwrap().clone();
+        let generation = self.runtime.as_ref().map(RuntimeManager::generation);
+        let (reply, receive) = oneshot::channel();
+        let census = if !self
+            .disk_removal
+            .control_only
+            .load(std::sync::atomic::Ordering::SeqCst)
+            && self.tx.send(Message::ApplicationCensus { reply }).is_ok()
+        {
+            // A stopped or stuck actor must never appear to have zero old cells.
+            crate::asyncrt::timeout(std::time::Duration::from_secs(1), receive)
+                .await
+                .ok()
+                .and_then(Result::ok)
+        } else {
+            None
+        };
+        let after_generation = self.runtime.as_ref().map(RuntimeManager::generation);
+        let after = self.application_observation.lock().unwrap().clone();
+        Snapshot::new(
+            self.disk_removal.control.lock().unwrap().generation.clone(),
+            crate::ownership_store::now_ms(),
+            generation.as_ref().map(|g| Deployment {
+                version: g.version().into(),
+                prefix: g.prefix().into(),
+            }),
+            (
+                generation.as_ref().map_or(0, |g| g.id()),
+                after_generation.as_ref().map_or(0, |g| g.id()),
+            ),
+            (&before, &after),
+            census,
+        )
     }
 
     pub async fn snapshot(&self) -> String {
@@ -2893,6 +2935,24 @@ impl Actor {
             } => {
                 self.drive(Event::InvalidateRemote { cell, node, epoch }, out);
                 let _ = reply.send(());
+            }
+            Message::ApplicationCensus { reply } => {
+                // Zero means no reload announcement yet; boot uses FIRST_GENERATION.
+                let generation = self
+                    .state
+                    .current_generation()
+                    .max(crate::generation::FIRST_GENERATION);
+                let residents = self.state.residents();
+                let pending_cells = residents
+                    .iter()
+                    .filter(|cell| self.state.cell_generation(cell) != Some(generation))
+                    .count();
+                let _ = reply.send(crate::deployment_status::Census {
+                    generation,
+                    resident_cells: residents.len(),
+                    pending_cells,
+                    swapping_cells: self.state.swapping(),
+                });
             }
             Message::Snapshot { reply } => {
                 let generations = self

@@ -874,6 +874,12 @@ Some upgrades are exceptions:
   epoch a v0.4.0 node can restore, and it stays unavailable on that node
   until a v0.4.1 node takes it over.
 
+For read-only deployment monitoring, `GET /state?view=application` returns a
+compact, versioned snapshot of the loaded version, observed deployment pointer,
+adoption outcome and pending resident cells. See
+[application deployment observations](application-observations.md) for freshness,
+incarnation and convergence semantics.
+
 The internal listener also provides an alpha operator API. `/state`
 reports the node state, and its `node_load` object is the same load sample
 that the node lease publishes. `POST /reload` adopts the deployment pointer now,
