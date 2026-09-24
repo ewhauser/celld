@@ -36,6 +36,7 @@ pub(crate) enum Action {
         json: bool,
     },
     Deploy(Vec<String>),
+    Preview(Vec<String>),
     Dev(Vec<String>),
     Cell(Vec<String>),
     D1(Vec<String>),
@@ -72,6 +73,7 @@ pub(crate) fn action_from_process() -> anyhow::Result<Action> {
     if let Some(action) = arguments.first().map(String::as_str) {
         let arguments = arguments[1..].to_vec();
         match action {
+            "preview" => return Ok(Action::Preview(arguments)),
             "deploy" => return Ok(Action::Deploy(arguments)),
             "dev" => return Ok(Action::Dev(arguments)),
             "cell" => return Ok(Action::Cell(arguments)),
@@ -268,6 +270,7 @@ pub(crate) fn print_help() -> anyhow::Result<()> {
 USAGE:
   celld --bucket [s3://|gs://|az://]NAME[/PREFIX] [OPTIONS]
   celld deploy [PROJECT] --bucket [s3://|gs://|az://]NAME[/PREFIX] [OPTIONS]
+  celld preview NAME --context CONTEXT --namespace NS --fleet FLEET [OPTIONS]
   celld dev [PROJECT] [--host IP] [--port PORT] [--logs]
   celld cell list [CLASS] --bucket [s3://|gs://|az://]NAME[/PREFIX] [OPTIONS]
   celld d1 migrations apply DATABASE [PROJECT] --bucket [s3://|gs://|az://]NAME[/PREFIX]
