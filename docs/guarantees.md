@@ -179,13 +179,35 @@ its own predecessor recovery completes, so nodes that restart together can
 recover acknowledged writes from surviving follower disks. It accepts
 application requests and new follower appends only after startup completes.
 
-Recovery of a large dead node can take minutes. It reads retained bundles in
-windows of at most 512 MiB and uploads and releases each window before the next,
-so memory does not grow with the session; a cell with rows in several windows
-receives one object per window. A failed or timed-out attempt does not fail
-waiting requests: the cell retries with a backoff (`CELLD_RECOVERY_RETRY_MS`,
-default 1000), and the requests fail with a resolve error only after
-`CELLD_RECOVERY_RETRIES` (default 240) attempts.
+An expired lease proves that a writer is fenced, not that its follower disk
+is lost. If recovery lacks a complete witness and the log has no
+`bucket_complete` proof, a missing member address or failed seal request leaves
+recovery undecided. It cannot seal the log or declare loss because a member is
+slow to restart. Startup serves follower recovery requests during all four
+attempts and their backoffs; each attempt is bounded by fifteen minutes, with
+backoffs of one, two, and three times the larger of the lease TTL and one
+second. Exhaustion fails startup while preserving the predecessor record and
+retained recovery data. Returning peers can make a later supervised restart
+succeed; permanent unavailability does not provide a lossless recovery path.
+
+The existing bounded-loss policy still applies when every ensemble member's
+response conclusively reports a missing or incomplete fragment and no complete
+witness survives. Recovery writes a permanent `log/<session>.e<epoch>.loss.json`
+record before sealing and recovering the data that remains. That outcome can
+lose acknowledged writes whose durable copies were destroyed or corrupted;
+temporary unreachability is not evidence of either condition.
+
+A large dead node can hold this recovery open for minutes. The recovery
+reads the retained bundles in windows of at most 512 MiB. It uploads the
+rows of one window and releases them before it reads the next window, so
+the memory of the recovery does not grow with the size of the session. A
+cell that has rows in several windows receives one object for each window.
+A recovery attempt that fails or times out does not fail the waiting
+requests.
+The cell waits, and it retries the activation with a backoff
+(`CELLD_RECOVERY_RETRY_MS`, default 1000). The requests fail with a
+resolve error only after the retry budget is spent
+(`CELLD_RECOVERY_RETRIES`, default 240).
 
 ### Epoch-chain restore
 
