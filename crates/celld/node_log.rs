@@ -47,6 +47,9 @@ use crate::peer_auth::PeerAuth;
 
 mod recovery_progress;
 
+#[cfg(test)]
+mod recovery_witness_tests;
+
 /// The one peer-POST boundary used by the node log.
 ///
 /// Production installs the signed `reqwest` implementation below. A
@@ -5051,39 +5054,30 @@ impl NodeLogManager {
             let now = crate::ownership_store::now_ms();
             let pass_started = mono_ms();
             let mut complete_witnesses = 0_usize;
-            // A member is CONCLUSIVE when its fate is known: lease provably
-            // expired and unreachable, reachable with a different fragment
-            // epoch, or reachable with an explicitly incomplete retained
-            // range. A failed tail or an old response without that range is
-            // inconclusive. Only a fully conclusive, witness-free epoch with
-            // possible fleet acknowledgements may declare bounded loss.
+            // A member is CONCLUSIVE only when it answers with a different
+            // fragment epoch or an explicitly incomplete retained range.
+            // Lease expiry fences writers; it cannot prove that a retained
+            // disk is lost. An unreachable member can still return after a
+            // delayed restart, however long its lease has been expired.
+            // Only a fully conclusive, witness-free epoch with possible fleet
+            // acknowledgements may declare bounded loss.
             let mut inconclusive = 0_usize;
             let mut gathered: BTreeMap<(String, u64, u64), Vec<u8>> = BTreeMap::new();
-            // "A blink is not death" applies to loss declaration too: a
-            // member whose lease merely lapsed (a restart, a fleet-wide
-            // power cycle) is NOT conclusively gone — its fsync'd fragments
-            // boot back in seconds, and declaring loss against boot order
-            // would discard acked writes sitting intact on disk — so a
-            // 3x-TTL grace applies to MEMBER fate here, unrelated to the
-            // sweep (which, under the fold, judges the record's own
-            // published expiry with no grace).
-            let grace_ms = (self.ownership.lease_ttl_ms() * 3).max(20_000);
-            for member in &record.ensemble {
+            for member in record.ensemble.iter().filter(|_| !record.bucket_complete) {
                 self.beat_claim(dead, &mut beat).await?;
                 let lease = self.ownership.read_node_lease(member).await;
-                let lease_live = matches!(&lease, Ok(Some(lease)) if lease.expires_ms > now);
-                let lease_long_dead = matches!(
-                    &lease,
-                    Ok(Some(lease)) if lease.expires_ms.saturating_add(grace_ms) < now
-                );
                 let addr = match lease {
                     Ok(Some(lease)) => Some(lease.addr),
                     _ => None,
                 };
                 let Some(addr) = addr else {
-                    if lease_live || !lease_long_dead {
-                        inconclusive += 1;
-                    }
+                    inconclusive += 1;
+                    warn!(
+                        member,
+                        dead,
+                        epoch = record.epoch,
+                        "recovery witness address unavailable; member fate remains undecided"
+                    );
                     continue;
                 };
                 let seal = SealReq {
@@ -5096,15 +5090,14 @@ impl NodeLogManager {
                 {
                     Ok(sealed) => sealed,
                     Err(error) => {
-                        // Startup serves follower requests before it renews
-                        // the lease. An HTTP error proves a response, not a
-                        // missing fragment: a transient scan failure on an
-                        // expired member must not seal away its intact rows.
-                        let answered = error.downcast_ref::<PeerHttpError>().is_some()
-                            || error.downcast_ref::<serde_json::Error>().is_some();
-                        if answered || lease_live || !lease_long_dead {
-                            inconclusive += 1;
-                        }
+                        inconclusive += 1;
+                        warn!(
+                            member,
+                            dead,
+                            epoch = record.epoch,
+                            %error,
+                            "recovery witness seal unavailable; member fate remains undecided"
+                        );
                         continue;
                     }
                 };

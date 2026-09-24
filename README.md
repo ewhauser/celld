@@ -227,6 +227,11 @@ Mixed versions cannot share a serving fleet.
 The [wake format contract](docs/guarantees.md#start-a-fleet-with-this-format)
 describes the startup checks and the boundary for existing fleet data.
 
+For Kubernetes-managed development environments, [`celld preview`](docs/previews.md)
+creates a `CelldPreview`, publishes code to its isolated storage, and returns its
+stable URL after observing the deployed version. It also supports cloning multiple
+persisted Durable Objects from an administrator-approved source.
+
 Peer HTTP and the operator API use the internal listener. Put every
 advertised address on a trusted private network or an encrypted overlay such
 as WireGuard or Tailscale, and do not publish the internal port. celld
