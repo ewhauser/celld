@@ -285,7 +285,7 @@ dependencies = [
 
 [[package]]
 name = "celld"
-version = "0.5.1-ewhauser.3"
+version = "0.5.1-ewhauser.4"
 dependencies = [
  "aes",
  "aes-gcm",
