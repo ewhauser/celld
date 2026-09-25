@@ -55,7 +55,7 @@ incomplete fragments is unchanged. This fix does not repair a predecessor
 already sealed with a loss record by an older build. All potential recovering
 members must run the corrected build before relying on the new behavior.
 
-## 0.5.1-ewhauser.5 (unreleased)
+## 0.5.1-ewhauser.5
 
 ### Node-log state in `/state`
 
