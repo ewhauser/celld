@@ -97,6 +97,10 @@ The check protects only while the member's lease names a disk other than the
 one answering, for example while a replacement is still recovering its own
 predecessor. Once the replacement installs its lease, its disk is the member's
 disk of record and the explicit-loss policy applies to its answer as before.
+This is intentional. A disk that no longer exists cannot be recovered, so a
+session whose only complete copy was on it gets a bounded loss record instead of
+blocking recovery forever. Incarnations are therefore not recorded at
+recruitment.
 A startup whose incarnation file cannot be read fails instead of creating a
 new identity.
 
