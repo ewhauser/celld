@@ -3562,6 +3562,48 @@ pub fn transaction_control(
     result
 }
 
+/// Discard the storage transaction a reset actor left open.
+///
+/// A reset (`ctx.abort()`, a failed critical section, `process.exit`) drops
+/// the JS instance, but the scope's connection outlives it and the next
+/// instance is served from the same connection. A transaction the old
+/// instance never finished would otherwise stay open on it: the new
+/// instance reads the uncommitted writes, and its own `BEGIN IMMEDIATE`
+/// fails until the node restarts. Roll it back, as closing the connection
+/// would.
+pub fn abandon_open_transaction(scope: &str) {
+    let transaction_key = root_transaction_key(scope);
+    let rolled_back = with(scope, |connection| {
+        if connection.is_autocommit() {
+            return Ok(false);
+        }
+        without_sql_authorizer(connection, || connection.execute_batch("ROLLBACK"))?;
+        Ok::<_, rusqlite::Error>(true)
+    });
+    match rolled_back {
+        None | Some(Ok(false)) => {}
+        Some(Ok(true)) => {
+            // The old instance's cursors and statements belong to the
+            // transaction just discarded.
+            close_sync_list_cursors(scope);
+            close_sql_cursors(scope);
+            if let Some(key) = transaction_key.as_ref() {
+                abandon_root_transaction(key);
+            }
+            publish_alarm_if_transaction_dirty(scope);
+        }
+        Some(Err(error)) => {
+            // The connection still holds the aborted writes. Refuse it rather
+            // than let the next instance read or commit them.
+            let error = format!("could not roll back a reset actor's transaction: {error}");
+            tracing::error!(scope, %error, "abandon open storage transaction");
+            sql_critical_errors(|errors| {
+                errors.borrow_mut().insert(scope.to_string(), error);
+            });
+        }
+    }
+}
+
 #[cfg(celld_internal_tests)]
 pub fn set_query_only_for_test(scope: &str, enabled: bool) -> anyhow::Result<()> {
     with(scope, |connection| {

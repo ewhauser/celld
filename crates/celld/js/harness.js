@@ -1699,7 +1699,17 @@ class DurableObjectStorage {
     if (!this._flushPendingPuts()) return;
     __alarm_delete(this._scope);
   }
+  // A reset rolled back whatever transaction this instance held open
+  // (`__storage_reset_actor`), and the replacement instance shares the
+  // connection. Control from the reset instance must not reach it: a late
+  // COMMIT would end the replacement's transaction, a late ROLLBACK would
+  // discard it.
+  _assertNotReset() {
+    if (this._state?._aborted)
+      throw new Error("the Durable Object was reset; this event's storage is closed");
+  }
   _transactionStart() {
+    this._assertNotReset();
     const root = this._transactionRoot;
     const savepoint = "cells_tx_" + (++root._transactionSerial);
     __storage_transaction_control(
@@ -1708,11 +1718,14 @@ class DurableObjectStorage {
     return savepoint;
   }
   _transactionCommit(savepoint) {
+    this._assertNotReset();
     __storage_transaction_control(
       this._scope, "commit", this._transactionDepth > 0, savepoint,
     );
   }
   _transactionRollback(savepoint, explicit = false) {
+    // The reset already discarded this transaction.
+    if (this._state?._aborted) return;
     __storage_transaction_control(
       this._scope,
       explicit ? "rollback_explicit" : "rollback",
@@ -2680,13 +2693,19 @@ class DurableObjectState {
       },
     );
   }
+  // Drop this instance and the storage work it left unfinished. A state
+  // that a newer instance already replaced owns neither the queued puts nor
+  // the open transaction on the shared connection, so it leaves them alone.
+  _dropInstance() {
+    const instance = __cell.instances[this._scope];
+    if (instance && instance.__celldState !== this) return;
+    __storage_reset_actor(this._scope);
+    if (instance) delete __cell.instances[this._scope];
+  }
   _resetAfterConcurrencyFailure(error) {
     if (this._aborted) return;
     this._aborted = true;
-    __storage_cancel_pending_puts(this._scope);
-    const instance = __cell.instances[this._scope];
-    if (instance && instance.__celldState === this)
-      delete __cell.instances[this._scope];
+    this._dropInstance();
     // Under a stub-mediated caller (this scope is not the current
     // event) the failure breaks the actor, as Workerd joins it
     // into the on-abort promise; a direct event keeps reset-only
@@ -2697,10 +2716,7 @@ class DurableObjectState {
   abort(reason) {
     if (this._aborted) return;
     this._aborted = true;
-    __storage_cancel_pending_puts(this._scope);
-    const instance = __cell.instances[this._scope];
-    if (instance && instance.__celldState === this)
-      delete __cell.instances[this._scope];
+    this._dropInstance();
     const message = reason instanceof Error
       ? reason.message
       : String(reason);
@@ -2891,7 +2907,7 @@ __celld.__retireInputGateContext = (context) => {
     );
     const instance = __cell.instances[scope];
     if (instance !== undefined) instance.__celldState._aborted = true;
-    __storage_cancel_pending_puts(scope);
+    __storage_reset_actor(scope);
     if (instance !== undefined && __cell.instances[scope] === instance)
       delete __cell.instances[scope];
     for (const record of block.events.values()) {

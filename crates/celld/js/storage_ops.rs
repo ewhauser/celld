@@ -346,7 +346,11 @@ pub(super) fn op_storage_sync(
     rv.set(promise_for(scope, id));
 }
 
-pub(super) fn op_storage_cancel_pending_puts(
+/// `__storage_reset_actor(cell)`: the actor instance is being dropped, so
+/// discard the storage work it left unfinished -- its queued puts and any
+/// transaction still open on the cell's connection -- before a new instance
+/// is served from that connection.
+pub(super) fn op_storage_reset_actor(
     scope: &mut v8::PinScope,
     args: v8::FunctionCallbackArguments,
     _rv: v8::ReturnValue<v8::Value>,
@@ -357,6 +361,7 @@ pub(super) fn op_storage_cancel_pending_puts(
         .lock()
         .expect("pending puts lock poisoned")
         .remove(&cell);
+    storage::abandon_open_transaction(&cell);
 }
 
 pub(super) fn op_sql_ingest(
