@@ -54,3 +54,59 @@ The existing explicit-loss policy for reachable members reporting missing or
 incomplete fragments is unchanged. This fix does not repair a predecessor
 already sealed with a loss record by an older build. All potential recovering
 members must run the corrected build before relying on the new behavior.
+
+## 0.5.1-ewhauser.5 (unreleased)
+
+### Node-log state in `/state`
+
+The internal `GET /state` response gains a `node_log` object, documented in
+the [README](README.md#shut-down-and-roll-out-a-node). It reports this node's
+durability posture, its log session and folded log, whether its shipper is
+healthy, and the result of the last dead-leader sweep. The sweep result lists
+every unsealed log whose lease has expired, and, for each ensemble member, the
+leader sessions whose current epoch still needs that member's fragment. An
+operator can gate a voluntary disruption on this fleet state without a bucket
+client of its own.
+
+The sweep already listed and read every node record; it now keeps its last
+result in memory. The change adds no bucket requests, and `/state` makes none.
+The bucket posture runs no sweep, so it reports `fleet: null`. A pass that
+cannot list or read a record reports `complete: false`.
+
+### Member and disk binding on recovery seal and tail
+
+Before this build, a process that answered at a recovered member's address
+with an empty follower store reported fragment epoch 0. Recovery treated that
+answer as conclusive. With no complete witness and every member conclusive, it
+wrote `log/<session>.e<epoch>.loss.json` and sealed the log. A replacement
+machine that reused the node's name, and so its stable address, with a fresh
+disk could therefore declare loss on the word of a disk that never held the
+fragment, while the disk that did hold it was still retained.
+
+Each follower store now keeps a random disk incarnation in
+`<data>/peerlog/incarnation`, created and fsynced (file and directories) the
+first time a process needs it, and read back after a restart. Each node
+publishes it in its lease as the optional `disk_incarnation` field. Recovery
+sends the member name and that incarnation with every seal and tail request
+(`member` and `incarnation`, both optional). A follower with another name or
+another incarnation refuses the request before it writes a seal mark, and
+recovery counts the refusal as an undecided member, like an unreachable one.
+The same binding applies to the tail reads that fold a quietly stranded cell.
+
+The check protects only while the member's lease names a disk other than the
+one answering, for example while a replacement is still recovering its own
+predecessor. Once the replacement installs its lease, its disk is the member's
+disk of record and the explicit-loss policy applies to its answer as before.
+This is intentional. A disk that no longer exists cannot be recovered, so a
+session whose only complete copy was on it gets a bounded loss record instead of
+blocking recovery forever. Incarnations are therefore not recorded at
+recruitment.
+A startup whose incarnation file cannot be read fails instead of creating a
+new identity.
+
+Rollout: every field is additive and optional. Older requests and older lease
+records deserialize with the fields absent and keep the unchecked behavior. The
+check protects a recovery only when the recovering node, the answering
+follower and the member lease that names the disk all come from this build.
+Run it on every node that can recover or answer for this fleet before relying
+on it.

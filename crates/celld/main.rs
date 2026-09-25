@@ -2800,7 +2800,7 @@ async fn internal_log(request: Request<Incoming>, app: AppHandle, path: String) 
             Err(error) => Err(error.into()),
         },
         "/peer/log/tail" => match serde_json::from_slice::<celld::node_log::TailWireReq>(&body) {
-            Ok(req) => match follower.tail(&req.request).await {
+            Ok(req) => match follower.checked_tail(&req.request).await {
                 Ok(response) => req.encode_response(&response),
                 Err(error) => Err(error),
             },
@@ -2880,7 +2880,24 @@ async fn handle_internal(
         "/peer/probe" => internal_probe(request, app).await,
         "/peer/handoff" => internal_handoff(request, app).await,
         _ if path.starts_with("/peer/log/") => internal_log(request, app, path.clone()).await,
-        "/state" => response(StatusCode::OK, app.snapshot().await),
+        "/state" => {
+            let snapshot = if app
+                .disk_removal
+                .control_only
+                .load(std::sync::atomic::Ordering::SeqCst)
+            {
+                None
+            } else {
+                Some(app.snapshot().await)
+            };
+            let node_log = app.node_log.lock().unwrap().clone();
+            let state = celld::actor::internal_state_json(
+                snapshot.as_deref(),
+                app.disk_removal.snapshot(),
+                celld::node_log::state_json(node_log.as_deref()),
+            );
+            response(StatusCode::OK, state.to_string())
+        }
         "/reload" if request.method() != hyper::Method::POST => {
             response(StatusCode::METHOD_NOT_ALLOWED, "method not allowed")
         }
@@ -4227,7 +4244,17 @@ async fn async_main(telemetry_config: Option<celld::telemetry::Config>) -> anyho
         max_request_body_bytes,
         operation_deadline_ms: celld::actor::operation_deadline_ms()?,
         follower: follower.clone(),
+        node_log: actor.node_log.clone(),
     };
+    // Every lease this process writes names its disk's follower-store
+    // incarnation, so recovery elsewhere can tell this disk from another one
+    // that later answers at the same address. The store creates the identity
+    // durably here, before the first lease install, and a disk whose
+    // identity cannot be read stops the boot instead of answering for
+    // fragments it cannot vouch for.
+    if let (Some(follower), Ownership::Bucket(bucket_ownership)) = (&follower, &actor.ownership) {
+        bucket_ownership.set_disk_incarnation(follower.incarnation()?);
+    }
 
     // The in-fleet log tier, v0. The takeover interlock is installed in
     // every posture — a bucket-posture node can take over from a
