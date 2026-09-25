@@ -2824,7 +2824,8 @@ async fn internal_log(request: Request<Incoming>, app: AppHandle, path: String) 
         },
         "/peer/log/tail" => serde_json::from_slice::<celld::node_log::TailReq>(&body)
             .map_err(anyhow::Error::from)
-            .map(|req| celld::node_log::encode_tail_resp(&follower.tail(&req))),
+            .and_then(|req| follower.checked_tail(&req))
+            .map(|resp| celld::node_log::encode_tail_resp(&resp)),
         _ => Err(anyhow::anyhow!("unknown log endpoint")),
     };
     match result {
@@ -2919,17 +2920,21 @@ async fn handle_internal(
         "/peer/handoff" => internal_handoff(request, app).await,
         _ if path.starts_with("/peer/log/") => internal_log(request, app, path.clone()).await,
         "/state" => {
-            let mut state = if app
+            let snapshot = if app
                 .disk_removal
                 .control_only
                 .load(std::sync::atomic::Ordering::SeqCst)
             {
-                serde_json::json!({})
+                None
             } else {
-                serde_json::from_str(&app.snapshot().await)
-                    .unwrap_or_else(|_| serde_json::json!({}))
+                Some(app.snapshot().await)
             };
-            state["shutdown"] = app.disk_removal.snapshot();
+            let node_log = app.node_log.lock().unwrap().clone();
+            let state = celld::actor::internal_state_json(
+                snapshot.as_deref(),
+                app.disk_removal.snapshot(),
+                celld::node_log::state_json(node_log.as_deref()),
+            );
             response(StatusCode::OK, state.to_string())
         }
         "/reload" if request.method() != hyper::Method::POST => {
@@ -4331,7 +4336,17 @@ async fn async_main(telemetry_config: Option<celld::telemetry::Config>) -> anyho
         max_request_body_bytes,
         operation_deadline_ms: celld::actor::operation_deadline_ms()?,
         follower: follower.clone(),
+        node_log: actor.node_log.clone(),
     };
+    // Every lease this process writes names its disk's follower-store
+    // incarnation, so recovery elsewhere can tell this disk from another one
+    // that later answers at the same address. The store creates the identity
+    // durably here, before the first lease install, and a disk whose
+    // identity cannot be read stops the boot instead of answering for
+    // fragments it cannot vouch for.
+    if let (Some(follower), Ownership::Bucket(bucket_ownership)) = (&follower, &actor.ownership) {
+        bucket_ownership.set_disk_incarnation(follower.incarnation()?);
+    }
 
     // The in-fleet log tier, v0. The takeover interlock is installed in
     // every posture — a bucket-posture node can take over from a

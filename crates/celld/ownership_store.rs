@@ -56,6 +56,14 @@ pub(crate) struct NodeLeaseWire {
     /// through unchanged except the log tier itself and recovery.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) log: Option<NodeLogWire>,
+    /// The random identity of the follower store on this node's disk
+    /// (`FollowerStore::incarnation`). Node-log recovery sends it with each
+    /// seal and tail request, so a different disk answering at this node's
+    /// address is refused instead of reporting no fragment. Absent from a
+    /// node that predates the field or runs without a follower store, which
+    /// keeps the unchecked behavior.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) disk_incarnation: Option<String>,
     #[serde(default)]
     pub(crate) load: NodeLoadWire,
 }
@@ -187,6 +195,8 @@ struct NodeLeaseWireRaw {
     #[serde(default)]
     log: Option<NodeLogWire>,
     #[serde(default)]
+    disk_incarnation: Option<String>,
+    #[serde(default)]
     load: NodeLoadWire,
 }
 
@@ -206,6 +216,7 @@ impl From<NodeLeaseWireRaw> for NodeLeaseWire {
             paced_handoff: raw.paced_handoff,
             generation,
             log: raw.log,
+            disk_incarnation: raw.disk_incarnation,
             load: raw.load,
         }
     }
@@ -416,6 +427,9 @@ pub struct BucketOwnership {
     /// (one publish outstanding at a time), >= S implies the applied body
     /// IS the waiter's object.
     applied: tokio::sync::watch::Sender<(String, u64)>,
+    /// The follower store's disk incarnation, published on every lease
+    /// write once startup has opened the store. `None` without a store.
+    disk_incarnation: std::sync::Mutex<Option<String>>,
 }
 
 /// What this node currently looks like, for peers deciding where to place a
@@ -499,6 +513,7 @@ impl BucketOwnership {
             production_load_samples: AtomicUsize::new(0),
             own_log: std::sync::Mutex::new((0, None)),
             applied: tokio::sync::watch::channel((String::new(), 0)).0,
+            disk_incarnation: std::sync::Mutex::new(None),
         }
     }
 
@@ -950,6 +965,7 @@ impl BucketOwnership {
             // UNCHANGED: the full object lives in own_log, written only by
             // the log tier's own core-mediated updates.
             log,
+            disk_incarnation: self.disk_incarnation.lock().unwrap().clone(),
         })
         .map_err(|error| LeaseCasError::NotCommitted(error.into()))?;
         let etag = match &guard {
@@ -1039,6 +1055,27 @@ impl BucketOwnership {
 
     pub(crate) fn own_log(&self) -> Option<NodeLogWire> {
         self.own_log.lock().unwrap().1.clone()
+    }
+
+    /// Publish this disk's follower-store incarnation on every lease write
+    /// from now on. Startup sets it before the first install, so no record
+    /// this process writes omits it.
+    pub fn set_disk_incarnation(&self, incarnation: String) {
+        *self.disk_incarnation.lock().unwrap() = Some(incarnation);
+    }
+
+    /// A peer's full lease record, for the fields `NodeLeaseRecord` does not
+    /// carry: node-log recovery reads a member's address and disk
+    /// incarnation from the same body.
+    pub(crate) async fn read_node_lease_wire(
+        &self,
+        node: &str,
+    ) -> anyhow::Result<Option<NodeLeaseWire>> {
+        Ok(
+            load_json::<NodeLeaseWire>(&self.bucket, &format!("nodes/{node}.json"))
+                .await?
+                .map(|(lease, _)| lease),
+        )
     }
 
     pub(crate) fn applied_log(&self) -> tokio::sync::watch::Receiver<(String, u64)> {

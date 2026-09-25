@@ -113,3 +113,19 @@ pub fn follower_covered(expected_epoch: u64, coverage: Coverage) -> bool {
         Coverage::Missing => false,
     }
 }
+
+/// Does a member named in a log record's current ensemble still hold data
+/// that the record needs? It does until that epoch is sealed or proven
+/// `bucket_complete`: exactly the obligation `capture` records for the epoch,
+/// judged by `follower_covered`. Strict removal and the fleet view that
+/// `/state` reports share this one definition.
+pub fn current_member_obligated(epoch: u64, sealed: bool, bucket_complete: bool) -> bool {
+    !follower_covered(
+        epoch,
+        Coverage::Current {
+            epoch,
+            sealed,
+            bucket_complete,
+        },
+    )
+}

@@ -15,7 +15,8 @@ migration mechanism.
 ## Caller contract
 
 `GET /state` includes this additive field (other existing fields are unchanged
-until the node enters its terminal control-only phase):
+until the node enters its terminal control-only phase, which reports only this
+field and `node_log`):
 
 ```json
 {

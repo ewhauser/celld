@@ -230,6 +230,8 @@ mod tests {
             node(&bucket, "donor", "g1", 1, "sealed", false, &[]).await;
             node(&bucket, "leader", "g2", 4, "open", false, &["donor"]).await;
             let follower = FollowerStore::new(dir.path(), Some(Arc::new(bucket.clone())), "donor");
+            // The disk incarnation lives beside the fragments and is not one.
+            follower.incarnation().unwrap();
             let obligations = capture(&bucket, "donor", &follower).await.unwrap();
             assert_eq!(obligations.len(), 1);
             assert!(!covered(&bucket, &obligations[0], None).await.unwrap());
@@ -315,6 +317,8 @@ mod tests {
             );
             let tail = follower.tail(&TailReq {
                 leader: "leader/g2".into(),
+                member: None,
+                incarnation: None,
             });
             assert!(reply.ok, "the append polled before freeze must finish");
             assert_eq!(tail.entries.len(), 1);
@@ -324,7 +328,9 @@ mod tests {
             assert_eq!(
                 follower
                     .tail(&TailReq {
-                        leader: "leader/g2".into()
+                        leader: "leader/g2".into(),
+                        member: None,
+                        incarnation: None,
                     })
                     .entries
                     .len(),

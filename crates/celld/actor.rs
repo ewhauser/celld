@@ -1280,6 +1280,27 @@ pub struct AppHandle {
     /// generation. This is the same operation deadline that bounds the
     /// decision core, so a shell retry cannot outlive its core operation.
     pub operation_deadline_ms: u64,
+    /// The node-log manager, installed once the bucket-backed runtime has
+    /// built it. `/state` reads its in-memory view; `None` without one.
+    pub node_log: Arc<std::sync::Mutex<Option<Arc<crate::node_log::NodeLogManager>>>>,
+}
+
+/// The internal `/state` body: the actor snapshot (absent in the terminal
+/// control-only phase, when the actor has stopped), then the strict-shutdown
+/// status and the node-log view, which both answer from memory in every
+/// phase.
+pub fn internal_state_json(
+    snapshot: Option<&str>,
+    shutdown: serde_json::Value,
+    node_log: serde_json::Value,
+) -> serde_json::Value {
+    let mut state = snapshot
+        .and_then(|snapshot| serde_json::from_str(snapshot).ok())
+        .filter(serde_json::Value::is_object)
+        .unwrap_or_else(|| serde_json::json!({}));
+    state["shutdown"] = shutdown;
+    state["node_log"] = node_log;
+    state
 }
 
 impl AppHandle {
