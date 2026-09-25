@@ -48,7 +48,9 @@ impl LogTransport for RetainedWitness {
                 )?
                 .into()),
                 "/peer/log/tail" => Ok(encode_tail_resp(
-                    &self.follower.tail(&serde_json::from_slice(&body)?),
+                    &self
+                        .follower
+                        .checked_tail(&serde_json::from_slice(&body)?)?,
                 )
                 .into()),
                 _ => panic!("unexpected recovery request {path}"),
@@ -189,6 +191,23 @@ impl Fixture {
         }
     }
 
+    /// Republish the witness lease naming a disk incarnation, as a witness
+    /// process on this fork does on every renewal.
+    async fn publish_witness_incarnation(&self, incarnation: &str) {
+        self.bucket
+            .put(
+                "nodes/witness.json",
+                serde_json::to_vec(&serde_json::json!({
+                    "node": "witness", "expires_ms": 1, "addr": "witness.test:8081",
+                    "ownership_index_generation": "retained",
+                    "disk_incarnation": incarnation,
+                }))
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+    }
+
     async fn assert_undecided(&self) {
         let folded = read_record(&self.bucket, PREDECESSOR)
             .await
@@ -227,7 +246,9 @@ fn expired_unavailable_witness_never_seals_or_cleans_up() {
                     .witness
                     .follower
                     .tail(&TailReq {
-                        leader: PREDECESSOR.into()
+                        leader: PREDECESSOR.into(),
+                        member: None,
+                        incarnation: None,
                     })
                     .entries[0]
                     .bytes,
@@ -322,6 +343,77 @@ fn bucket_complete_does_not_require_an_unavailable_witness() {
             LogState::Sealed
         );
         assert_eq!(fixture.witness.attempts.load(Ordering::SeqCst), 0);
+        assert!(fixture.bucket.get(LOSS).await.unwrap().is_none());
+        fixture.stop().await;
+    });
+}
+
+#[test]
+fn another_disk_at_the_witness_address_stays_undecided() {
+    run(async {
+        // The witness lease names the disk that held the fragment. A
+        // replacement machine with an empty disk now answers at the same
+        // name and address, so its store has another incarnation.
+        let fixture = Fixture::new(false, false).await;
+        fixture
+            .publish_witness_incarnation("0123456789abcdef0123456789abcdef")
+            .await;
+        fixture.witness.online.store(true, Ordering::SeqCst);
+        let error = fixture.manager.recover_self().await.unwrap_err();
+        assert!(
+            error.to_string().contains("member(s) undecided"),
+            "{error:#}"
+        );
+        fixture.assert_undecided().await;
+        // The refusal came before the seal mark: the empty disk carries no
+        // trace of a seal it was never entitled to answer.
+        assert_eq!(fixture.witness.follower.load(PREDECESSOR).sealed_to, 0);
+        assert_eq!(fixture.witness.attempts.load(Ordering::SeqCst), 1);
+        fixture.stop().await;
+    });
+}
+
+#[test]
+fn the_disk_its_lease_names_keeps_the_explicit_loss_policy() {
+    run(async {
+        // Once the machine's own lease names its empty disk, that disk is
+        // the member's disk of record and its answer is conclusive again.
+        let fixture = Fixture::new(false, false).await;
+        let incarnation = fixture.witness.follower.incarnation().unwrap();
+        fixture.publish_witness_incarnation(&incarnation).await;
+        fixture.witness.online.store(true, Ordering::SeqCst);
+        fixture.manager.recover_self().await.unwrap();
+        assert!(fixture.bucket.get(LOSS).await.unwrap().is_some());
+        fixture.stop().await;
+    });
+}
+
+#[test]
+fn a_matching_incarnation_recovers_the_retained_tail() {
+    run(async {
+        let fixture = Fixture::new(true, false).await;
+        let incarnation = fixture.witness.follower.incarnation().unwrap();
+        fixture.publish_witness_incarnation(&incarnation).await;
+        fixture.witness.online.store(true, Ordering::SeqCst);
+        fixture.manager.recover_self().await.unwrap();
+        assert_eq!(
+            read_record(&fixture.bucket, PREDECESSOR)
+                .await
+                .unwrap()
+                .unwrap()
+                .record
+                .state,
+            LogState::Sealed
+        );
+        assert_eq!(
+            fixture
+                .bucket
+                .list("cells/acknowledged/ltx/e1/")
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
         assert!(fixture.bucket.get(LOSS).await.unwrap().is_none());
         fixture.stop().await;
     });

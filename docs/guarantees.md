@@ -233,6 +233,22 @@ second. Exhaustion fails startup while preserving the predecessor record and
 retained recovery data. Returning peers can make a later supervised restart
 succeed; permanent unavailability does not provide a lossless recovery path.
 
+Recovery also checks that the process that answers is the member it asked,
+on the disk that member's lease names. Each follower store keeps a random disk
+incarnation beside its fragments. The store creates it durably the first time
+a process needs it, every later process on the same disk reads it back, and
+an empty disk gets a new one. Each node publishes its incarnation in its lease
+record. Recovery sends the member's name and published incarnation with every
+seal and tail request. A follower with another name or another incarnation
+refuses the request before it writes a seal mark, and recovery counts the
+refusal as an undecided member, the same as an unreachable one. A replacement
+machine that reuses a node's name and address with an empty disk therefore
+cannot report that the fragment is gone. The check protects only while the
+member's lease names a different disk than the one that answers. After the
+replacement installs its own lease, its disk is the member's disk of record,
+and its empty answer is conclusive again. A lease without an incarnation, from
+an older build, keeps the unchecked behavior.
+
 The existing bounded-loss policy still applies when every ensemble member's
 response conclusively reports a missing or incomplete fragment and no complete
 witness survives. Recovery writes a permanent `log/<session>.e<epoch>.loss.json`
