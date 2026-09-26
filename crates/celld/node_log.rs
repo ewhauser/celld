@@ -48,6 +48,8 @@ use crate::peer_auth::PeerAuth;
 mod recovery_progress;
 
 #[cfg(test)]
+mod double_loss_tests;
+#[cfg(test)]
 mod fleet_state_tests;
 #[cfg(test)]
 mod incarnation_tests;
@@ -979,11 +981,12 @@ pub struct SealReq {
     pub leader: String,
     pub epoch: u64,
     /// The ensemble member recovery means to ask, and the disk incarnation
-    /// its lease record publishes. A follower that is not that member, or
-    /// whose store has another incarnation, refuses the request instead of
-    /// answering for a disk it does not have. Recovery counts the refusal
-    /// as an undecided member, exactly like an unreachable one. An older
-    /// caller omits both fields and gets the unchecked answer.
+    /// its lease record publishes. A follower that is not that member
+    /// refuses the request, and recovery counts the refusal as an undecided
+    /// member, exactly like an unreachable one. The member itself on another
+    /// incarnation answers from its replacement disk and logs that it
+    /// supersedes the named one; see `FollowerStore::check_addressee`. An
+    /// older caller omits both fields and gets the unchecked answer.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub member: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1201,10 +1204,11 @@ impl FollowerStore {
     /// process on the same disk. An empty or replaced disk gets a new one.
     ///
     /// The node publishes it in its lease record, and node-log recovery
-    /// sends that value with each seal and tail request. A machine that
-    /// reuses a node's name and address with a fresh disk therefore refuses
-    /// the request instead of answering that it holds no fragment, which
-    /// recovery would have taken as conclusive evidence of loss.
+    /// sends that value with each seal and tail request. The member's own
+    /// name on a fresh disk answers anyway (the named disk is gone, and its
+    /// answer is the conclusive loss verdict) and logs the superseded
+    /// incarnation, so a replacement is attributable in the follower's log;
+    /// see `check_addressee`.
     ///
     /// The file lives beside the fragments under `peerlog/`, so it is lost
     /// exactly when they are. A file that cannot be read or does not hold
@@ -1258,9 +1262,24 @@ impl FollowerStore {
         Ok(incarnation)
     }
 
-    /// Refuse a seal or tail addressed to another member or another disk.
-    /// Absent fields come from an older caller or an older member record,
-    /// and keep the unchecked answer.
+    /// Decide whether this follower may answer a seal or tail addressed to
+    /// `member` on disk `incarnation`. Absent fields come from an older
+    /// caller or an older member record, and keep the unchecked answer.
+    ///
+    /// * Another member name is refused: a different node answering at the
+    ///   member's address says nothing about the member's disk, so recovery
+    ///   must count it as undecided.
+    /// * The same name on another incarnation answers from this store. A
+    ///   node name maps to exactly one disk, and a new incarnation exists
+    ///   only because the disk the record names was replaced; that disk is
+    ///   gone, and this store's answer (usually "no fragment") is the
+    ///   conclusive verdict recovery needs to record a bounded loss instead
+    ///   of waiting forever for a disk that cannot return. Refusing here
+    ///   deadlocked two members that lost their disks at once: each one's
+    ///   predecessor recovery needed the other's answer before it could
+    ///   install the lease that would publish its new incarnation.
+    /// * An incarnation without a member name cannot claim that name's disk
+    ///   succession, and a mismatch is refused as before.
     fn check_addressee(
         &self,
         member: Option<&str>,
@@ -1275,12 +1294,21 @@ impl FollowerStore {
         }
         if let Some(expected) = incarnation {
             let actual = self.incarnation()?;
-            anyhow::ensure!(
-                actual == expected,
-                "follower {} has disk incarnation {actual}, not the {expected} its member \
-                 record names; this disk cannot answer for that one",
-                self.node
-            );
+            if actual != expected {
+                anyhow::ensure!(
+                    member.is_some(),
+                    "follower {} has disk incarnation {actual}, not the {expected} the \
+                     request names, and the request names no member",
+                    self.node
+                );
+                warn!(
+                    member = self.node,
+                    superseded = expected,
+                    incarnation = actual,
+                    "follower answers for its member name from a replacement disk; the \
+                     superseded disk incarnation is gone and its fragments are lost"
+                );
+            }
         }
         Ok(())
     }
@@ -4926,10 +4954,12 @@ impl NodeLogManager {
             for member in record.ensemble.iter().filter(|_| !record.bucket_complete) {
                 self.beat_claim(dead, &mut beat).await?;
                 // The member's lease names where it answers and which disk
-                // it answers from. The seal and tail carry both, so a
-                // process at a reused address with another disk refuses
-                // and stays undecided below instead of reporting no
-                // fragment.
+                // it answers from. The seal and tail carry both: another
+                // node at the member's address refuses and stays undecided
+                // below, while the member itself on a replacement disk
+                // answers conclusively from that disk (the named disk is
+                // gone), so a fleet that lost every copy records a bounded
+                // loss instead of waiting for a disk that cannot return.
                 let lease = self.ownership.read_node_lease_wire(member).await;
                 let (addr, incarnation) = match lease {
                     Ok(Some(lease)) => (Some(lease.addr), lease.disk_incarnation),
@@ -4957,9 +4987,8 @@ impl NodeLogManager {
                 {
                     Ok(sealed) => sealed,
                     // A transport failure and a follower that refused the
-                    // addressee (another node or another disk at this
-                    // address) are the same verdict: nobody who could hold
-                    // the fragment answered.
+                    // addressee (another node at this address) are the same
+                    // verdict: nobody who could hold the fragment answered.
                     Err(error) => {
                         inconclusive += 1;
                         warn!(
