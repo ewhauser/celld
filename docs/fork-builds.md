@@ -110,3 +110,34 @@ check protects a recovery only when the recovering node, the answering
 follower and the member lease that names the disk all come from this build.
 Run it on every node that can recover or answer for this fleet before relying
 on it.
+
+## 0.5.1-ewhauser.6 (unreleased)
+
+### An idle leader moves off a departed follower
+
+A leader that received no writes never left a follower that had gone away,
+for example a pod deleted after a scale-in. The idle probe, an empty append
+sent to each quiet member every 2 seconds, ignored a transport failure. It also
+recorded the failed attempt as a completed append, so the gray-follower ledger
+read a refused connection as a fast, healthy sample. Nothing degraded the
+shipper. Maintenance therefore never drained the epoch to `bucket_complete` or
+opened a new one without the member. The leader's current epoch kept naming the
+departed member, and `/state.node_log.fleet.obligations` kept it as an
+obligation, so a disk-removal gate never released that member's disk. Under
+write load the first failed append degraded the shipper and the obligation
+cleared, which is why only idle fleets showed the bug.
+
+A failed probe now records a failure, not a latency sample. Three failed probes
+in a row, with no answer between them, degrade the shipper the same way a failed
+write does: acknowledgements wait for bucket proofs, and maintenance drains the
+epoch to `bucket_complete` and opens a new one from the members whose leases are
+live. An answer resets the count. The count tolerates a brief network fault
+without opening a new epoch on a quiet fleet. A probe carries no
+acknowledgement, so the tolerance never delays a degrade a write needs: a write
+still degrades on its own first failure. The departed member leaves the
+obligations about four seconds after its first failed probe, or after its lease
+expires and a maintenance pass runs if the ensemble recruits it again before
+then.
+
+Safety does not change. Degrading only moves acknowledgements to the bucket
+proof and starts the existing reconfiguration path.
