@@ -137,9 +137,18 @@ one follower remains. A node with one follower recruits a second one when
 another node becomes available. Until then, a write that is not yet in the
 bucket is only on the owner and on that one follower.
 
-A node without an ensemble stays correct. It acknowledges each write on a bucket
-proof instead, at the cost of latency: an object store round trip is much slower
-than a follower fsync.
+A node notices a lost follower even when it receives no writes. It sends each
+quiet follower an empty append every 2 seconds. A failed write degrades the
+ensemble at once; three failed idle appends in a row, with no answer between
+them, do the same. The node then acknowledges on bucket proofs, marks the old
+epoch `bucket_complete`, and opens a new epoch from the followers whose leases
+are live. A departed follower therefore stops being an obligation of an idle
+node within seconds of leaving, or soon after its lease expires.
+
+A node without an ensemble stays correct. It acknowledges each write on a
+bucket proof instead, so celld still does not acknowledge a write before a
+durability proof covers it. The cost is latency: the write waits for the object
+store, and an object store round trip is much slower than a follower fsync.
 
 ### The takeover recovery gate
 

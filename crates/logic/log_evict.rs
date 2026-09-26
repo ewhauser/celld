@@ -22,6 +22,11 @@ use std::collections::VecDeque;
 
 use crate::NodeId;
 
+/// Consecutive failed idle probes that degrade the ensemble off a member.
+/// At the 2 s probe cadence this is about four seconds after the first
+/// failure, well inside a node lease TTL. See `FollowerHealth::probe_failed`.
+pub const PROBE_FAILURES_TO_DEGRADE: u32 = 3;
+
 /// The constants are E8 targets, not commitments: the lab sweep measures
 /// them, and the env overrides exist so it can.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -130,6 +135,11 @@ struct MemberHealth {
     /// When the windowed median first exceeded the threshold, while it
     /// has stayed exceeded.
     suspect_since: Option<u64>,
+    /// When the last idle probe to this member failed at the transport.
+    /// Paces the next probe without posing as a latency sample.
+    last_probe_failed_ms: Option<u64>,
+    /// Idle probes that failed in a row since the member last answered.
+    probe_failures: u32,
 }
 
 impl MemberHealth {
@@ -190,6 +200,48 @@ impl FollowerHealth {
         let health = self.members.entry(member.to_string()).or_default();
         health.outstanding_since = None;
         health.samples.push_back((now_ms, latency_ms));
+        health.probe_failures = 0;
+    }
+
+    /// An idle probe to `member` failed at the transport: refused, reset,
+    /// timed out, or a 5xx. Returns whether the executor must degrade the
+    /// ensemble off this member.
+    ///
+    /// A failure is not a latency sample. Recording a refused connection
+    /// as a completed append fed the ledger a fast "healthy" sample from a
+    /// member that was gone, and nothing else told an idle leader so: a
+    /// follower that departed while no writes arrived stayed in the
+    /// ensemble indefinitely, and the leader never drained its epoch to
+    /// `bucket_complete`.
+    ///
+    /// The write path degrades on one failed append because that batch's
+    /// ack depends on it. An idle probe carries no ack, so there is
+    /// nothing to protect by degrading on the first one, and degrading
+    /// opens a new epoch; a single blip at the 2 s probe cadence would
+    /// churn epochs on a quiet fleet. `PROBE_FAILURES_TO_DEGRADE` failures
+    /// in a row, with no answer in between, is a member that is gone. A
+    /// write that arrives meanwhile still degrades on its own first
+    /// failure, so the tolerance never delays a degrade an ack needs.
+    pub fn probe_failed(&mut self, member: &str, now_ms: u64) -> bool {
+        let health = self.members.entry(member.to_string()).or_default();
+        health.outstanding_since = None;
+        health.last_probe_failed_ms = Some(now_ms);
+        health.probe_failures = health.probe_failures.saturating_add(1);
+        health.probe_failures >= PROBE_FAILURES_TO_DEGRADE
+    }
+
+    /// Idle probes to `member` that failed in a row since it last answered.
+    pub fn probe_failures(&self, member: &str) -> u32 {
+        self.members
+            .get(member)
+            .map_or(0, |health| health.probe_failures)
+    }
+
+    /// Completed-append latency samples currently held for `member`.
+    pub fn sample_count(&self, member: &str) -> usize {
+        self.members
+            .get(member)
+            .map_or(0, |health| health.samples.len())
     }
 
     /// The eviction decision for `member`, judged against its sibling's
@@ -398,9 +450,8 @@ impl FollowerHealth {
         if health.outstanding_since.is_some() {
             return false;
         }
-        health
-            .samples
-            .back()
-            .is_none_or(|(at, _)| at.saturating_add(quiet_ms) < now_ms)
+        let quiet = |at: u64| at.saturating_add(quiet_ms) < now_ms;
+        health.samples.back().is_none_or(|(at, _)| quiet(*at))
+            && health.last_probe_failed_ms.is_none_or(quiet)
     }
 }
