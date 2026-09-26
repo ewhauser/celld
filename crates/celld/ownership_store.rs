@@ -58,10 +58,11 @@ pub(crate) struct NodeLeaseWire {
     pub(crate) log: Option<NodeLogWire>,
     /// The random identity of the follower store on this node's disk
     /// (`FollowerStore::incarnation`). Node-log recovery sends it with each
-    /// seal and tail request, so a different disk answering at this node's
-    /// address is refused instead of reporting no fragment. Absent from a
-    /// node that predates the field or runs without a follower store, which
-    /// keeps the unchecked behavior.
+    /// seal and tail request; a follower under this node's name on another
+    /// disk answers from that disk and logs the superseded incarnation (see
+    /// `FollowerStore::check_addressee`). Absent from a node that predates
+    /// the field or runs without a follower store, which keeps the
+    /// unchecked behavior.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) disk_incarnation: Option<String>,
     #[serde(default)]

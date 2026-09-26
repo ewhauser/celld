@@ -70,6 +70,17 @@ struct Fixture {
 
 impl Fixture {
     async fn new(retain_fragment: bool, bucket_complete: bool) -> Self {
+        Self::with_witness_store(retain_fragment, bucket_complete, "witness").await
+    }
+
+    /// A fixture whose process at the witness address runs its follower
+    /// store under `store_node`, which differs from "witness" when another
+    /// node answers at the member's address.
+    async fn with_witness_store(
+        retain_fragment: bool,
+        bucket_complete: bool,
+        store_node: &str,
+    ) -> Self {
         let dir = tempfile::tempdir().unwrap();
         let database = dir.path().join("bucket.sqlite");
         let bucket = Arc::new(Bucket::open_dev(&database).unwrap());
@@ -103,7 +114,7 @@ impl Fixture {
             .put(STALE_BUNDLE, b"must survive unsuccessful boot".to_vec())
             .await
             .unwrap();
-        let follower = FollowerStore::new(dir.path(), Some(bucket.clone()), "witness");
+        let follower = FollowerStore::new(dir.path(), Some(bucket.clone()), store_node);
         let mut page = vec![0_u8; 512];
         let tail = b"acknowledged write retained only on the follower";
         page[..tail.len()].copy_from_slice(tail);
@@ -349,15 +360,46 @@ fn bucket_complete_does_not_require_an_unavailable_witness() {
 }
 
 #[test]
-fn another_disk_at_the_witness_address_stays_undecided() {
+fn a_replacement_disk_under_the_member_name_records_the_loss() {
     run(async {
-        // The witness lease names the disk that held the fragment. A
-        // replacement machine with an empty disk now answers at the same
-        // name and address, so its store has another incarnation.
+        // The witness lease still names the disk that held the fragment,
+        // because the replacement has not yet installed a lease of its own.
+        // The member's name now answers from an empty replacement disk: the
+        // named disk is gone, so the answer is conclusive and recovery
+        // records the bounded loss instead of waiting for a disk that
+        // cannot return.
         let fixture = Fixture::new(false, false).await;
-        fixture
-            .publish_witness_incarnation("0123456789abcdef0123456789abcdef")
-            .await;
+        let superseded = "0123456789abcdef0123456789abcdef";
+        assert_ne!(fixture.witness.follower.incarnation().unwrap(), superseded);
+        fixture.publish_witness_incarnation(superseded).await;
+        fixture.witness.online.store(true, Ordering::SeqCst);
+        fixture.manager.recover_self().await.unwrap();
+        assert_eq!(
+            read_record(&fixture.bucket, PREDECESSOR)
+                .await
+                .unwrap()
+                .unwrap()
+                .record
+                .state,
+            LogState::Sealed
+        );
+        assert!(fixture.bucket.get(LOSS).await.unwrap().is_some());
+        assert!(fixture.manager.predecessors_clean.load(Ordering::SeqCst));
+        // The replacement disk sealed the epoch like any conclusive member,
+        // so a straggling append from the dead leader is refused there too.
+        assert_eq!(fixture.witness.follower.load(PREDECESSOR).sealed_to, 1);
+        fixture.stop().await;
+    });
+}
+
+#[test]
+fn another_member_at_the_witness_address_stays_undecided() {
+    run(async {
+        // A different node answers at the witness's address. It says
+        // nothing about the witness's disk, whatever its incarnation.
+        let fixture = Fixture::with_witness_store(false, false, "someone-else").await;
+        let incarnation = fixture.witness.follower.incarnation().unwrap();
+        fixture.publish_witness_incarnation(&incarnation).await;
         fixture.witness.online.store(true, Ordering::SeqCst);
         let error = fixture.manager.recover_self().await.unwrap_err();
         assert!(
@@ -365,8 +407,8 @@ fn another_disk_at_the_witness_address_stays_undecided() {
             "{error:#}"
         );
         fixture.assert_undecided().await;
-        // The refusal came before the seal mark: the empty disk carries no
-        // trace of a seal it was never entitled to answer.
+        // The refusal came before the seal mark: the other node's disk
+        // carries no trace of a seal it was never entitled to answer.
         assert_eq!(fixture.witness.follower.load(PREDECESSOR).sealed_to, 0);
         assert_eq!(fixture.witness.attempts.load(Ordering::SeqCst), 1);
         fixture.stop().await;

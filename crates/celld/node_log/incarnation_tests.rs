@@ -88,7 +88,7 @@ fn an_unreadable_incarnation_is_an_error_not_a_new_identity() {
 }
 
 #[test]
-fn a_seal_for_another_member_or_disk_is_refused_before_the_seal_mark() {
+fn a_seal_for_another_member_is_refused_before_the_seal_mark() {
     run(async {
         let disk = tempfile::tempdir().unwrap();
         let store = FollowerStore::new(disk.path(), None, "member");
@@ -103,9 +103,11 @@ fn a_seal_for_another_member_or_disk_is_refused_before_the_seal_mark() {
             .unwrap();
         let own = store.incarnation().unwrap();
         let other = "0123456789abcdef0123456789abcdef";
+        // Another member's name, with or without an incarnation, and an
+        // unknown incarnation that claims no member name.
         for refused in [
             seal(Some("someone-else"), None),
-            seal(Some("member"), Some(other)),
+            seal(Some("someone-else"), Some(&own)),
             seal(None, Some(other)),
         ] {
             assert!(store.seal(&refused).await.is_err());
@@ -113,7 +115,8 @@ fn a_seal_for_another_member_or_disk_is_refused_before_the_seal_mark() {
         }
         for refused in [
             tail(Some("someone-else"), Some(&own)),
-            tail(Some("member"), Some(other)),
+            tail(Some("someone-else"), None),
+            tail(None, Some(other)),
         ] {
             assert!(store.checked_tail(&refused).is_err());
         }
@@ -135,6 +138,45 @@ fn a_seal_for_another_member_or_disk_is_refused_before_the_seal_mark() {
         store.seal(&seal(Some("member"), Some(&own))).await.unwrap();
         assert_eq!(store.load(LEADER).sealed_to, 1);
         store.seal(&seal(None, None)).await.unwrap();
+    });
+}
+
+#[test]
+fn the_member_on_a_replacement_disk_answers_conclusively_from_it() {
+    run(async {
+        // The member's record still names the disk it lost. The same name
+        // on the replacement disk answers from its own (empty) store: the
+        // named disk is gone, and "no fragment" is the verdict recovery
+        // needs to record the loss.
+        let lost = tempfile::tempdir().unwrap();
+        let superseded = FollowerStore::new(lost.path(), None, "member")
+            .incarnation()
+            .unwrap();
+        let fresh = tempfile::tempdir().unwrap();
+        let store = FollowerStore::new(fresh.path(), None, "member");
+        assert_ne!(store.incarnation().unwrap(), superseded);
+        assert!(store
+            .checked_tail(&tail(Some("member"), Some(&superseded)))
+            .unwrap()
+            .entries
+            .is_empty());
+        let sealed = store
+            .seal(&seal(Some("member"), Some(&superseded)))
+            .await
+            .unwrap();
+        assert_eq!(sealed.end, 0);
+        assert_eq!(sealed.fragment_epoch, 0);
+        assert_eq!(sealed.held_fragment_epoch, Some(0));
+        // The seal mark is durable like any other: the dead leader's epoch
+        // is refused on the replacement disk from here on.
+        assert_eq!(store.load(LEADER).sealed_to, 1);
+        // Answering never rewrote this disk's own identity.
+        assert_ne!(
+            FollowerStore::new(fresh.path(), None, "member")
+                .incarnation()
+                .unwrap(),
+            superseded
+        );
     });
 }
 

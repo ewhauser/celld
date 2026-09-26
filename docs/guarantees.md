@@ -241,21 +241,31 @@ second. Exhaustion fails startup while preserving the predecessor record and
 retained recovery data. Returning peers can make a later supervised restart
 succeed; permanent unavailability does not provide a lossless recovery path.
 
-Recovery also checks that the process that answers is the member it asked,
-on the disk that member's lease names. Each follower store keeps a random disk
-incarnation beside its fragments. The store creates it durably the first time
-a process needs it, every later process on the same disk reads it back, and
-an empty disk gets a new one. Each node publishes its incarnation in its lease
-record. Recovery sends the member's name and published incarnation with every
-seal and tail request. A follower with another name or another incarnation
-refuses the request before it writes a seal mark, and recovery counts the
-refusal as an undecided member, the same as an unreachable one. A replacement
-machine that reuses a node's name and address with an empty disk therefore
-cannot report that the fragment is gone. The check protects only while the
-member's lease names a different disk than the one that answers. After the
-replacement installs its own lease, its disk is the member's disk of record,
-and its empty answer is conclusive again. A lease without an incarnation, from
-an older build, keeps the unchecked behavior.
+Recovery also checks that the process that answers is the member it asked.
+Each follower store keeps a random disk incarnation beside its fragments. The
+store creates it durably the first time a process needs it, every later
+process on the same disk reads it back, and an empty disk gets a new one.
+Each node publishes its incarnation in its lease record. Recovery sends the
+member's name and published incarnation with every seal and tail request.
+
+- A follower with another node name refuses the request before it writes a
+  seal mark. Recovery counts the refusal as an undecided member, the same as
+  an unreachable one, because a different node at the member's address says
+  nothing about the member's disk.
+- A follower with the member's name but another incarnation is that member on
+  a replacement disk. A node name identifies exactly one disk at a time, so a
+  new incarnation under the name means the disk the lease names is gone. The
+  follower answers from its own store and logs the incarnation it supersedes,
+  and its answer (usually "no fragment") is conclusive.
+
+Running a node name on a new disk is therefore a declaration that the old disk
+is lost. Reuse a name on another disk only when its previous disk is gone for
+good; a disk that may still come back must keep its name. This rule lets
+members that lose their disks at the same time recover each other's sessions:
+each replacement must recover its predecessor before it installs a lease, so
+the lease that recovery reads still names the lost disk, and waiting for that
+disk would never end. A lease without an incarnation, from an older build,
+keeps the unchecked behavior.
 
 The existing bounded-loss policy still applies when every ensemble member's
 response conclusively reports a missing or incomplete fragment and no complete

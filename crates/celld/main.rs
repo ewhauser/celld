@@ -4339,8 +4339,8 @@ async fn async_main(telemetry_config: Option<celld::telemetry::Config>) -> anyho
         node_log: actor.node_log.clone(),
     };
     // Every lease this process writes names its disk's follower-store
-    // incarnation, so recovery elsewhere can tell this disk from another one
-    // that later answers at the same address. The store creates the identity
+    // incarnation, so a later replacement disk under this node's name can
+    // name the disk it supersedes when recovery asks. The store creates the identity
     // durably here, before the first lease install, and a disk whose
     // identity cannot be read stops the boot instead of answering for
     // fragments it cannot vouch for.
