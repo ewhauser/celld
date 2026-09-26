@@ -111,7 +111,7 @@ follower and the member lease that names the disk all come from this build.
 Run it on every node that can recover or answer for this fleet before relying
 on it.
 
-## 0.5.1-ewhauser.6 (unreleased)
+## 0.5.1-ewhauser.6
 
 ### An idle leader moves off a departed follower
 
