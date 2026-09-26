@@ -93,6 +93,10 @@ another incarnation refuses the request before it writes a seal mark, and
 recovery counts the refusal as an undecided member, like an unreachable one.
 The same binding applies to the tail reads that fold a quietly stranded cell.
 
+0.5.1-ewhauser.7 narrows this refusal to another member name: the member's own
+name on another incarnation answers from its replacement disk. See that section
+for the deadlock the refusal caused.
+
 The check protects only while the member's lease names a disk other than the
 one answering, for example while a replacement is still recovering its own
 predecessor. Once the replacement installs its lease, its disk is the member's
@@ -141,3 +145,49 @@ then.
 
 Safety does not change. Degrading only moves acknowledgements to the bucket
 proof and starts the existing reconfiguration path.
+
+## 0.5.1-ewhauser.7 (unreleased)
+
+### A replacement disk under the member's name answers recovery
+
+0.5.1-ewhauser.5 made a follower refuse any recovery seal or tail whose
+`incarnation` differed from its own disk, and recovery counted the refusal as
+an undecided member. That deadlocked a fleet whose members lost their disks at
+the same time. In a two-member fleet that lost both disks, each replacement
+must recover its predecessor session before it installs its own lease. The
+only ensemble member of that session is the other replacement, and that
+member's lease still names its lost disk, because the other replacement is
+blocked in the same step. Each follower refused the other's request with
+`400 Bad Request`, each recovery failed with `no complete true witness ... 1
+member(s) undecided`, and startup exited with `refusing to install a lease
+over an unrecovered predecessor log`. No lease was replaced and no loss was
+recorded, so the fleet never recovered.
+
+A node name identifies exactly one disk at a time, and a new incarnation under
+that name exists only because the named disk was replaced. The follower now
+applies this rule:
+
+- Another `member` name is refused, as before, and recovery counts the member
+  as undecided.
+- The same `member` name with another `incarnation` answers from the
+  follower's own store and logs a warning that names the superseded
+  incarnation. For an empty replacement disk the answer is a conclusive "no
+  fragment". With no complete copy and every member conclusive, recovery
+  writes `log/<session>.e<epoch>.loss.json` and seals, as it did before
+  0.5.1-ewhauser.5.
+- An `incarnation` without a `member` is still refused on a mismatch, and a
+  request without an `incarnation` keeps the unchecked answer.
+
+Tail reads, including the fold of a quietly stranded cell, follow the same
+rule. The strict disk-removal path is unchanged. A three-member fleet that
+loses two disks recovers each lost session from the survivor when it holds a
+complete copy, and records the loss when it does not.
+
+This reverses part of the 0.5.1-ewhauser.5 protection: a node name that runs on
+a new disk now declares its old disk lost, even if that disk still exists
+elsewhere. Reuse a node name on another disk only when the previous disk is
+gone for good. `disk_incarnation` stays in the lease so that a follower can
+report which disk it supersedes.
+
+Rollout: no wire or record changes. A follower on an older build still refuses
+a replacement's answer, so upgrade every node before relying on the fix.
