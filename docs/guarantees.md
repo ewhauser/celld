@@ -22,26 +22,38 @@ a supervisor that restarts the process.
   write, so do not enable epoch GC on one when fleet nodes are in more than one
   region.
 
-The qualified stores are Amazon S3, Cloudflare R2, Tigris, Google Cloud Storage,
-and Azure Blob Storage. The release tests run against R2; the S3 path uses the
-same client and headers. Azure was qualified on 2026-08-18, single-node, under
-an account key, a VM managed identity, and an AKS workload identity. A managed
-identity on Azure App Service or Azure Container Apps does not work; see
+The qualified stores are Amazon S3, Cloudflare R2, Tigris, Google Cloud
+Storage, and Azure Blob Storage. celld's release tests run against R2,
+and the S3 path uses the same client and the same headers.
+
+Backblaze B2, Hetzner Object Storage, and DigitalOcean Spaces do not
+implement the required conditional writes. celld is not correct on such
+a store: two nodes can then own one cell. A store can also accept the
+conditional headers and ignore the condition, and that store fails late
+and silently, so run the storage test below.
+
+MinIO (the community edition) implements the conditional writes and
+passes the storage test, but celld has not qualified it for production.
+One release is broken: RELEASE.2025-09-06T17-38-46Z answers the
+conditional create of an absent object with `NoSuchKey`, so the first
+deploy fails (denoland/celld#162). Use RELEASE.2025-09-07T16-13-09Z or
+later.
+
+The request dialect differs per provider. An S3-compatible bucket gets
+the `If-None-Match: *` and `If-Match` headers, and the condition
+compares the etag. A `gs://` bucket selects the Cloud Storage XML API
+with the `x-goog-if-generation-match` precondition and OAuth
+credentials, because Cloud Storage does not apply `If-Match` to a PUT.
+An `az://` bucket (the NAME is the container) uses the same `If-`
+headers, which Put Blob applies. The adapter treats `AlreadyExists` and
+`Precondition` (HTTP 412 on Azure) as clean conditional-write
+rejections and keeps every other error ambiguous, because an ambiguous
+write can have changed the object.
+
+Azure was qualified on 2026-08-18 under an account key, a VM managed
+identity, and an AKS workload identity, single-node. A managed identity
+on Azure App Service or Azure Container Apps does not work; see
 [limitations](limitations.md).
-
-Backblaze B2, Hetzner Object Storage, and DigitalOcean Spaces do not implement
-the required conditional writes, so two nodes can own one cell on them. A store
-that accepts the conditional headers but ignores the condition fails late and
-silently, so run the storage test.
-
-MinIO (the community edition) passes the storage test but is not qualified for
-production. RELEASE.2025-09-06T17-38-46Z answers the conditional create of an
-absent object with `NoSuchKey`, so the first deploy fails (denoland/celld#162).
-Use RELEASE.2025-09-07T16-13-09Z or later.
-
-A `gs://` bucket uses the Cloud Storage XML API with
-`x-goog-if-generation-match` and OAuth credentials, because Cloud Storage does
-not apply `If-Match` to a PUT. For an `az://` bucket, the NAME is the container.
 
 ## The storage test
 
@@ -199,21 +211,31 @@ second. Exhaustion fails startup while preserving the predecessor record and
 retained recovery data. Returning peers can make a later supervised restart
 succeed; permanent unavailability does not provide a lossless recovery path.
 
-Recovery also checks that the process that answers is the member it asked,
-on the disk that member's lease names. Each follower store keeps a random disk
-incarnation beside its fragments. The store creates it durably the first time
-a process needs it, every later process on the same disk reads it back, and
-an empty disk gets a new one. Each node publishes its incarnation in its lease
-record. Recovery sends the member's name and published incarnation with every
-seal and tail request. A follower with another name or another incarnation
-refuses the request before it writes a seal mark, and recovery counts the
-refusal as an undecided member, the same as an unreachable one. A replacement
-machine that reuses a node's name and address with an empty disk therefore
-cannot report that the fragment is gone. The check protects only while the
-member's lease names a different disk than the one that answers. After the
-replacement installs its own lease, its disk is the member's disk of record,
-and its empty answer is conclusive again. A lease without an incarnation, from
-an older build, keeps the unchecked behavior.
+Recovery also checks that the process that answers is the member it asked.
+Each follower store keeps a random disk incarnation beside its fragments. The
+store creates it durably the first time a process needs it, every later
+process on the same disk reads it back, and an empty disk gets a new one.
+Each node publishes its incarnation in its lease record. Recovery sends the
+member's name and published incarnation with every seal and tail request.
+
+- A follower with another node name refuses the request before it writes a
+  seal mark. Recovery counts the refusal as an undecided member, the same as
+  an unreachable one, because a different node at the member's address says
+  nothing about the member's disk.
+- A follower with the member's name but another incarnation is that member on
+  a replacement disk. A node name identifies exactly one disk at a time, so a
+  new incarnation under the name means the disk the lease names is gone. The
+  follower answers from its own store and logs the incarnation it supersedes,
+  and its answer (usually "no fragment") is conclusive.
+
+Running a node name on a new disk is therefore a declaration that the old disk
+is lost. Reuse a name on another disk only when its previous disk is gone for
+good; a disk that may still come back must keep its name. This rule lets
+members that lose their disks at the same time recover each other's sessions:
+each replacement must recover its predecessor before it installs a lease, so
+the lease that recovery reads still names the lost disk, and waiting for that
+disk would never end. A lease without an incarnation, from an older build,
+keeps the unchecked behavior.
 
 The existing bounded-loss policy still applies when every ensemble member's
 response conclusively reports a missing or incomplete fragment and no complete
