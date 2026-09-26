@@ -195,6 +195,14 @@ three copies of an acknowledged write. The ensemble keeps acknowledging while
 one follower remains, therefore a fleet does not fall back to the bucket each
 time it loses a follower.
 
+A node notices a lost follower even when it receives no writes. It sends each
+quiet follower an empty append every 2 seconds. A failed write degrades the
+ensemble at once; three failed idle appends in a row, with no answer between
+them, do the same. The node then acknowledges on bucket proofs, marks the old
+epoch `bucket_complete`, and opens a new epoch from the followers whose leases
+are live. A departed follower therefore stops being an obligation of an idle
+node within seconds of leaving, or soon after its lease expires.
+
 A node without an ensemble stays correct. It acknowledges each write on a
 bucket proof instead, so celld still does not acknowledge a write before a
 durability proof covers it. The cost is latency: the write waits for the object

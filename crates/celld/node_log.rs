@@ -52,6 +52,8 @@ mod fleet_state_tests;
 #[cfg(test)]
 mod incarnation_tests;
 #[cfg(test)]
+mod probe_tests;
+#[cfg(test)]
 mod recovery_witness_tests;
 
 /// The one peer-POST boundary used by the node log.
@@ -2598,7 +2600,7 @@ impl FleetShipper {
 enum AppendSend {
     Answered(AppendResp),
     Incapable(anyhow::Error),
-    Failed(#[allow(dead_code)] anyhow::Error),
+    Failed(anyhow::Error),
 }
 
 /// Whether one member's answer confirms this append. Direct acceptance
@@ -2618,6 +2620,79 @@ pub fn append_confirms(req_epoch: u64, last: u64, resp: &AppendResp) -> bool {
 /// attempt, not on what the follower holds.
 fn send_confirms(req_epoch: u64, last: u64, send: &AppendSend) -> bool {
     matches!(send, AppendSend::Answered(resp) if append_confirms(req_epoch, last, resp))
+}
+
+/// How long a member must go without an append or probe before the idle
+/// prober sends it an empty append.
+const PROBE_QUIET_MS: u64 = 2_000;
+
+/// Read one idle probe's outcome into the health ledger and the shipper.
+fn settle_probe(
+    shipper: &FleetShipper,
+    health: &Mutex<celld_logic::log_evict::FollowerHealth>,
+    suspect_self: &std::sync::atomic::AtomicBool,
+    node: &str,
+    started: u64,
+    outcome: AppendSend,
+) {
+    let done = mono_ms();
+    // ANY well-formed peer response — even an append refusal, which is
+    // still a signed HTTP 200 — proves connectivity and lifts
+    // self-suspicion. An incapable answer proves the peer is the wrong
+    // binary, not that we are cut off, and it quarantines here exactly as
+    // a shipped batch would — an idle ensemble must not keep a 0.2.x
+    // member recruit-eligible just because no writes arrive.
+    match outcome {
+        AppendSend::Answered(response) => {
+            health
+                .lock()
+                .unwrap()
+                .append_completed(node, done, done.saturating_sub(started));
+            suspect_self.store(false, Ordering::SeqCst);
+            if response.quiesced {
+                shipper.degrade("follower closed append admission");
+                health
+                    .lock()
+                    .unwrap()
+                    .append_incapable(&shipper.policy, node, done);
+            }
+        }
+        AppendSend::Incapable(error) => {
+            warn!(
+                member = node,
+                %error,
+                "follower cannot serve log appends; quarantined from recruitment"
+            );
+            health
+                .lock()
+                .unwrap()
+                .append_incapable(&shipper.policy, node, done);
+        }
+        // A transport failure is not a latency sample: a refused
+        // connection is fast, and recording it as a completed append
+        // told the gray-follower ledger that a departed member was
+        // healthy. Enough failures in a row degrade the ensemble exactly
+        // as a failed write does — acks ride the bucket, and maintenance
+        // drains the epoch to `bucket_complete` and opens the next one
+        // without a member whose lease has lapsed. Without this an idle
+        // leader never learned that a follower was gone.
+        AppendSend::Failed(error) => {
+            let degrade = health.lock().unwrap().probe_failed(node, done);
+            if degrade {
+                if shipper.is_active() {
+                    warn!(
+                        member = node,
+                        %error,
+                        failures = celld_logic::log_evict::PROBE_FAILURES_TO_DEGRADE,
+                        "idle probes to follower keep failing; degrading the ensemble"
+                    );
+                }
+                shipper.degrade("follower unreachable by idle probes");
+            } else {
+                tracing::debug!(member = node, %error, "idle probe to follower failed");
+            }
+        }
+    }
 }
 
 fn degrade_shared(degraded: &std::sync::atomic::AtomicBool, epoch: u64, why: &str) {
@@ -4469,9 +4544,14 @@ impl NodeLogManager {
     /// Idle disk probes: an empty append still persists (and fsyncs) the
     /// follower's state file, so a quiet fleet finds a dying follower disk
     /// before load does. One owned probe runs per quiet member per interval.
-    /// A hanging probe marks the member outstanding and the backstop acts.
+    /// A hanging probe marks the member outstanding and the backstop acts;
+    /// probes that fail in a row degrade the ensemble off a departed
+    /// member (see `settle_probe`).
     pub fn probe_followers(self: &Arc<Self>) {
-        const PROBE_QUIET_MS: u64 = 2_000;
+        self.probe_followers_quiet(PROBE_QUIET_MS);
+    }
+
+    fn probe_followers_quiet(self: &Arc<Self>, quiet_ms: u64) {
         let inner = self.inner.lock().unwrap().clone();
         let Some(shipper) = inner else { return };
         // Probes run DEGRADED too — a degraded shipper is exactly when
@@ -4484,7 +4564,7 @@ impl NodeLogManager {
                 .health
                 .lock()
                 .unwrap()
-                .probe_due(&member.node, now, PROBE_QUIET_MS)
+                .probe_due(&member.node, now, quiet_ms)
             {
                 continue;
             }
@@ -4513,44 +4593,7 @@ impl NodeLogManager {
                         _ = stop.stopped() => return,
                         outcome = shipper.post_append(member, &req) => outcome,
                     };
-                    let done = mono_ms();
-                    health.lock().unwrap().append_completed(
-                        &node,
-                        done,
-                        done.saturating_sub(started),
-                    );
-                    // ANY well-formed peer response — even an append refusal,
-                    // which is still a signed HTTP 200 — proves connectivity
-                    // and lifts self-suspicion. An incapable answer proves
-                    // the peer is the wrong binary, not that we are cut off,
-                    // and it quarantines here exactly as a shipped batch
-                    // would — an idle ensemble must not keep a 0.2.x member
-                    // recruit-eligible just because no writes arrive.
-                    match outcome {
-                        AppendSend::Answered(response) => {
-                            suspect_self.store(false, Ordering::SeqCst);
-                            if response.quiesced {
-                                shipper.degrade("follower closed append admission");
-                                health.lock().unwrap().append_incapable(
-                                    &shipper.policy,
-                                    &node,
-                                    done,
-                                );
-                            }
-                        }
-                        AppendSend::Incapable(error) => {
-                            warn!(
-                                member = node,
-                                %error,
-                                "follower cannot serve log appends; quarantined from recruitment"
-                            );
-                            health
-                                .lock()
-                                .unwrap()
-                                .append_incapable(&shipper.policy, &node, done);
-                        }
-                        AppendSend::Failed(_) => {}
-                    }
+                    settle_probe(&shipper, &health, &suspect_self, &node, started, outcome);
                 });
         }
     }
