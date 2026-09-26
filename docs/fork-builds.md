@@ -146,7 +146,7 @@ then.
 Safety does not change. Degrading only moves acknowledgements to the bucket
 proof and starts the existing reconfiguration path.
 
-## 0.5.1-ewhauser.7 (unreleased)
+## 0.5.1-ewhauser.7
 
 ### A replacement disk under the member's name answers recovery
 
