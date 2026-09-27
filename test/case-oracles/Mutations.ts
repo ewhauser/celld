@@ -762,6 +762,10 @@ export const mutations = {
   ],
   "facets.outbound-transaction": [
     mutate(
+      "the former celld restriction refuses outbound during a root transaction",
+      change(["body", "inTransaction", "outbound"], "rejected"),
+    ),
+    mutate(
       "an outbound effect from a facet is refused with no root transaction",
       change(["body", "control", "outbound"], "rejected"),
     ),
@@ -1018,16 +1022,6 @@ export const divergenceMutations = {
     mutate(
       "unrelated RPC failure is incorrectly waived",
       change(["body", "error", "message"], "network unavailable"),
-    ),
-  ],
-  "facets.outbound-transaction": [
-    mutate(
-      "the documented restriction is extended to a facet with no open root transaction",
-      change(["body", "control", "outbound"], "rejected"),
-    ),
-    mutate(
-      "the refused outbound also loses the facet write under the waiver",
-      change(["body", "after", "balance"], 10),
     ),
   ],
 } satisfies Record<string, readonly [Mutation, ...Mutation[]]>;

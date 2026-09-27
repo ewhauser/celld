@@ -2,9 +2,9 @@
 
 This roadmap prioritizes gaps in celld-tck's feature and operational coverage. It describes planned work, not established guarantees. The [qualification backlog](BACKLOG.md) records the existing reliability checklist; the [live results](https://ewhauser.github.io/celld-tck/) show current CI evidence.
 
-The suite currently pins celld v0.5.1. Upstream documentation changes independently: confirm each feature's availability and contract on the pinned release before implementing a case. A feature requiring a newer binary must explicitly declare that requirement or accompany a reviewed version update.
+The suite currently pins celld v0.6.0. Upstream documentation changes independently: confirm each feature's availability and contract on the pinned release before implementing a case. A feature requiring a newer binary must explicitly declare that requirement or accompany a reviewed version update.
 
-Many inventories and fault observations below were established on v0.5.0. The [v0.5.1 assessment](RELEASE-0.5.1.md) records what has been rerun on the new pin and what still needs requalification.
+Many inventories and fault observations below were established on v0.5.0. The [v0.6.0 assessment](RELEASE-0.6.0.md) records what has been rerun on the new pin and what still needs requalification.
 
 ## Priorities
 
@@ -66,7 +66,7 @@ Each denial case needs an authorized control and an assertion that no protected 
 
 - [ ] **Assets:** asset-only deployments, HTML/not-found routing, redirects, worker-first rules, and header restrictions. `assets.html-routing`, `assets.redirects`, and `assets.worker-first` now cover default HTML handling, the not-found response, `_redirects` rules, a `_headers` rule on an HTML asset, and `run_worker_first` route patterns including the `!/` negation; `FixtureConfig`/`ReferenceProcess` also accept `html_handling` and `not_found_handling`. Asset-only deployments and non-default handling modes remain open because each needs a second, separately configured deployment. `_headers` protocol-header restrictions remain open: Cloudflare still documents no restricted headers, so there is no reference contract.
 - [x] **Dynamic Workers:** props, service capabilities in bindings, outbound restrictions, generation lifecycle, and documented limits. `dynamic.props`, `dynamic.bindings`, `dynamic.outbound`, and `dynamic.limits` cover per-call props, structured-clone and Service Binding values in `WorkerCode.env`, both `globalOutbound: null` and a `globalOutbound` gateway, and acceptance of a `WorkerCode.limits` declaration. celld v0.5.1 now passes `dynamic.limits`. Limit _enforcement_ and the generation lifecycle are not assertable on the pinned workerd reference — it enforces neither the concurrent-Dynamic-Worker limit nor a custom `subRequests` budget locally, and the loader callback may be called any number of times. Tail reports and celld-only limit enforcement need qualification cases; see [RELEASE-0.5.1.md](RELEASE-0.5.1.md).
-- [ ] **Facets:** explicit transaction commit/rollback, persistence after eviction/restart, root replication, and outbound-effect restrictions during uncommitted transactions. `facets.transaction` covers explicit commit and rollback, `facets.outbound-transaction` registers celld's documented rejection of an outbound effect during an uncommitted root transaction as a divergence, and `recovery.facets` covers facet persistence and root replication across a celld restart. Eviction while the node stays up, and facet behavior during a multi-node ownership move, remain open.
+- [ ] **Facets:** explicit transaction commit/rollback, persistence after eviction/restart, replication, and outbound effects during uncommitted root transactions. `facets.transaction` covers explicit commit and rollback, `facets.outbound-transaction` now requires successful outbound calls during an uncommitted root transaction on v0.6.0, and `recovery.facets` covers facet persistence across a celld restart. Eviction while the node stays up, and facet behavior during a multi-node ownership move, remain open.
 
 Use identical fixtures for shared APIs. Validate documented celld differences explicitly rather than weakening the reference expectation.
 
@@ -91,7 +91,7 @@ The Web Crypto and messaging work registered one documented divergence (`crypto.
 - [x] Assert readiness transitions, completion of accepted requests, and handoff behavior during graceful drain.
 - [x] Exercise concurrent drains and bounded shutdown when survivors lack capacity.
 - [x] Validate same-node preserve/reload behavior if supported by the selected release. `POST /shutdown?handoff=preserve` is supported and covered.
-- [x] Run mixed-version and rolling binary upgrades with two explicitly pinned releases; assert data preservation and documented compatibility or rejection behavior. v0.5.0 and v0.5.1 are both pinned by digest. The v0.5.1 release explicitly supports a rolling update from v0.5.0, and the local case passed; see [RELEASE-0.5.1.md](RELEASE-0.5.1.md). Downgrades are not attempted.
+- [x] Run mixed-version and rolling binary upgrades with two explicitly pinned releases; assert data preservation and documented compatibility or rejection behavior. v0.5.1 and v0.6.0 are both pinned by digest. The v0.6.0 release supports rolling updates only with bucket durability; fleet durability requires a whole-fleet stop. See [RELEASE-0.6.0.md](RELEASE-0.6.0.md). Downgrades are not attempted.
 
 Implemented coverage, the v0.5.0 operational-control inventory it rests on, and the untestable items are in [FLEET-OPERATIONS.md](FLEET-OPERATIONS.md).
 

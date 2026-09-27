@@ -57,21 +57,15 @@ pnpm tck --profile local --suite extensions
 pnpm tck --profile reference --suite extensions --case assets.redirects
 ```
 
-Each case has an independently captured positive observation in `test/case-oracles/observations.json` and named semantic mutations in `test/case-oracles/Mutations.ts`: a lost `_headers` rule, an ignored `_redirects` rule, a suppressed trailing-slash redirect, a worker-first path that serves the shadowed asset, a negative routing rule that fails to restore asset-first order, leaked props, a lost env capability, an outbound block that leaks or that also disables bindings, and a facet transaction that commits a rolled back write or discards a committed one. The remaining divergence control has its own mutations under `divergenceMutations`, so a waiver cannot be stretched to cover an unrelated failure.
+Each case has an independently captured positive observation in `test/case-oracles/observations.json` and named semantic mutations in `test/case-oracles/Mutations.ts`: a lost `_headers` rule, an ignored `_redirects` rule, a suppressed trailing-slash redirect, a worker-first path that serves the shadowed asset, a negative routing rule that fails to restore asset-first order, leaked props, a lost env capability, an outbound block that leaks or that also disables bindings, and a facet transaction that commits a rolled back write or discards a committed one. The former facet outbound restriction has a dedicated semantic mutation, so it cannot return unnoticed.
 
 An asset error page's body and media type are presentation rather than contract, so only a served asset reports them; the not-found status itself is asserted.
 
 ## Local celld results
 
-On celld v0.5.1 every case above passes except `assets.html-routing`, which remains the known bug [CELL-004](BUGS.md): celld redirects `/folder` to `/folder/` and then answers 404 for that canonical path, so a directory index is unreachable. Every other observation in that case matches the reference. `assets.worker-first` and `dynamic.limits` pass on v0.5.1.
+On celld v0.6.0 every case above passes except `assets.html-routing`, which remains the known bug [CELL-004](BUGS.md): celld redirects `/folder` to `/folder/` and then answers 404 for that canonical path, so a directory index is unreachable. Every other observation in that case matches the reference.
 
-One case remains a reviewed divergence on v0.5.1, confirmed in local run `tck-ff703cf6-0646-47ba-bee7-d6e6db1f5f36`:
-
-| Case                          | Documented celld behavior                                                                                          | celld observation                                                                                                                           |
-| ----------------------------- | ------------------------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------- |
-| `facets.outbound-transaction` | "celld rejects an outbound effect from a facet while a root storage transaction holds an uncommitted facet image." | The control call reaches the gateway; the same call inside a root transaction is refused, and the facet write is still readable afterwards. |
-
-The fixture reports the refusal as an outcome rather than a message, so the control does not depend on an error string or a bundle offset.
+`facets.outbound-transaction` now matches workerd: both the control call and the call inside a root transaction reach the gateway, and the facet write remains readable afterwards. v0.6.0 gives each facet its own database and replication stream. The old v0.5.1 divergence and its waiver-only observations have been retired; the independent workerd observation and semantic negative tests remain. See [RELEASE-0.6.0.md](RELEASE-0.6.0.md) for run evidence.
 
 ## Remaining coverage
 

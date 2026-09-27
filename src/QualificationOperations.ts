@@ -54,15 +54,16 @@ const SHUTDOWN_TOTAL_MS = 20000;
 const STOP_MARGIN_MS = 15000;
 
 /** The release infra/compose.yaml pins and the whole suite otherwise runs. */
-export const CURRENT_RELEASE = "0.5.1";
+export const CURRENT_RELEASE = "0.6.0";
 export const CURRENT_IMAGE =
-  "ghcr.io/denoland/celld:v0.5.1@sha256:9df15352bcbb92a8d73dabadc349383ccd3d7851b2ba4ccffe2c956f2f9fc93f";
+  "ghcr.io/denoland/celld:v0.6.0@sha256:e188a7f2bb0b8cec9fb04ee4c3d1ed7cca0ea0419519ae2a9ba36e5b6fe5161b";
 /**
- * v0.5.1 explicitly supports a rolling update from v0.5.0.
+ * v0.6.0 supports a rolling update from v0.5.1 only with bucket durability.
+ * Fleet durability requires stopping the whole fleet before upgrading.
  */
-export const PREVIOUS_RELEASE = "0.5.0";
+export const PREVIOUS_RELEASE = "0.5.1";
 export const PREVIOUS_IMAGE =
-  "ghcr.io/denoland/celld:v0.5.0@sha256:df8e74bb9a059df5779644368984933eba76acd6a2d196672732f4368f760fc8";
+  "ghcr.io/denoland/celld:v0.5.1@sha256:9df15352bcbb92a8d73dabadc349383ccd3d7851b2ba4ccffe2c956f2f9fc93f";
 
 const NodeState = Schema.Struct({
   owned_cells: Schema.Int,
@@ -907,6 +908,7 @@ export const operationsCases = [
   },
   {
     id: "operations.binary-upgrade" as const,
+    durability: "bucket" as const,
     operations: true,
     upgrade: true,
     images: {

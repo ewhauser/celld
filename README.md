@@ -19,9 +19,9 @@ Run identical fixtures on celld and Cloudflare’s workerd, check API behavior, 
 
 Each runtime must satisfy the case’s assertions independently. Matching incorrect results do not pass. Every API case also has a deliberately incorrect observation that its checker must reject.
 
-Tests target **celld v0.5.1** and **workerd 1.20260730.1**, with compatibility date **2026-07-30**. Container images are [pinned by digest](infra/compose.yaml). See the [case registry and exclusions](docs/coverage.json) for the full scope.
+Tests target **celld v0.6.0** and **workerd 1.20260730.1**, with compatibility date **2026-07-30**. Container images are [pinned by digest](infra/compose.yaml). See the [case registry and exclusions](docs/coverage.json) for the full scope.
 
-The [v0.5.1 upgrade assessment](docs/RELEASE-0.5.1.md) records new coverage, release-specific gaps, and local validation.
+The [v0.6.0 upgrade assessment](docs/RELEASE-0.6.0.md) records new coverage, release-specific gaps, and local validation.
 
 ## Run locally
 
@@ -43,6 +43,8 @@ pnpm test:reference
 ```
 
 Both `docker compose` and `docker-compose` are supported. Set `TCK_COMPOSE_BIN` if Compose is installed elsewhere.
+
+MinIO's public container images are unavailable. Compose builds the same pinned MinIO server and client releases from official GitHub binaries using SHA-256 checksums and a digest-pinned Alpine base; see [the Dockerfile](infra/minio/Dockerfile). This requires BuildKit and supports amd64 and arm64. The first Docker run downloads the binaries; later runs reuse build layers.
 
 ## Reading the results
 

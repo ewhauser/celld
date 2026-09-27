@@ -154,12 +154,12 @@ export const coreCases: ReadonlyArray<TestCase> = [
       deleted: true,
     }),
     divergence: {
-      celldVersion: "0.5.1",
+      celldVersion: "0.6.0",
       compatibilityDate: "2026-07-30",
       compatibilityFlags: [],
       source: "https://celld.dev/docs/cloudflare-compat/#cache",
       reason: "celld deliberately implements an always-miss cache",
-      reviewDate: "2026-09-19",
+      reviewDate: "2026-09-26",
       owner: "celld-tck maintainers",
       check: (value) => equal(value, response({ value: null, deleted: false })),
     },
@@ -293,13 +293,13 @@ export const coreCases: ReadonlyArray<TestCase> = [
       cryptoDoc,
     ),
     divergence: {
-      celldVersion: "0.5.1",
+      celldVersion: "0.6.0",
       compatibilityDate: "2026-07-30",
       compatibilityFlags: [],
       source: "https://celld.dev/docs/cloudflare-compat/#web-crypto",
       reason:
         "celld documents that a secret key cannot use jwk with exportKey() or wrapKey()",
-      reviewDate: "2026-09-19",
+      reviewDate: "2026-09-26",
       owner: "celld-tck maintainers",
       check: (value) =>
         equal(
@@ -432,12 +432,12 @@ export const coreCases: ReadonlyArray<TestCase> = [
   {
     ...ep("rpc.returned-target", "/rpc/target", { sum: 42 }),
     divergence: {
-      celldVersion: "0.5.1",
+      celldVersion: "0.6.0",
       compatibilityDate: "2026-07-30",
       compatibilityFlags: [],
       source: "https://celld.dev/docs/cloudflare-compat/#rpc",
       reason: "celld cannot transfer an RPC stub across an isolate boundary",
-      reviewDate: "2026-09-19",
+      reviewDate: "2026-09-26",
       owner: "celld-tck maintainers",
       check: (value) =>
         equal(

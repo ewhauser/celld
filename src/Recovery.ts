@@ -28,8 +28,8 @@ const FacetSnapshot = Schema.Struct({
   balance: Schema.Unknown,
   rows: Schema.Unknown,
 });
-// A facet keeps its own SQLite database, which the runtime replicates with the
-// root Durable Object: the seeded facet state must survive a restart intact.
+// A facet keeps its own SQLite database and replication stream. The seeded
+// facet state must survive a restart of the root Durable Object intact.
 export const checkFacetsRecovered = (
   before: string,
   value: typeof FacetSnapshot.Type,

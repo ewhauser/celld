@@ -29,7 +29,7 @@ const reference = {
   engine: "workerd" as const,
 };
 const candidate = { ...reference, name: "candidate" };
-const celld = { ...candidate, engine: "celld" as const, version: "0.5.1" };
+const celld = { ...candidate, engine: "celld" as const, version: "0.6.0" };
 const transport = {
   request: () => Effect.die("Observation replay must not perform HTTP"),
   websocket: () => Effect.die("Observation replay must not open sockets"),

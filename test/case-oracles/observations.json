@@ -1349,7 +1349,9 @@
       },
       "body": {
         "bytes": [0, 128, 255, 65, 206, 187],
-        "metadata": { "source": "stream" },
+        "metadata": {
+          "source": "stream"
+        },
         "deleted": null
       }
     },
@@ -2488,25 +2490,6 @@
             "length": 128
           }
         ]
-      }
-    },
-    "facets.outbound-transaction": {
-      "status": 200,
-      "headers": {
-        "content-type": "application/json"
-      },
-      "body": {
-        "control": {
-          "balance": 40,
-          "outbound": "gateway /facet"
-        },
-        "inTransaction": {
-          "balance": 40,
-          "outbound": "rejected"
-        },
-        "after": {
-          "balance": 40
-        }
       }
     }
   }

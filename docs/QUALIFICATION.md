@@ -94,7 +94,9 @@ The OTLP cases assert on payloads a recording collector sidecar decoded, never o
 
 Six [fleet-operations cases](FLEET-OPERATIONS.md) exercise the operational
 controls documented for celld v0.5.0, plus a rolling binary upgrade from the
-second explicitly pinned release, v0.4.1.
+previous pinned release, v0.5.1, to v0.6.0 using bucket durability. Fleet
+durability requires a whole-fleet stop for this upgrade and is not covered by
+the rolling scenario.
 
 - `operations.weighted-placement`: require every node to publish its configured
   `CELLD_PLACEMENT_WEIGHT` through both `/state` and its bucket lease, create
@@ -118,8 +120,8 @@ second explicitly pinned release, v0.4.1.
 - `operations.preserve-reload`: ask one node for a same-node preserve and
   require it to log a prepared clean reload, no handoff at all, and ownership
   records that are byte-identical across the stop and the restart.
-- `operations.binary-upgrade`: start the fleet on the pinned v0.4.1 image and
-  roll each node to the pinned v0.5.0 image one at a time, requiring a genuinely
+- `operations.binary-upgrade`: start the fleet on the pinned v0.5.1 image with bucket durability and
+  roll each node to the pinned v0.6.0 image one at a time, requiring a genuinely
   mixed fleet at each step, an acknowledged write on every cell through every
   live node while it is mixed, and every acknowledged write intact at the end.
   Each case holds several cells, each with its own durable ledger, and ends by

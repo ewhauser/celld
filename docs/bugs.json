@@ -6,7 +6,7 @@
       "status": "open",
       "report": "upstream/body-consumption.md",
       "owner": "celld-tck maintainers",
-      "reviewedAt": "2026-09-18",
+      "reviewedAt": "2026-09-26",
       "upstreamIssue": null
     },
     {
@@ -15,7 +15,7 @@
       "status": "open",
       "report": "upstream/storage-list-validation.md",
       "owner": "celld-tck maintainers",
-      "reviewedAt": "2026-09-18",
+      "reviewedAt": "2026-09-26",
       "upstreamIssue": null
     },
     {
@@ -24,7 +24,7 @@
       "status": "open",
       "report": "upstream/storage-clone-errors.md",
       "owner": "celld-tck maintainers",
-      "reviewedAt": "2026-09-18",
+      "reviewedAt": "2026-09-26",
       "upstreamIssue": null
     },
     {
@@ -33,7 +33,7 @@
       "status": "open",
       "report": "upstream/asset-directory-index.md",
       "owner": "celld-tck maintainers",
-      "reviewedAt": "2026-09-18",
+      "reviewedAt": "2026-09-26",
       "upstreamIssue": null
     },
     {
@@ -42,7 +42,7 @@
       "status": "open",
       "report": "upstream/webcrypto-ec-key-export.md",
       "owner": "celld-tck maintainers",
-      "reviewedAt": "2026-09-18",
+      "reviewedAt": "2026-09-26",
       "upstreamIssue": null
     },
     {
@@ -51,7 +51,7 @@
       "status": "open",
       "report": "upstream/webcrypto-input-validation.md",
       "owner": "celld-tck maintainers",
-      "reviewedAt": "2026-09-18",
+      "reviewedAt": "2026-09-26",
       "upstreamIssue": null
     },
     {
@@ -60,7 +60,7 @@
       "status": "open",
       "report": "upstream/node-stream-web-interop.md",
       "owner": "celld-tck maintainers",
-      "reviewedAt": "2026-09-18",
+      "reviewedAt": "2026-09-26",
       "upstreamIssue": null
     },
     {
@@ -69,7 +69,7 @@
       "status": "open",
       "report": "upstream/websocket-standard-binary-type.md",
       "owner": "celld-tck maintainers",
-      "reviewedAt": "2026-09-18",
+      "reviewedAt": "2026-09-26",
       "upstreamIssue": null
     }
   ],
@@ -77,8 +77,8 @@
     {
       "caseId": "http.body-consumption",
       "bugIds": ["CELL-001"],
-      "celldVersion": "0.5.1",
-      "evidenceRun": "tck-ff703cf6-0646-47ba-bee7-d6e6db1f5f36",
+      "celldVersion": "0.6.0",
+      "evidenceRun": "tck-3b8dd9ff-6e2d-475c-a43b-46829979609f",
       "candidate": {
         "status": 200,
         "headers": {
@@ -99,8 +99,8 @@
     {
       "caseId": "storage.invalid-input",
       "bugIds": ["CELL-002", "CELL-003"],
-      "celldVersion": "0.5.1",
-      "evidenceRun": "tck-ff703cf6-0646-47ba-bee7-d6e6db1f5f36",
+      "celldVersion": "0.6.0",
+      "evidenceRun": "tck-3b8dd9ff-6e2d-475c-a43b-46829979609f",
       "candidate": {
         "status": 200,
         "headers": {
@@ -117,8 +117,8 @@
     {
       "caseId": "repro.body-readers",
       "bugIds": ["CELL-001"],
-      "celldVersion": "0.5.1",
-      "evidenceRun": "tck-5c8b38f9-3579-4eb7-9f77-95aef1cdc063",
+      "celldVersion": "0.6.0",
+      "evidenceRun": "tck-45ae6091-9437-4d15-ba25-99890bbf974f",
       "candidate": {
         "status": 200,
         "headers": {
@@ -257,8 +257,8 @@
     {
       "caseId": "repro.storage-errors",
       "bugIds": ["CELL-002", "CELL-003"],
-      "celldVersion": "0.5.1",
-      "evidenceRun": "tck-5c8b38f9-3579-4eb7-9f77-95aef1cdc063",
+      "celldVersion": "0.6.0",
+      "evidenceRun": "tck-45ae6091-9437-4d15-ba25-99890bbf974f",
       "candidate": {
         "status": 200,
         "headers": {
@@ -300,8 +300,8 @@
     {
       "caseId": "assets.html-routing",
       "bugIds": ["CELL-004"],
-      "celldVersion": "0.5.1",
-      "evidenceRun": "tck-ff703cf6-0646-47ba-bee7-d6e6db1f5f36",
+      "celldVersion": "0.6.0",
+      "evidenceRun": "tck-3b8dd9ff-6e2d-475c-a43b-46829979609f",
       "candidate": {
         "status": 200,
         "headers": {
@@ -351,8 +351,8 @@
     {
       "caseId": "crypto.ecdsa-p256",
       "bugIds": ["CELL-005"],
-      "celldVersion": "0.5.1",
-      "evidenceRun": "tck-ff703cf6-0646-47ba-bee7-d6e6db1f5f36",
+      "celldVersion": "0.6.0",
+      "evidenceRun": "tck-3b8dd9ff-6e2d-475c-a43b-46829979609f",
       "candidate": {
         "status": 200,
         "headers": {
@@ -392,8 +392,8 @@
     {
       "caseId": "crypto.invalid-input",
       "bugIds": ["CELL-006"],
-      "celldVersion": "0.5.1",
-      "evidenceRun": "tck-ff703cf6-0646-47ba-bee7-d6e6db1f5f36",
+      "celldVersion": "0.6.0",
+      "evidenceRun": "tck-3b8dd9ff-6e2d-475c-a43b-46829979609f",
       "candidate": {
         "status": 200,
         "headers": {
@@ -417,8 +417,8 @@
     {
       "caseId": "node.stream-timers",
       "bugIds": ["CELL-007"],
-      "celldVersion": "0.5.1",
-      "evidenceRun": "tck-ff703cf6-0646-47ba-bee7-d6e6db1f5f36",
+      "celldVersion": "0.6.0",
+      "evidenceRun": "tck-3b8dd9ff-6e2d-475c-a43b-46829979609f",
       "candidate": {
         "status": 200,
         "headers": {
@@ -440,8 +440,8 @@
     {
       "caseId": "flags.enabled-defaults",
       "bugIds": ["CELL-008"],
-      "celldVersion": "0.5.1",
-      "evidenceRun": "tck-ff703cf6-0646-47ba-bee7-d6e6db1f5f36",
+      "celldVersion": "0.6.0",
+      "evidenceRun": "tck-3b8dd9ff-6e2d-475c-a43b-46829979609f",
       "candidate": {
         "status": 200,
         "headers": {
