@@ -5083,7 +5083,15 @@ fn start_cell_event<'s>(
     call: impl FnOnce(&mut v8::PinScope<'s, '_>) -> Result<v8::Local<'s, v8::Value>>,
 ) -> Begun {
     let runtime_state = actor_runtime_state(tc);
-    let context = IoContext::tracked(&runtime_state);
+    // Resolved once per event, so a turn pays one atomic add. A facet's CPU
+    // is its root cell's: the metric is a distribution over cells.
+    let cpu_account = if crate::metrics::cell_cpu_enabled() {
+        let owner = storage::root_scope(scope);
+        crate::metrics::cell_cpu_account(owner.as_deref().unwrap_or(scope))
+    } else {
+        None
+    };
+    let context = IoContext::tracked(&runtime_state, cpu_account);
     if let Some(stream_id) = body_stream_id {
         context.own_body_stream(stream_id);
     }
@@ -11024,6 +11032,9 @@ pub struct IoContext {
     cpu_limit_nanos: Option<u64>,
     cpu_used_nanos: AtomicU64,
     cpu_turn: Mutex<Option<CpuTurnStart>>,
+    /// The cell account each turn's CPU is added to, for the per-cell CPU
+    /// metric. `None` for stateless work and whenever metrics are off.
+    cpu_account: Option<Arc<AtomicU64>>,
     /// Whether this event records console calls for a Dynamic Worker tail.
     tail_reporting: bool,
     tail_logs: Mutex<TailLogCapture>,
@@ -11124,8 +11135,14 @@ impl IoContext {
         Ok(())
     }
 
+    /// Whether a turn reads the thread clock at all: only to enforce a limit
+    /// or to report the cell's CPU. Everything else skips both reads.
+    fn cpu_measured(&self) -> bool {
+        self.cpu_limit_nanos.is_some() || self.cpu_account.is_some()
+    }
+
     fn begin_cpu_turn(&self) {
-        if self.cpu_limit_nanos.is_none() {
+        if !self.cpu_measured() {
             return;
         }
         *self.cpu_turn.lock().unwrap() = Some(CpuTurnStart {
@@ -11141,9 +11158,9 @@ impl IoContext {
     }
 
     fn finish_cpu_turn(&self) -> Result<(), String> {
-        let Some(limit) = self.cpu_limit_nanos else {
+        if !self.cpu_measured() {
             return Ok(());
-        };
+        }
         let Some(started) = self.cpu_turn.lock().unwrap().take() else {
             return Ok(());
         };
@@ -11152,6 +11169,12 @@ impl IoContext {
             .zip(thread_cpu_nanos())
             .map(|(started, finished)| finished.saturating_sub(started))
             .unwrap_or_else(|| started.wall.elapsed().as_nanos() as u64);
+        if let Some(account) = &self.cpu_account {
+            account.fetch_add(elapsed, Ordering::Relaxed);
+        }
+        let Some(limit) = self.cpu_limit_nanos else {
+            return Ok(());
+        };
         let used = self.cpu_used_nanos.fetch_add(elapsed, Ordering::Relaxed) + elapsed;
         if used > limit {
             return Err(format!(
@@ -11203,12 +11226,16 @@ impl IoContext {
                 .map(|milliseconds| u64::from(milliseconds).saturating_mul(1_000_000)),
             cpu_used_nanos: AtomicU64::new(0),
             cpu_turn: Mutex::new(None),
+            cpu_account: None,
             tail_reporting,
             tail_logs: Mutex::new(TailLogCapture::default()),
         })
     }
 
-    fn tracked(runtime_state: &Arc<ActorRuntimeState>) -> Arc<Self> {
+    fn tracked(
+        runtime_state: &Arc<ActorRuntimeState>,
+        cpu_account: Option<Arc<AtomicU64>>,
+    ) -> Arc<Self> {
         let id = allocate_io_context_id();
         let context = Arc::new(Self {
             continuation: Some((id, Arc::downgrade(runtime_state))),
@@ -11238,6 +11265,7 @@ impl IoContext {
                 .map(|milliseconds| u64::from(milliseconds).saturating_mul(1_000_000)),
             cpu_used_nanos: AtomicU64::new(0),
             cpu_turn: Mutex::new(None),
+            cpu_account,
             // Tracked contexts drive cell and RPC events. Dynamic Worker tail
             // reports currently belong only to fetch jobs, whose untracked
             // context is constructed from the report sender in `begin`.
@@ -11571,7 +11599,7 @@ pub struct IoContextRegistryForTest(Arc<ActorRuntimeState>);
 impl IoContextRegistryForTest {
     #[doc(hidden)]
     pub fn track(&self) -> (u64, Arc<IoContext>) {
-        let context = IoContext::tracked(&self.0);
+        let context = IoContext::tracked(&self.0, None);
         let id = context
             .continuation
             .as_ref()

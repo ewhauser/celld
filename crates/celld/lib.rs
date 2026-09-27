@@ -76,6 +76,7 @@ pub mod ltx_repl;
 pub mod ltx_replication;
 pub mod machine;
 pub mod memory;
+pub mod metrics;
 pub mod node_log;
 pub(crate) mod operator_cell;
 #[doc(hidden)]
