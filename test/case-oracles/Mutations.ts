@@ -21,6 +21,152 @@ const mutate = (name: string, ...changes: [Change, ...Change[]]): Mutation => ({
 const body = (name: string, field: string, value: unknown) =>
   mutate(name, change(["body", field], value));
 export const mutations = {
+  "crypto.ed25519": [
+    mutate(
+      "NODE alias exports the wrong public key",
+      change(["body", "publicKeys", 1], "00"),
+    ),
+    mutate(
+      "Ed25519 signature differs from RFC 8032",
+      change(["body", "signatures", 0], "00"),
+    ),
+    mutate(
+      "NODE alias cannot verify the standard signature",
+      change(["body", "verified", 1, 0], false),
+    ),
+    body("tampered message verifies", "tampered", true),
+  ],
+  "crypto.x25519": [
+    body("raw public key changes during export", "publicKey", "00"),
+    body("derived secret differs from RFC 7748", "shared", "00"),
+    body("low order point is accepted", "lowOrder", "accepted"),
+    body("low order rejection uses a generic error", "lowOrder", "Error"),
+  ],
+  "sql.nested-sync": [
+    body(
+      "callback receives an unexpected transaction argument",
+      "arities",
+      [1, 1],
+    ),
+    body("nested callback return value is discarded", "returned", null),
+    body("inner rollback leaks its row", "rows", [
+      { n: 1 },
+      { n: 2 },
+      { n: 3 },
+      { n: 4 },
+    ]),
+    body("outer rollback preserves the nested commit", "rows", [
+      { n: 1 },
+      { n: 2 },
+      { n: 4 },
+      { n: 5 },
+    ]),
+    body("inner rollback also erases the outer transaction", "rows", [
+      { n: 4 },
+    ]),
+  ],
+  "sql.invalid-utf8": [
+    body("invalid UTF-8 is dropped instead of replaced", "value", "ab"),
+    body("decoding mutates stored bytes", "bytes", "61EFBFBD62"),
+  ],
+  "http.unicode-headers": [
+    body("constructor truncates Unicode", "constructed", "?, ?"),
+    body("Response loses Unicode headers", "response", null),
+    body("fetched response is decoded as Latin-1", "fetched", "Î»"),
+  ],
+  "r2.key-identity": [
+    mutate(
+      "empty path segment aliases its sibling",
+      change(["body", "values", 1], "value-0"),
+    ),
+    mutate(
+      "leading slash aliases the unprefixed key",
+      change(["body", "values", 5], "value-0"),
+    ),
+    mutate(
+      "trailing slash aliases the unsuffixed key",
+      change(["body", "values", 2], "value-0"),
+    ),
+    body("listing drops a trailing slash object", "listed", [
+      "/case/a/b",
+      "case/a/%2F",
+      "case/a//b",
+      "case/a/b",
+      "case/λ/%",
+    ]),
+    mutate(
+      "listing returns encoded Unicode",
+      change(["body", "listed", 5], "case/%CE%BB/%25"),
+    ),
+    body("deleting a key deletes its empty-segment sibling", "sibling", null),
+  ],
+  "context.exports-fetch": [
+    mutate(
+      "default loopback loses request body",
+      change(["body", "default", "body"], ""),
+    ),
+    body("named loopback routes to default", "named", "default"),
+  ],
+  "facets.exports-class": [
+    mutate(
+      "facet fails to persist between calls",
+      change(["body", "second", "n"], 1),
+    ),
+    mutate("separate facets share state", change(["body", "isolated", "n"], 3)),
+  ],
+  "dynamic.relative-imports": [
+    body(
+      "parent-relative import resolves the wrong module",
+      "text",
+      "wrong module",
+    ),
+  ],
+  "dynamic.validation": [
+    body(
+      "WorkerCode without compatibilityDate starts",
+      "missingDate",
+      "accepted",
+    ),
+    body("a string export starts as an entrypoint", "exportValue", "accepted"),
+    body("validation rejects the valid control", "control", "rejected"),
+  ],
+  "dynamic.wasm-shape": [
+    mutate(
+      "wrapped wasm executes the wrong function",
+      change(["body", "valid", "sum"], 0),
+    ),
+    body("bare wasm bytes are accepted as a module", "raw", "accepted"),
+  ],
+  "assets.root-worker-first": [
+    body("root asset shadows the Worker", "served", "asset"),
+  ],
+  "alarms.rearm-pending-timer": [
+    body("rearmed alarm waits for the pending timer", "beforeTimer", false),
+    body("alarm is not rearmed", "fires", 1),
+  ],
+  "websocket.peer-close": [
+    body("peer close frame is marked unclean", "wasClean", false),
+    body("application close code is lost", "code", 1000),
+    body("Unicode close reason is corrupted", "reason", "peer ?"),
+  ],
+  "websocket.handler-streaming": [
+    mutate(
+      "frames are buffered until handler completion",
+      change([0, "body", "receivedAt"], [1000, 1000, 1000]),
+    ),
+    mutate(
+      "later frames are buffered despite an early first frame",
+      change([0, "body", "receivedAt"], [0, 1000, 1000]),
+    ),
+    mutate(
+      "streamed frames arrive out of order",
+      change([0, "body", "messages"], ["second", "first", "finished"]),
+    ),
+    mutate(
+      "invalid timing order masquerades as incremental delivery",
+      change([0, "body", "receivedAt"], [500, 0, 1500]),
+    ),
+  ],
   "storage.sync-committed": [
     body("sync loses an unconfirmed KV write", "retained", null),
     body("sync loses an unconfirmed deletion", "removed", "old"),

@@ -73,6 +73,14 @@
     {
       "runId": "tck-54253fb5-e471-4983-b3b3-dacd6d0c8ec9",
       "sourceRevision": "df31dd6c50e2cc77bf0cd43c115f949a0a56eabe"
+    },
+    {
+      "runId": "tck-85100d73-461c-47eb-96af-af2ca7631c6a",
+      "sourceRevision": "working-tree@6150234"
+    },
+    {
+      "runId": "tck-45a6130d-d82f-4327-9418-7559beda0a4f",
+      "sourceRevision": "working-tree@6150234"
     }
   ],
   "cases": {
@@ -2441,6 +2449,209 @@
           "timedOut": "Error",
           "after": 25
         }
+      }
+    },
+    "alarms.rearm-pending-timer": {
+      "status": 200,
+      "headers": {
+        "content-type": "application/json"
+      },
+      "body": {
+        "fires": 2,
+        "beforeTimer": true
+      }
+    },
+    "websocket.handler-streaming": [
+      {
+        "body": {
+          "messages": ["first", "second", "finished"],
+          "receivedAt": [5112.031166, 5615.298833, 6116.62]
+        }
+      }
+    ],
+    "websocket.peer-close": {
+      "status": 200,
+      "headers": {
+        "content-type": "application/json"
+      },
+      "body": {
+        "code": 4002,
+        "reason": "peer λ",
+        "wasClean": true
+      }
+    },
+    "crypto.ed25519": {
+      "status": 200,
+      "headers": {
+        "content-type": "application/json"
+      },
+      "body": {
+        "publicKeys": [
+          "d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a",
+          "d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a"
+        ],
+        "signatures": [
+          "e5564300c360ac729086e2cc806e828a84877f1eb8e5d974d873e065224901555fb8821590a33bacc61e39701cf9b46bd25bf5f0595bbe24655141438e7a100b",
+          "e5564300c360ac729086e2cc806e828a84877f1eb8e5d974d873e065224901555fb8821590a33bacc61e39701cf9b46bd25bf5f0595bbe24655141438e7a100b"
+        ],
+        "verified": [
+          [true, true],
+          [true, true]
+        ],
+        "tampered": false
+      }
+    },
+    "crypto.x25519": {
+      "status": 200,
+      "headers": {
+        "content-type": "application/json"
+      },
+      "body": {
+        "publicKey": "de9edb7d7b7dc1b4d35b61c2ece435373f8343c85b78674dadfc7e146f882b4f",
+        "shared": "4a5d9d5ba4ce2de1728e3bf480350f25e07e21c947d19e3376f09b3c1e161742",
+        "lowOrder": "OperationError"
+      }
+    },
+    "sql.nested-sync": {
+      "status": 200,
+      "headers": {
+        "content-type": "application/json"
+      },
+      "body": {
+        "arities": [0, 0],
+        "returned": 42,
+        "rows": [
+          {
+            "n": 1
+          },
+          {
+            "n": 2
+          },
+          {
+            "n": 4
+          }
+        ]
+      }
+    },
+    "sql.invalid-utf8": {
+      "status": 200,
+      "headers": {
+        "content-type": "application/json"
+      },
+      "body": {
+        "value": "a�b",
+        "bytes": "61FF62"
+      }
+    },
+    "http.unicode-headers": {
+      "status": 200,
+      "headers": {
+        "content-type": "application/json"
+      },
+      "body": {
+        "constructed": "λ🌍, 雪",
+        "response": "λ🌍, 雪",
+        "fetched": "λ🌍, 雪"
+      }
+    },
+    "r2.key-identity": {
+      "status": 200,
+      "headers": {
+        "content-type": "application/json"
+      },
+      "body": {
+        "values": [
+          "value-0",
+          "value-1",
+          "value-2",
+          "value-3",
+          "value-4",
+          "value-5"
+        ],
+        "listed": [
+          "/case/a/b",
+          "case/a/%2F",
+          "case/a//b",
+          "case/a/b",
+          "case/a/b/",
+          "case/λ/%"
+        ],
+        "deleted": true,
+        "sibling": "value-1"
+      }
+    },
+    "context.exports-fetch": {
+      "status": 200,
+      "headers": {
+        "content-type": "application/json"
+      },
+      "body": {
+        "default": {
+          "target": "default",
+          "method": "POST",
+          "body": "loopback λ"
+        },
+        "named": "gateway /loopback"
+      }
+    },
+    "facets.exports-class": {
+      "status": 200,
+      "headers": {
+        "content-type": "application/json"
+      },
+      "body": {
+        "first": {
+          "n": 1
+        },
+        "second": {
+          "n": 2
+        },
+        "isolated": {
+          "n": 1
+        }
+      }
+    },
+    "dynamic.relative-imports": {
+      "status": 200,
+      "headers": {
+        "content-type": "application/json"
+      },
+      "body": {
+        "status": 200,
+        "text": "dynamic λ"
+      }
+    },
+    "dynamic.validation": {
+      "status": 200,
+      "headers": {
+        "content-type": "application/json"
+      },
+      "body": {
+        "control": "dynamic λ",
+        "missingDate": "Error",
+        "exportValue": "Error"
+      }
+    },
+    "dynamic.wasm-shape": {
+      "status": 200,
+      "headers": {
+        "content-type": "application/json"
+      },
+      "body": {
+        "valid": {
+          "sum": 42
+        },
+        "raw": "TypeError"
+      }
+    },
+    "assets.root-worker-first": {
+      "status": 200,
+      "headers": {
+        "content-type": "application/json"
+      },
+      "body": {
+        "served": "worker",
+        "path": "/"
       }
     }
   },

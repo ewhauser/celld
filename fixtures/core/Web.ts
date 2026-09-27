@@ -1,3 +1,4 @@
+import { ed25519, x25519 } from "./Curves.js";
 import { Effect } from "effect";
 import { operation, outcome, platform, rejection } from "./Platform.js";
 import { encode } from "../shared/Codec.js";
@@ -21,6 +22,10 @@ export const web = (request: Request) =>
   Effect.gen(function* () {
     const path = new URL(request.url).pathname;
     switch (path) {
+      case "/crypto/ed25519":
+        return yield* ed25519;
+      case "/crypto/x25519":
+        return yield* x25519;
       case "/web/cache": {
         const key = new Request(
           "https://cache.test/" + new URL(request.url).searchParams.get("name"),

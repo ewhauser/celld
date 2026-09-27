@@ -80,8 +80,17 @@
   "assets": {
     "directory": "./assets",
     "binding": "ASSETS",
-    // Every fixture endpoint must reach the Worker, so the Worker runs first
-    // everywhere except the one prefix that keeps the default asset-first order.
-    "run_worker_first": ["/*", "!/asset-first/*"],
+    // Keep the root rule independent: a catch-all would mask a broken "/".
+    "run_worker_first": [
+      "/",
+      "/assets/*",
+      "/dynamic/*",
+      "/context/*",
+      "/facets/*",
+      "/wasm/*",
+      "/shadowed.txt",
+      "/asset-first/*",
+      "!/asset-first/*",
+    ],
   },
 }

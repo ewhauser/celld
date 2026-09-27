@@ -92,6 +92,32 @@ const queueRetryDelay: TestCase = {
 };
 export const serviceCases: ReadonlyArray<TestCase> = [
   bindingCase(
+    "r2.key-identity",
+    "/r2/key-identity",
+    {
+      values: [
+        "value-0",
+        "value-1",
+        "value-2",
+        "value-3",
+        "value-4",
+        "value-5",
+      ],
+      listed: [
+        "/case/a/b",
+        "case/a/%2F",
+        "case/a//b",
+        "case/a/b",
+        "case/a/b/",
+        "case/λ/%",
+      ],
+      deleted: true,
+      sibling: "value-1",
+    },
+    "r2/api/workers/workers-api-reference",
+  ),
+
+  bindingCase(
     "kv.stream-put",
     "/kv/stream-put",
     {

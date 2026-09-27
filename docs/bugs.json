@@ -71,6 +71,24 @@
       "owner": "celld-tck maintainers",
       "reviewedAt": "2026-09-26",
       "upstreamIssue": null
+    },
+    {
+      "id": "CELL-009",
+      "title": "X25519 low-order points reject with Error instead of OperationError",
+      "status": "open",
+      "report": "upstream/x25519-low-order.md",
+      "owner": "celld-tck maintainers",
+      "reviewedAt": "2026-09-26",
+      "upstreamIssue": null
+    },
+    {
+      "id": "CELL-010",
+      "title": "R2 listing omits a readable trailing-slash object",
+      "status": "open",
+      "report": "upstream/r2-trailing-slash-list.md",
+      "owner": "celld-tck maintainers",
+      "reviewedAt": "2026-09-26",
+      "upstreamIssue": null
     }
   ],
   "expectations": [
@@ -87,8 +105,8 @@
         "body": {
           "before": false,
           "after": true,
-          "text": "λ🌍",
-          "cloned": "λ🌍",
+          "text": "\u03bb\ud83c\udf0d",
+          "cloned": "\u03bb\ud83c\udf0d",
           "twice": "accepted",
           "lateClone": "TypeError"
         }
@@ -457,6 +475,58 @@
       },
       "compatibilityDate": "2026-07-30",
       "compatibilityFlags": []
+    },
+    {
+      "caseId": "crypto.x25519",
+      "bugIds": ["CELL-009"],
+      "celldVersion": "0.6.0",
+      "compatibilityDate": "2026-07-30",
+      "compatibilityFlags": [],
+      "evidenceRun": "tck-b0165822-cc98-4b73-a9f5-5ef6cb8d88fe",
+      "candidate": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json"
+        },
+        "body": {
+          "publicKey": "de9edb7d7b7dc1b4d35b61c2ece435373f8343c85b78674dadfc7e146f882b4f",
+          "shared": "4a5d9d5ba4ce2de1728e3bf480350f25e07e21c947d19e3376f09b3c1e161742",
+          "lowOrder": "Error"
+        }
+      }
+    },
+    {
+      "caseId": "r2.key-identity",
+      "bugIds": ["CELL-010"],
+      "celldVersion": "0.6.0",
+      "compatibilityDate": "2026-07-30",
+      "compatibilityFlags": [],
+      "evidenceRun": "tck-b0165822-cc98-4b73-a9f5-5ef6cb8d88fe",
+      "candidate": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json"
+        },
+        "body": {
+          "values": [
+            "value-0",
+            "value-1",
+            "value-2",
+            "value-3",
+            "value-4",
+            "value-5"
+          ],
+          "listed": [
+            "/case/a/b",
+            "case/a/%2F",
+            "case/a//b",
+            "case/a/b",
+            "case/\u03bb/%"
+          ],
+          "deleted": true,
+          "sibling": "value-1"
+        }
+      }
     }
   ]
 }

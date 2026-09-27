@@ -13,6 +13,9 @@
 | CELL-007 | Open   | [node:stream web-stream interop](upstream/node-stream-web-interop.md)                    | `node.stream-timers`                            |
 | CELL-008 | Open   | [websocket_standard_binary_type not applied](upstream/websocket-standard-binary-type.md) | `flags.enabled-defaults`                        |
 
+| CELL-009 | Open | [X25519 low-order error class](upstream/x25519-low-order.md) | `crypto.x25519` |
+| CELL-010 | Open | [R2 trailing-slash object missing from listing](upstream/r2-trailing-slash-list.md) | `r2.key-identity` |
+
 ## Run policy
 
 By default, all cases still execute. A candidate that violates the semantic contract but exactly matches a registered observation on the registered celld version and compatibility date/flags is reported as **known-bug**. This status does not fail the suite, is counted separately from passes and intentional divergences in JSON, and appears as a JUnit skipped result with bug IDs. Both observations remain in the evidence bundle. Each run saves the registry and policy in `bugs.json`.

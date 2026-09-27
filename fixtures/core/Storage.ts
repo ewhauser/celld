@@ -4,6 +4,66 @@ import { operation, platform, rejection } from "./Platform.js";
 export const storageOperation = (storage: DurableObjectStorage, path: string) =>
   Effect.gen(function* () {
     switch (path) {
+      case "/sql/invalid-utf8":
+        return yield* operation(() =>
+          storage.sql
+            .exec(
+              "SELECT CAST(x'61ff62' AS TEXT) AS value, hex(CAST(x'61ff62' AS TEXT)) AS bytes",
+            )
+            .one(),
+        );
+      case "/sql/nested-sync":
+        return yield* operation(() => {
+          storage.sql.exec("CREATE TABLE nested_sync (n INTEGER)");
+          const arities: number[] = [];
+          const returned = storage.transactionSync((...args: unknown[]) => {
+            arities.push(args.length);
+            storage.sql.exec("INSERT INTO nested_sync VALUES (1)");
+            const inner = storage.transactionSync((...innerArgs: unknown[]) => {
+              arities.push(innerArgs.length);
+              storage.sql.exec("INSERT INTO nested_sync VALUES (2)");
+              return 42;
+            });
+            try {
+              storage.transactionSync(() => {
+                storage.sql.exec("INSERT INTO nested_sync VALUES (3)");
+                // oxlint-disable-next-line effect/throw-in-effect-gen -- Synchronous rollback probe, caught by the enclosing transaction.
+                throw new Error("rollback inner");
+              });
+            } catch (error) {
+              if (
+                !(error instanceof Error) ||
+                error.message !== "rollback inner"
+              )
+                // oxlint-disable-next-line effect/throw-in-effect-gen -- Preserve unexpected synchronous transaction failures at the operation boundary.
+                throw error;
+            }
+            storage.sql.exec("INSERT INTO nested_sync VALUES (4)");
+            return inner;
+          });
+          try {
+            storage.transactionSync(() => {
+              storage.transactionSync(() =>
+                storage.sql
+                  .exec("INSERT INTO nested_sync VALUES (5)")
+                  .toArray(),
+              );
+              // oxlint-disable-next-line effect/throw-in-effect-gen -- Outer rollback must undo a committed inner savepoint.
+              throw new Error("rollback outer");
+            });
+          } catch (error) {
+            if (!(error instanceof Error) || error.message !== "rollback outer")
+              // oxlint-disable-next-line effect/throw-in-effect-gen -- Preserve unexpected synchronous transaction failures at the operation boundary.
+              throw error;
+          }
+          return {
+            arities,
+            returned,
+            rows: storage.sql
+              .exec("SELECT n FROM nested_sync ORDER BY n")
+              .toArray(),
+          };
+        });
       case "/storage/sync-committed": {
         yield* platform(() => storage.put("removed", "old"));
         yield* platform(() => storage.sync());

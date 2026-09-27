@@ -125,6 +125,46 @@ export const services = (request: Request, env: Env, name: string) =>
   Effect.gen(function* () {
     const url = new URL(request.url);
     switch (url.pathname) {
+      case "/r2/key-identity": {
+        const suffixes = ["a/b", "a//b", "a/b/", "λ/%", "a/%2F"];
+        const keys = [
+          ...suffixes.map((key) => `${name}/${key}`),
+          `/${name}/a/b`,
+        ];
+        return yield* Effect.gen(function* () {
+          yield* Effect.forEach(keys, (key, i) =>
+            platform(() => env.BUCKET.put(key, `value-${i}`)),
+          );
+          const values = yield* Effect.forEach(keys, (key) =>
+            platform(() => env.BUCKET.get(key)).pipe(
+              Effect.flatMap((object) =>
+                object ? platform(() => object.text()) : Effect.succeed(null),
+              ),
+            ),
+          );
+          const lists = yield* Effect.forEach(
+            [name + "/", "/" + name + "/"],
+            (prefix) => platform(() => env.BUCKET.list({ prefix })),
+          );
+          const listed = lists
+            .flatMap((list) =>
+              list.objects.map((object) => object.key.replace(name, "case")),
+            )
+            .sort();
+          yield* platform(() => env.BUCKET.delete(keys[0]!));
+          const sibling = yield* platform(() => env.BUCKET.get(keys[1]!));
+          return {
+            values,
+            listed,
+            deleted: (yield* platform(() => env.BUCKET.get(keys[0]!))) === null,
+            sibling: sibling ? yield* platform(() => sibling.text()) : null,
+          };
+        }).pipe(
+          Effect.ensuring(
+            platform(() => env.BUCKET.delete(keys)).pipe(Effect.orDie),
+          ),
+        );
+      }
       case "/services/rpc":
         return { greeting: yield* platform(() => env.SERVICE.greet("λ")) };
       case "/kv/round-trip": {

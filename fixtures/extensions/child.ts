@@ -4,6 +4,7 @@ import { platform } from "../shared/Platform.js";
 
 interface ChildEnv {
   readonly TOKEN?: string;
+  readonly WASM?: WebAssembly.Module;
   readonly COUNT?: number;
   readonly UPSTREAM?: Fetcher;
 }
@@ -104,6 +105,16 @@ export default {
     return Effect.runPromise(
       Effect.gen(function* () {
         switch (new URL(request.url).pathname) {
+          case "/wasm": {
+            const instance = yield* platform(() =>
+              WebAssembly.instantiate(env.WASM!),
+            );
+            const add = instance.exports.add as (
+              a: number,
+              b: number,
+            ) => number;
+            return Response.json({ sum: add(19, 23) });
+          }
           case "/props":
             return Response.json({ props: ctx.props ?? null });
           case "/env":

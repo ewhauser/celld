@@ -12,7 +12,8 @@
         "http.encoding",
         "http.abort",
         "http.redirect",
-        "http.fetch-abort"
+        "http.fetch-abort",
+        "http.unicode-headers"
       ]
     },
     {
@@ -39,7 +40,9 @@
         "sql.transaction-commit",
         "sql.mixed-rollback",
         "sql.consumed-write-cursor",
-        "sql.open-read-cursor"
+        "sql.open-read-cursor",
+        "sql.nested-sync",
+        "sql.invalid-utf8"
       ]
     },
     {
@@ -54,7 +57,9 @@
         "crypto.ecdsa-p256",
         "crypto.key-derivation",
         "crypto.key-export",
-        "crypto.invalid-input"
+        "crypto.invalid-input",
+        "crypto.ed25519",
+        "crypto.x25519"
       ]
     },
     {
@@ -84,7 +89,12 @@
     },
     {
       "family": "alarms",
-      "cases": ["alarms.set-replace-delete", "alarms.fire", "alarms.retry"]
+      "cases": [
+        "alarms.set-replace-delete",
+        "alarms.fire",
+        "alarms.retry",
+        "alarms.rearm-pending-timer"
+      ]
     },
     {
       "family": "streams",
@@ -102,7 +112,9 @@
       "cases": [
         "websocket.protocol-attachment",
         "websocket.outbound-close",
-        "websocket.concurrent-sockets"
+        "websocket.concurrent-sockets",
+        "websocket.handler-streaming",
+        "websocket.peer-close"
       ]
     },
     {
@@ -129,7 +141,8 @@
         "r2.metadata-range-delete",
         "r2.conditional-write",
         "r2.multipart",
-        "r2.list-options"
+        "r2.list-options",
+        "r2.key-identity"
       ]
     },
     {
@@ -167,7 +180,8 @@
         "assets.binding",
         "assets.html-routing",
         "assets.redirects",
-        "assets.worker-first"
+        "assets.worker-first",
+        "assets.root-worker-first"
       ]
     },
     {
@@ -177,7 +191,10 @@
         "dynamic.props",
         "dynamic.bindings",
         "dynamic.outbound",
-        "dynamic.limits"
+        "dynamic.limits",
+        "dynamic.relative-imports",
+        "dynamic.validation",
+        "dynamic.wasm-shape"
       ]
     },
     {
@@ -185,12 +202,13 @@
       "cases": [
         "facets.isolation",
         "facets.transaction",
-        "facets.outbound-transaction"
+        "facets.outbound-transaction",
+        "facets.exports-class"
       ]
     },
     {
       "family": "context",
-      "cases": ["context.wait-until"]
+      "cases": ["context.wait-until", "context.exports-fetch"]
     },
     {
       "family": "repro",

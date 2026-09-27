@@ -1,8 +1,9 @@
 import { WorkerEntrypoint } from "cloudflare:workers";
 import { Effect } from "effect";
 import core, { Probe as BaseProbe } from "../core/worker.js";
-import { platform } from "../core/Platform.js";
+import { platform, rejection } from "../core/Platform.js";
 import wasm from "./add.wasm";
+export { Counter as FacetCounter } from "./child.js";
 export { Service, TestWorkflow } from "../core/worker.js";
 declare const __DYNAMIC_CODE__: string;
 const code =
@@ -75,6 +76,22 @@ export class Probe extends BaseProbe {
       Effect.gen({ self: this }, function* () {
         const env = this.env as ExtensionEnv;
         const url = new URL(request.url);
+        if (url.pathname === "/facets/exports") {
+          const exports = this.ctx.exports as unknown as {
+            FacetCounter: DurableObjectClass;
+          };
+          const read = (name: string) =>
+            platform(() =>
+              this.ctx.facets
+                .get(name, () => ({ class: exports.FacetCounter }))
+                .fetch("https://facet.test"),
+            ).pipe(Effect.flatMap((r) => platform(() => r.json())));
+          return Response.json({
+            first: yield* read("export-a"),
+            second: yield* read("export-a"),
+            isolated: yield* read("export-b"),
+          });
+        }
         const worker = env.LOADER.get("counter-v1", code());
         const facet = (name: string, className: string) =>
           this.ctx.facets.get(name, () => ({
@@ -151,11 +168,112 @@ export class Probe extends BaseProbe {
 }
 export default {
   ...core,
-  fetch(request: Request, env: ExtensionEnv) {
+  fetch(request: Request, env: ExtensionEnv, ctx: ExecutionContext) {
     return Effect.runPromise(
       Effect.gen(function* () {
         const url = new URL(request.url);
         switch (url.pathname) {
+          case "/context/exports-target":
+            return Response.json({
+              target: "default",
+              method: request.method,
+              body: yield* platform(() => request.text()),
+            });
+          case "/context/exports-fetch": {
+            const exports = ctx.exports as unknown as {
+              default: Fetcher;
+              Gateway: Fetcher;
+            };
+            const direct = yield* platform(() =>
+              exports.default.fetch(
+                "https://fixture.test/context/exports-target",
+                { method: "POST", body: "loopback λ" },
+              ),
+            );
+            const gateway = yield* platform(() =>
+              exports.Gateway.fetch("https://fixture.test/loopback"),
+            );
+            return Response.json({
+              default: yield* platform(() => direct.json()),
+              named: yield* platform(() => gateway.text()),
+            });
+          }
+          case "/dynamic/relative-imports": {
+            const loaded = env.LOADER.get(
+              "relative-v1",
+              code({
+                mainModule: "src/main.js",
+                modules: {
+                  "src/main.js": 'export {default} from "./nested/relay.js";',
+                  "src/nested/relay.js":
+                    'export {default} from "../../base.js";',
+                  "base.js": __DYNAMIC_CODE__,
+                },
+              }),
+            );
+            const response = yield* platform(() =>
+              loaded.getEntrypoint().fetch("https://fixture.test"),
+            );
+            return Response.json({
+              status: response.status,
+              text: yield* platform(() => response.text()),
+            });
+          }
+          case "/dynamic/validation": {
+            const invoke = (name: string, extra: Record<string, unknown>) =>
+              platform(() =>
+                env.LOADER.get(name, code(extra))
+                  .getEntrypoint()
+                  .fetch("https://fixture.test"),
+              );
+            const control = yield* invoke("validation-control", {});
+            const missingDate = yield* rejection(
+              invoke("validation-no-date", { compatibilityDate: undefined }),
+            );
+            const exportValue = yield* rejection(
+              invoke("validation-export-value", {
+                modules: {
+                  "worker.js":
+                    __DYNAMIC_CODE__ +
+                    '\nexport const notAnEntrypoint = "invalid";',
+                },
+              }),
+            );
+            return Response.json({
+              control: yield* platform(() => control.text()),
+              missingDate,
+              exportValue,
+            });
+          }
+          case "/dynamic/wasm-shape": {
+            // The same add module as the statically imported fixture.
+            const bytes = Uint8Array.from([
+              0, 97, 115, 109, 1, 0, 0, 0, 1, 7, 1, 96, 2, 127, 127, 1, 127, 3,
+              2, 1, 0, 7, 7, 1, 3, 97, 100, 100, 0, 0, 10, 9, 1, 7, 0, 32, 0,
+              32, 1, 106, 11,
+            ]).buffer;
+            const modules = {
+              "worker.js":
+                'import base from "./base.js"; import wasm from "./add.wasm"; export default {fetch(request, env, ctx) { return base.fetch(request, {WASM:wasm}, ctx); }};',
+              "base.js": __DYNAMIC_CODE__,
+            };
+            const invoke = (name: string, module: unknown) =>
+              platform(() =>
+                env.LOADER.get(
+                  name,
+                  code({ modules: { ...modules, "add.wasm": module } }),
+                )
+                  .getEntrypoint()
+                  .fetch("https://fixture.test/wasm"),
+              );
+            const valid = yield* invoke("wasm-valid", { wasm: bytes });
+            return Response.json({
+              valid: yield* platform(() => valid.json()),
+              raw: yield* rejection(invoke("wasm-raw", bytes)),
+            });
+          }
+          case "/":
+            return Response.json({ served: "worker", path: "/" });
           case "/wasm/add": {
             const instance = yield* platform(() =>
               WebAssembly.instantiate(wasm),

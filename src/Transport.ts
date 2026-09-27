@@ -11,10 +11,10 @@ export const transportLayer = Layer.effect(
     const artifacts = yield* Artifacts;
     let sequence = 0;
     return {
-      websocket: (target, path) => {
+      websocket: (target, path, mode) => {
         const url = new URL(path, target.baseUrl);
         url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
-        return converse(url.href, artifacts.json);
+        return converse(url.href, artifacts.json, mode);
       },
       request: (target, spec) =>
         Effect.suspend(() => {

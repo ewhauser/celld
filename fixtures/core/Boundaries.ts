@@ -65,6 +65,30 @@ export const boundaries = (request: Request, env: Env, name: string) =>
   Effect.gen(function* () {
     const url = new URL(request.url);
     switch (url.pathname) {
+      case "/web/unicode-headers": {
+        const headers = new Headers({ "x-unicode": "λ🌍" });
+        headers.append("x-unicode", "雪");
+        const response = new Response("ok", { headers });
+        const fetched = yield* platform(() =>
+          env.PROBE.getByName(name).fetch(
+            "https://fixture.test/headers/unicode",
+          ),
+        );
+        yield* platform(() => fetched.text());
+        return {
+          constructed: headers.get("x-unicode"),
+          response: response.headers.get("x-unicode"),
+          fetched: fetched.headers.get("x-unicode"),
+        };
+      }
+      case "/websocket/peer-close": {
+        const socket = yield* openSocket(
+          env.PROBE.getByName(name),
+          "/websocket",
+        );
+        socket.close(4002, "peer λ");
+        return { sent: true };
+      }
       case "/kv/expiration": {
         const ttl = 600;
         const before = Math.floor(Date.now() / 1000);

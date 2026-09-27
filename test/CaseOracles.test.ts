@@ -170,6 +170,14 @@ for (const test of cases) {
 }
 
 const knownBugMutations: Record<string, Mutation> = {
+  "crypto.x25519": {
+    name: "derived key changes alongside the error class bug",
+    changes: [{ path: ["body", "shared"], value: "00" }],
+  },
+  "r2.key-identity": {
+    name: "empty segment aliases another key alongside the listing bug",
+    changes: [{ path: ["body", "values", 1], value: "value-0" }],
+  },
   "http.body-consumption": {
     name: "consumed text is corrupted in addition to the known bug",
     changes: [{ path: ["body", "text"], value: "corrupt" }],

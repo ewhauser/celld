@@ -4,6 +4,7 @@ import { TckError, toTckError } from "./Domain.js";
 export const converse = (
   url: string,
   record: (name: string, value: unknown) => Effect.Effect<void, TckError>,
+  mode?: "stream",
 ) =>
   Effect.scoped(
     Effect.gen(function* () {
@@ -12,12 +13,13 @@ export const converse = (
         (socket) => Effect.sync(() => socket.close()),
       );
       const events: unknown[] = [];
+      const receivedAt: number[] = [];
       yield* Effect.callback<void, TckError>((resume) => {
         socket.binaryType = "arraybuffer";
         let step = 0;
         socket.onopen = () => {
           events.push({ type: "open" });
-          socket.send("hello λ");
+          socket.send(mode === "stream" ? "stream" : "hello λ");
         };
         socket.onmessage = (event) => {
           events.push({
@@ -27,6 +29,11 @@ export const converse = (
                 ? [...new Uint8Array(event.data)]
                 : event.data,
           });
+          if (mode === "stream") {
+            receivedAt.push(performance.now());
+            if (receivedAt.length === 3) socket.send("close");
+            return;
+          }
           if (step++ === 0) socket.send(new Uint8Array([0, 128, 255]));
           else if (step === 2) socket.send("attachment");
           else socket.send("close");
@@ -58,11 +65,31 @@ export const converse = (
       }).pipe(
         Effect.timeout("10 seconds"),
         Effect.ensuring(
-          record(`websocket-${crypto.randomUUID()}.json`, { url, events }).pipe(
-            Effect.orDie,
-          ),
+          record(`websocket-${crypto.randomUUID()}.json`, {
+            url,
+            events,
+            receivedAt,
+          }).pipe(Effect.orDie),
         ),
       );
+      // Keep raw timings; the case oracle owns spacing expectations.
+      if (mode === "stream")
+        return [
+          {
+            body: {
+              messages: events
+                .filter(
+                  (e): e is { type: "message"; value: unknown } =>
+                    typeof e === "object" &&
+                    e !== null &&
+                    "type" in e &&
+                    e.type === "message",
+                )
+                .map((e) => e.value),
+              receivedAt,
+            },
+          },
+        ];
       return events;
     }),
   ).pipe(Effect.mapError(toTckError("websocket")));

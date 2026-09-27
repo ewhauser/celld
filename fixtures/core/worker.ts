@@ -63,6 +63,30 @@ export class Probe extends DurableObject<Env> {
   alarm(info: AlarmInvocationInfo): Promise<void> {
     return Effect.runPromise(
       Effect.gen({ self: this }, function* () {
+        if (this.ctx.storage.kv.get("rearm")) {
+          const fires =
+            (this.ctx.storage.kv.get<number>("rearm-fires") ?? 0) + 1;
+          this.ctx.storage.kv.put("rearm-fires", fires);
+          if (fires === 1) {
+            yield* platform(() => this.ctx.storage.setAlarm(Date.now() + 100));
+            this.ctx.waitUntil(
+              Effect.runPromise(
+                Effect.sleep("5 seconds").pipe(
+                  Effect.andThen(
+                    Effect.sync(() =>
+                      this.ctx.storage.kv.put("timer-finished", true),
+                    ),
+                  ),
+                ),
+              ),
+            );
+          } else
+            this.ctx.storage.kv.put(
+              "before-timer",
+              !this.ctx.storage.kv.get("timer-finished"),
+            );
+          return;
+        }
         const count =
           (yield* platform(() => this.ctx.storage.get<number>("fires"))) ?? 0;
         yield* platform(() =>
@@ -82,16 +106,32 @@ export class Probe extends DurableObject<Env> {
   }
   webSocketMessage(socket: WebSocket, message: string | ArrayBuffer) {
     return Effect.runPromise(
-      Effect.sync(() => {
-        if (message === "attachment")
+      Effect.gen({ self: this }, function* () {
+        if (message === "stream") {
+          socket.send("first");
+          yield* Effect.sleep("500 millis");
+          socket.send("second");
+          yield* Effect.sleep("500 millis");
+          socket.send("finished");
+        } else if (message === "attachment")
           socket.send(JSON.stringify(socket.deserializeAttachment()));
         else if (message === "close") socket.close(1000, "done");
         else socket.send(message);
       }),
     );
   }
-  webSocketClose(socket: WebSocket, code: number, reason: string) {
-    return Effect.runPromise(Effect.sync(() => socket.close(code, reason)));
+  webSocketClose(
+    socket: WebSocket,
+    code: number,
+    reason: string,
+    wasClean: boolean,
+  ) {
+    return Effect.runPromise(
+      Effect.sync(() => {
+        this.ctx.storage.kv.put("last-close", { code, reason, wasClean });
+        socket.close(code, reason);
+      }),
+    );
   }
   fetch(request: Request): Promise<Response> {
     return Effect.runPromise(this.handle(request));
@@ -163,6 +203,19 @@ export class Probe extends DurableObject<Env> {
             ),
           );
         }
+        case "/headers/unicode":
+          return new Response("ok", { headers: { "x-unicode": "λ🌍, 雪" } });
+        case "/alarms/rearm-start":
+          storage.kv.put("rearm", true);
+          yield* platform(() => storage.setAlarm(Date.now() + 100));
+          return Response.json({ scheduled: true });
+        case "/alarms/rearm-state":
+          return Response.json({
+            fires: storage.kv.get("rearm-fires") ?? 0,
+            beforeTimer: storage.kv.get("before-timer") ?? null,
+          });
+        case "/websocket/close-state":
+          return Response.json(storage.kv.get("last-close") ?? null);
         case "/alarms/manage": {
           const first = Date.now() + 3600000;
           yield* platform(() => storage.setAlarm(first));

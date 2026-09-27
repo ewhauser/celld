@@ -41,6 +41,7 @@ export class Transport extends Context.Service<
     readonly websocket: (
       target: Target,
       path: string,
+      mode?: "stream",
     ) => Effect.Effect<unknown, TckError>;
     readonly request: (
       target: Target,

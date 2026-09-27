@@ -99,6 +99,123 @@ const alarm = (retry: boolean): TestCase => ({
   contract: "https://developers.cloudflare.com/durable-objects/api/alarms/",
 });
 export const coreCases: ReadonlyArray<TestCase> = [
+  {
+    ...define(
+      "alarms.rearm-pending-timer",
+      (target, input) =>
+        Effect.gen(function* () {
+          yield* equal(
+            yield* call(target, input, "/alarms/rearm-start"),
+            response({ scheduled: true }),
+          );
+          return yield* poll(
+            call(target, input, "/alarms/rearm-state"),
+            (value) => (value.body as { fires: number }).fires >= 2,
+          );
+        }),
+      () => response({ fires: 2, beforeTimer: true }),
+    ),
+    contract: "https://developers.cloudflare.com/durable-objects/api/alarms/",
+  },
+  {
+    id: "websocket.handler-streaming",
+    run: (target, input) =>
+      Effect.gen(function* () {
+        return yield* (yield* Transport).websocket(
+          target,
+          `/websocket?name=${input.namespace}`,
+          "stream",
+        );
+      }),
+    check: (value) =>
+      Effect.gen(function* () {
+        const samples = yield* decodeAs(
+          Schema.Array(
+            Schema.Struct({
+              body: Schema.Struct({
+                messages: Schema.Array(Schema.String),
+                receivedAt: Schema.Array(Schema.Number),
+              }),
+            }),
+          ),
+          "assertion",
+        )(value);
+        yield* equal(samples.length, 1);
+        const { messages, receivedAt } = samples[0]!.body;
+        yield* equal(messages, ["first", "second", "finished"]);
+        yield* equal(receivedAt.length, 3);
+        // The handler waits 500 ms twice. Allow scheduling margin, but reject
+        // delivery in a batch after it returns. Use one client's monotonic clock.
+        yield* equal(receivedAt[2]! - receivedAt[0]! >= 750, true);
+        yield* equal(receivedAt[2]! - receivedAt[1]! >= 250, true);
+        yield* equal(receivedAt[1]! >= receivedAt[0]!, true);
+      }),
+    compare: () => Effect.void,
+    contract: webDoc + "websockets/",
+  },
+  {
+    ...define(
+      "websocket.peer-close",
+      (target, input) =>
+        Effect.gen(function* () {
+          yield* equal(
+            yield* call(target, input, "/websocket/peer-close"),
+            response({ sent: true }),
+          );
+          return yield* poll(
+            call(target, input, "/websocket/close-state"),
+            (value) => value.body !== null,
+          );
+        }),
+      () => response({ code: 4002, reason: "peer λ", wasClean: true }),
+    ),
+    contract: webDoc + "websockets/",
+  },
+  endpoint(
+    "crypto.ed25519",
+    "/crypto/ed25519",
+    {
+      publicKeys: Array(2).fill(
+        "d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a",
+      ),
+      signatures: Array(2).fill(
+        "e5564300c360ac729086e2cc806e828a84877f1eb8e5d974d873e065224901555fb8821590a33bacc61e39701cf9b46bd25bf5f0595bbe24655141438e7a100b",
+      ),
+      verified: [
+        [true, true],
+        [true, true],
+      ],
+      tampered: false,
+    },
+    cryptoDoc,
+  ),
+  endpoint(
+    "crypto.x25519",
+    "/crypto/x25519",
+    {
+      publicKey:
+        "de9edb7d7b7dc1b4d35b61c2ece435373f8343c85b78674dadfc7e146f882b4f",
+      shared:
+        "4a5d9d5ba4ce2de1728e3bf480350f25e07e21c947d19e3376f09b3c1e161742",
+      lowOrder: "OperationError",
+    },
+    cryptoDoc,
+  ),
+  ep("sql.nested-sync", "/sql/nested-sync", {
+    arities: [0, 0],
+    returned: 42,
+    rows: [{ n: 1 }, { n: 2 }, { n: 4 }],
+  }),
+  ep("sql.invalid-utf8", "/sql/invalid-utf8", {
+    value: "a�b",
+    bytes: "61FF62",
+  }),
+  ep("http.unicode-headers", "/web/unicode-headers", {
+    constructed: "λ🌍, 雪",
+    response: "λ🌍, 雪",
+    fetched: "λ🌍, 雪",
+  }),
+
   ...initialCases,
   ep("storage.sync-committed", "/storage/sync-committed", {
     retained: "durable λ",

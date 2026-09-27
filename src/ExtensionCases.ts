@@ -13,6 +13,51 @@ const direct = (target: Target, path: string) =>
   });
 export const extensionCases = [
   endpoint(
+    "context.exports-fetch",
+    "/context/exports-fetch",
+    {
+      default: { target: "default", method: "POST", body: "loopback λ" },
+      named: "gateway /loopback",
+    },
+    "https://developers.cloudflare.com/workers/runtime-apis/context/",
+  ),
+  endpoint(
+    "facets.exports-class",
+    "/facets/exports",
+    { first: { n: 1 }, second: { n: 2 }, isolated: { n: 1 } },
+    "https://celld.dev/docs/cloudflare-compat/#durable-object-facets",
+  ),
+  endpoint(
+    "dynamic.relative-imports",
+    "/dynamic/relative-imports",
+    { status: 200, text: "dynamic λ" },
+    `${loaderDoc}api-reference/`,
+  ),
+  endpoint(
+    "dynamic.validation",
+    "/dynamic/validation",
+    {
+      control: "dynamic λ",
+      missingDate: "Error",
+      exportValue: "Error",
+    },
+    `${loaderDoc}api-reference/`,
+  ),
+  endpoint(
+    "dynamic.wasm-shape",
+    "/dynamic/wasm-shape",
+    { valid: { sum: 42 }, raw: "TypeError" },
+    `${loaderDoc}api-reference/`,
+  ),
+  {
+    ...define(
+      "assets.root-worker-first",
+      (target) => direct(target, "/"),
+      () => response({ served: "worker", path: "/" }),
+    ),
+    contract: `${assetDoc}binding/#run_worker_first`,
+  },
+  endpoint(
     "wasm.module",
     "/wasm/add",
     { positive: 42, negative: -5, overflow: -2147483648 },
