@@ -50,8 +50,6 @@ mod recovery_progress;
 #[cfg(test)]
 mod double_loss_tests;
 #[cfg(test)]
-mod fleet_state_tests;
-#[cfg(test)]
 mod incarnation_tests;
 #[cfg(test)]
 mod probe_tests;
@@ -1353,7 +1351,6 @@ pub struct FollowerStore {
     /// floor the 2026-08-25 gate decomposition landed on. A restart
     /// starts empty and conservatively re-syncs each chain once.
     synced_namespaces: Mutex<std::collections::BTreeSet<String>>,
-    disk_removal_gate: tokio::sync::RwLock<bool>,
     /// This disk's incarnation once read or created; see `incarnation`.
     incarnation: Mutex<Option<String>>,
     #[cfg(celld_internal_tests)]
@@ -1373,7 +1370,6 @@ impl FollowerStore {
             logs: Mutex::new(HashMap::new()),
             guards: Mutex::new(HashMap::new()),
             synced_namespaces: Mutex::new(std::collections::BTreeSet::new()),
-            disk_removal_gate: tokio::sync::RwLock::new(false),
             incarnation: Mutex::new(None),
             #[cfg(celld_internal_tests)]
             directory_sync_for_test: Arc::new(move |path| directory_filesystem.sync_all(path)),
@@ -2360,58 +2356,6 @@ impl FollowerStore {
         }
     }
 
-    /// Return the range and its entries while append, seal, adoption, and GC
-    /// cannot change the fragment. The range and the data therefore describe
-    /// one follower state rather than two observations around a concurrent write.
-    pub async fn tail(&self, req: &TailReq) -> anyhow::Result<TailResp> {
-        let guard = self.guard(&req.leader);
-        let _held = guard.lock().await;
-        self.read_tail(req)
-    }
-
-    /// Strict inventory for disk removal; ordinary GC's best-effort directory
-    /// traversal cannot be used as positive durability evidence.
-    pub fn disk_removal_obligations(&self) -> anyhow::Result<Vec<crate::disk_removal::Obligation>> {
-        let nodes = match self.filesystem.read_dir(&self.root) {
-            Ok(nodes) => nodes,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
-            Err(error) => return Err(error.into()),
-        };
-        let mut obligations = Vec::new();
-        for node in nodes.into_iter().filter(|e| e.is_dir) {
-            let name = node
-                .file_name
-                .to_str()
-                .ok_or_else(|| anyhow!("non-UTF8 follower node"))?;
-            let entries = self.filesystem.read_dir(&node.path)?;
-            // Legacy flat fragments cannot be silently treated as generation-bound.
-            if entries.iter().any(|e| e.file_name == "state.json") {
-                anyhow::bail!("legacy unversioned follower fragment requires migration");
-            }
-            for generation in entries.into_iter().filter(|e| e.is_dir) {
-                let generation_name = generation
-                    .file_name
-                    .to_str()
-                    .ok_or_else(|| anyhow!("non-UTF8 follower generation"))?;
-                // Force directory-read errors to remain blockers, including for
-                // empty fragments, before load consults its in-memory cache.
-                self.filesystem.read_dir(&generation.path)?;
-                let _: FollowerState = serde_json::from_slice(
-                    &self.filesystem.read(&generation.path.join("state.json"))?,
-                )?;
-                let session = format!("{name}/{generation_name}");
-                let state = self.load(&session);
-                if state.fragment_epoch > 0 {
-                    obligations.push(crate::disk_removal::Obligation {
-                        session,
-                        epoch: state.fragment_epoch,
-                    });
-                }
-            }
-        }
-        Ok(obligations)
-    }
-
     /// The peer tail endpoint: `tail` behind the addressee check that
     /// `seal` applies.
     pub async fn checked_tail(&self, req: &TailReq) -> anyhow::Result<TailResp> {
@@ -3051,19 +2995,12 @@ fn settle_probe(
     // a shipped batch would — an idle ensemble must not keep a 0.2.x
     // member recruit-eligible just because no writes arrive.
     match outcome {
-        AppendSend::Answered(response) => {
+        AppendSend::Answered(_) => {
             health
                 .lock()
                 .unwrap()
                 .append_completed(node, done, done.saturating_sub(started));
             suspect_self.store(false, Ordering::SeqCst);
-            if response.quiesced {
-                shipper.degrade("follower closed append admission");
-                health
-                    .lock()
-                    .unwrap()
-                    .append_incapable(&shipper.policy, node, done);
-            }
         }
         AppendSend::Incapable(error) => {
             warn!(
@@ -4181,53 +4118,12 @@ impl FleetShipper {
 
 // ── Recovery and the takeover interlock ─────────────────────────────────────
 
-/// One dead-leader sweep pass, as `/state.node_log.fleet` reports it.
-#[derive(Clone)]
-struct FleetObservation {
-    /// Wall-clock milliseconds at the start of the pass: every record was
-    /// read at or after it, and lease expiry was judged at it.
-    observed_ms: u64,
-    /// False when the listing or any record read failed.
-    complete: bool,
-    view: log_tier::FleetLogView,
-}
-
-impl FleetObservation {
-    fn to_json(&self) -> serde_json::Value {
-        let unrecovered: Vec<_> = self
-            .view
-            .unrecovered
-            .iter()
-            .map(|log| {
-                serde_json::json!({
-                    "session": log.session,
-                    "state": log_state_name(log.state),
-                    "lease_expires_ms": log.lease_expires_ms,
-                    "claimant": log.claimant,
-                })
-            })
-            .collect();
-        serde_json::json!({
-            "observed_ms": self.observed_ms,
-            "complete": self.complete,
-            "unrecovered": unrecovered,
-            "obligations": self.view.obligations,
-        })
-    }
-}
-
 fn log_state_name(state: LogState) -> &'static str {
     match state {
         LogState::Open => "open",
         LogState::Recovering => "recovering",
         LogState::Sealed => "sealed",
     }
-}
-
-/// `/state.node_log`: the manager's view, or `null` on a process without
-/// a node-log manager (no bucket or no runtime).
-pub fn state_json(manager: Option<&NodeLogManager>) -> serde_json::Value {
-    manager.map_or(serde_json::Value::Null, NodeLogManager::state_json)
 }
 
 /// Everything node-log recovery needs from the node: the bucket, the signed
@@ -4324,13 +4220,6 @@ pub struct NodeLogManager {
     /// stores weak values, so observing many historical sessions does not
     /// retain one allocation per session for the process lifetime.
     recovery_locks: Mutex<BTreeMap<String, std::sync::Weak<tokio::sync::Mutex<()>>>>,
-    /// The durability posture the owner installed: `true` for fleet. Unset
-    /// until the durability owner exists.
-    fleet_posture: std::sync::OnceLock<bool>,
-    /// What the last dead-leader sweep pass saw, for `/state`. The sweep
-    /// already reads every lease record; keeping its verdicts costs no
-    /// bucket request, and `/state` never makes one.
-    fleet_observation: Mutex<Option<FleetObservation>>,
     /// Sessions for which this process won the Open -> Recovering CAS. A
     /// failed elected pass can retry immediately; other processes wait for
     /// the bounded claim before they compete to replace it.
@@ -4423,7 +4312,6 @@ impl DurabilityOwner {
         registration: Option<crate::ltx_repl::DurabilityRegistration>,
     ) -> Self {
         let follower_stop = crate::ltx_repl::StopToken::new();
-        let _ = manager.fleet_posture.set(fleet);
         let node_log_stop = manager.task_stop.clone();
         let child_tasks = manager.child_tasks.clone();
         Self {
@@ -4807,8 +4695,6 @@ impl NodeLogManager {
             recovery_gather_peak_bytes: std::sync::atomic::AtomicU64::new(0),
             predecessors_clean: std::sync::atomic::AtomicBool::new(false),
             recovery_locks: Mutex::new(BTreeMap::new()),
-            fleet_posture: std::sync::OnceLock::new(),
-            fleet_observation: Mutex::new(None),
             gc_confirmed_empty: Mutex::new(std::collections::HashSet::new()),
             epoch_gc_due: Mutex::new(BTreeMap::new()),
             declared_bundle_losses: Mutex::new(BTreeSet::new()),
@@ -5853,6 +5739,18 @@ impl NodeLogManager {
             return;
         };
         let may_have_fleet_acks = current.may_have_fleet_acks;
+        if current.epoch == shipper.epoch
+            && log_tier::may_reconfigure(
+                Self::shipper_batch_in_flight(&shipper),
+                self.ltx.all_fragment_rows_tiered(),
+            )
+        {
+            let mut covered = current.clone();
+            covered.bucket_complete = true;
+            if let Err(error) = transition.write(Some(covered)).await {
+                tracing::warn!(%error, "could not publish bucket coverage");
+            }
+        }
         // "Tiered" includes bundle coverage, but a sealed
         // record tells every future recovery there is nothing to gather —
         // so the seal requires every acked row as a per-cell object. The
@@ -6699,30 +6597,6 @@ impl NodeLogManager {
     /// onto the CAS like every other recovery race.
     pub async fn sweep_dead_leaders(&self) -> anyhow::Result<()> {
         let now = crate::ownership_store::now_ms();
-        let mut observed = Vec::new();
-        let mut complete = true;
-        // Every exit publishes what this pass saw. A pass that could not
-        // list or read every record says so, and its lists are then only
-        // the part it read.
-        let result = self.sweep_pass(now, &mut observed, &mut complete).await;
-        if result.is_err() {
-            complete = false;
-        }
-        let view = log_tier::fleet_log_view(&observed, now);
-        *self.fleet_observation.lock().unwrap() = Some(FleetObservation {
-            observed_ms: now,
-            complete,
-            view,
-        });
-        result
-    }
-
-    async fn sweep_pass(
-        &self,
-        now: u64,
-        observed: &mut Vec<log_tier::ObservedLog>,
-        complete: &mut bool,
-    ) -> anyhow::Result<()> {
         for meta in self.bucket.list("nodes/").await? {
             let Some(node) = meta
                 .location
@@ -6735,40 +6609,20 @@ impl NodeLogManager {
                 continue;
             };
             if node == self.node {
-                // This process's own log is the one the fleet view cannot
-                // read from the bucket without a request: the published
-                // copy is the in-memory one. A live leader's ensemble is an
-                // obligation like any other.
-                if let Some(own) = self.ownership.own_log() {
-                    match log_from_wire(&own) {
-                        Ok(record) => observed.push(log_tier::ObservedLog {
-                            session: self.session.clone(),
-                            lease_expires_ms: u64::MAX,
-                            record,
-                        }),
-                        Err(_) => *complete = false,
-                    }
-                }
                 continue;
             }
             // One unreadable record must not end the sweep for every node
-            // sorted after it, but the fleet view is incomplete without it.
+            // sorted after it.
             let folded = match read_record(&self.bucket, &node).await {
                 Ok(Some(folded)) => folded,
                 Ok(None) => continue,
                 Err(error) => {
-                    *complete = false;
                     warn!(node, %error, "dead-leader sweep could not read a node record");
                     continue;
                 }
             };
             let session = format!("{node}/{}", folded.wire.generation);
             let record = folded.record;
-            observed.push(log_tier::ObservedLog {
-                session: session.clone(),
-                lease_expires_ms: folded.wire.expires_ms,
-                record: record.clone(),
-            });
             // Under the fold, the lease we just read IS the record: a
             // session is dead the moment its published expiry passed. A
             // restarted node replaces the record (generation and all)
@@ -6810,34 +6664,6 @@ impl NodeLogManager {
             }
         }
         Ok(())
-    }
-
-    /// The `/state.node_log` object. It answers from memory only — the own
-    /// log this process publishes, the installed shipper, and the last
-    /// sweep pass — so the endpoint stays cheap and never waits on the
-    /// bucket.
-    pub fn state_json(&self) -> serde_json::Value {
-        let fleet = self.fleet_posture.get().copied();
-        let own = self.ownership.own_log().map(|log| {
-            serde_json::json!({
-                "state": log.state,
-                "epoch": log.epoch,
-                "ensemble": log.ensemble,
-                "bucket_complete": log.bucket_complete,
-                "active": log.active,
-            })
-        });
-        let observation = match fleet {
-            Some(true) => self.fleet_observation.lock().unwrap().clone(),
-            _ => None,
-        };
-        serde_json::json!({
-            "posture": fleet.map(|fleet| if fleet { "fleet" } else { "bucket" }),
-            "session": self.session,
-            "own": own,
-            "shipper_healthy": self.healthy(),
-            "fleet": observation.map(|observation| observation.to_json()),
-        })
     }
 
     /// Delete a dead, sealed session's retained bundles. Under the fold

@@ -2881,22 +2881,11 @@ async fn handle_internal(
         "/peer/handoff" => internal_handoff(request, app).await,
         _ if path.starts_with("/peer/log/") => internal_log(request, app, path.clone()).await,
         "/state" => {
-            let snapshot = if app
-                .disk_removal
-                .control_only
-                .load(std::sync::atomic::Ordering::SeqCst)
-            {
-                None
-            } else {
-                Some(app.snapshot().await)
-            };
-            let node_log = app.node_log.lock().unwrap().clone();
-            let state = celld::actor::internal_state_json(
-                snapshot.as_deref(),
-                app.disk_removal.snapshot(),
-                celld::node_log::state_json(node_log.as_deref()),
-            );
-            response(StatusCode::OK, state.to_string())
+            let snapshot = app.snapshot().await;
+            match celld::runtime_identity::state_json(&snapshot, &app.process_generation) {
+                Ok(state) => response(StatusCode::OK, state.to_string()),
+                Err(_) => response(StatusCode::INTERNAL_SERVER_ERROR, "invalid actor state"),
+            }
         }
         "/reload" if request.method() != hyper::Method::POST => {
             response(StatusCode::METHOD_NOT_ALLOWED, "method not allowed")
@@ -2912,6 +2901,16 @@ async fn handle_internal(
             response(StatusCode::METHOD_NOT_ALLOWED, "method not allowed")
         }
         "/shutdown" => {
+            if request.uri().query().is_some_and(|query| {
+                query
+                    .split('&')
+                    .any(|part| part.split('=').next() == Some("mode"))
+            }) {
+                return Ok(response(
+                    StatusCode::BAD_REQUEST,
+                    "unsupported shutdown mode",
+                ));
+            }
             let preserve_ownership = request
                 .uri()
                 .query()
@@ -4225,6 +4224,7 @@ async fn async_main(telemetry_config: Option<celld::telemetry::Config>) -> anyho
             .then(|| Arc::new(celld::node_log::FollowerStore::new(&data_dir, None, &node)))
     });
     let app = AppHandle {
+        process_generation: process_generation.clone(),
         tx,
         runtime,
         reload: reload_tx.clone(),
@@ -4244,8 +4244,8 @@ async fn async_main(telemetry_config: Option<celld::telemetry::Config>) -> anyho
         max_request_body_bytes,
         operation_deadline_ms: celld::actor::operation_deadline_ms()?,
         follower: follower.clone(),
-        node_log: actor.node_log.clone(),
     };
+
     // Every lease this process writes names its disk's follower-store
     // incarnation, so a later replacement disk under this node's name can
     // name the disk it supersedes when recovery asks. The store creates the identity

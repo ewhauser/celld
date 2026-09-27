@@ -313,3 +313,5 @@ pub fn worker_compat(metadata: &serde_json::Value) -> js::Compat {
         queue_json_messages: switch("queue_json_messages", "queue_v8_messages", "2024-03-18"),
     }
 }
+
+pub mod runtime_identity;
