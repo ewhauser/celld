@@ -930,6 +930,7 @@ pub(super) struct EmbeddedStartup {
     pub props_sc: Vec<u8>,
     pub path: std::path::PathBuf,
     pub restored: bool,
+    pub incarnation: Option<u64>,
 }
 
 pub(super) fn adopt_embedded_cell(
@@ -946,6 +947,7 @@ pub(super) fn adopt_embedded_cell(
         name,
         &startup.path,
         startup.restored,
+        startup.incarnation,
         compat.sqlite_vec,
     )
     .context("facet storage open failed")?;
