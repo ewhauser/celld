@@ -113,6 +113,7 @@ the waker role, and it wakes only the cells whose owner node has stopped.
 - [Hot-cell overload](#hot-cell-overload)
 - [Environment variables](#environment-variables)
 - [Services](#services)
+- [Change export](export.md)
 - [Cloudflare compatibility](cloudflare-compat.md)
 - [What celld guarantees](guarantees.md)
 - [Limitations](limitations.md)
