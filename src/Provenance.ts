@@ -29,5 +29,10 @@ export const provenance = Effect.gen(function* () {
         new URL("../pnpm-lock.yaml", import.meta.url).pathname,
       ),
     ),
+    // infra/compose.yaml's pinned default is already in the evidence bundle;
+    // an override is recorded because nothing else would show it.
+    ...(process.env.TCK_CELLD_IMAGE
+      ? { celldImage: process.env.TCK_CELLD_IMAGE }
+      : {}),
   };
 });

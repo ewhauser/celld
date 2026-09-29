@@ -154,6 +154,7 @@ export const ApiEnvironment = Schema.Struct({
   sourceRevision: Schema.optionalKey(Schema.String),
   dirty: Schema.optionalKey(Schema.NullOr(Schema.Boolean)),
   lockfileSha256: Schema.optionalKey(Schema.String),
+  celldImage: Schema.optionalKey(Schema.String),
   fixtures: Schema.Record(
     Schema.String,
     Schema.Struct({

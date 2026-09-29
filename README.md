@@ -44,6 +44,8 @@ pnpm test:reference
 
 Both `docker compose` and `docker-compose` are supported. Set `TCK_COMPOSE_BIN` if Compose is installed elsewhere.
 
+To test a different celld build, set `TCK_CELLD_IMAGE` to a local or registry image. It replaces the pinned release for every node and the deploy tool, and is recorded in `run.json`. The binary upgrade scenario still pins its own releases. Fork builds versioned `<release>-ewhauser.<n>` inherit that release's known bugs and divergences.
+
 MinIO's public container images are unavailable. Compose builds the same pinned MinIO server and client releases from official GitHub binaries using SHA-256 checksums and a digest-pinned Alpine base; see [the Dockerfile](infra/minio/Dockerfile). This requires BuildKit and supports amd64 and arm64. The first Docker run downloads the binaries; later runs reuse build layers.
 
 ## Reading the results

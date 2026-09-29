@@ -17,6 +17,16 @@ export const equal = (actual: unknown, expected: unknown) =>
       new TckError({ phase: "assertion", message: String(error) }),
   });
 
+/**
+ * ewhauser/celld fork builds are versioned `<upstream>-ewhauser.<n>` and
+ * inherit the upstream release's reviewed divergences and known bugs. Any other
+ * version difference still requires review.
+ */
+export const matchesCelldVersion = (
+  actual: string | undefined,
+  expected: string,
+) => actual?.replace(/-ewhauser\.\d+$/, "") === expected;
+
 export const evaluate = (
   test: TestCase,
   reference: Target,
@@ -83,8 +93,10 @@ export const evaluate = (
           yield* expectNonConformance({
             phase: "divergence",
             guard:
-              candidate.version === test.divergence.celldVersion &&
-              matchesProfile(input, test.divergence),
+              matchesCelldVersion(
+                candidate.version,
+                test.divergence.celldVersion,
+              ) && matchesProfile(input, test.divergence),
             guardMessage:
               "Divergence requires review for this celld version/compatibility profile",
             unexpectedPassMessage:
@@ -99,7 +111,7 @@ export const evaluate = (
             phase: "known-bugs",
             guard:
               knownBug.caseId === test.id &&
-              candidate.version === knownBug.celldVersion &&
+              matchesCelldVersion(candidate.version, knownBug.celldVersion) &&
               matchesProfile(input, knownBug),
             guardMessage:
               "Known bug requires review for this case/version/compatibility profile",

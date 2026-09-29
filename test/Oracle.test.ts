@@ -1,7 +1,7 @@
 import { expect, it } from "@effect/vitest";
 import { Cause, Effect, Exit, Fiber } from "effect";
 import { TckError, Transport, type TestCase } from "../src/Domain.js";
-import { equal, evaluate } from "../src/Oracle.js";
+import { equal, evaluate, matchesCelldVersion } from "../src/Oracle.js";
 
 const reference = { name: "reference", baseUrl: "http://unused.invalid" };
 const candidate = { name: "candidate", baseUrl: "http://unused.invalid" };
@@ -220,4 +220,31 @@ it.effect("divergence check and compare interruptions propagate", () =>
       websocket: () => Effect.die("unused"),
     }),
   ),
+);
+it("scopes fork builds to the upstream release they carry", () => {
+  expect(matchesCelldVersion("0.6.0", "0.6.0")).toBe(true);
+  expect(matchesCelldVersion("0.6.0-ewhauser.2", "0.6.0")).toBe(true);
+  expect(matchesCelldVersion("0.6.1-ewhauser.1", "0.6.0")).toBe(false);
+  expect(matchesCelldVersion("0.6.0-rc.1", "0.6.0")).toBe(false);
+  expect(matchesCelldVersion("0.6.0-ewhauser", "0.6.0")).toBe(false);
+  expect(matchesCelldVersion(undefined, "0.6.0")).toBe(false);
+});
+it.effect(
+  "accepts a documented divergence on a fork build of its release",
+  () =>
+    Effect.gen(function* () {
+      expect(
+        (yield* evaluate(
+          divergent,
+          reference,
+          { ...celld, version: "0.5.0-ewhauser.3" },
+          input,
+        )).status,
+      ).toBe("divergence");
+    }).pipe(
+      Effect.provideService(Transport, {
+        request: () => Effect.die("unused"),
+        websocket: () => Effect.die("unused"),
+      }),
+    ),
 );
