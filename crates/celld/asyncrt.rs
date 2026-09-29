@@ -600,3 +600,21 @@ pub mod rng {
 
     impl CryptoRng for Stream {}
 }
+
+/// Run a test future on one process-lifetime runtime, which is also the
+/// process domain's. `set_host_handle` runs once per process, and the domain
+/// has no lazy fallback, so tests that reach `asyncrt` run here instead.
+#[cfg(test)]
+pub(crate) fn test_block_on<T>(future: impl Future<Output = T>) -> T {
+    static RUNTIME: std::sync::OnceLock<tokio::runtime::Runtime> = std::sync::OnceLock::new();
+    let runtime = RUNTIME.get_or_init(|| {
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .build()
+            .unwrap();
+        set_host_handle(runtime.handle().clone());
+        runtime
+    });
+    runtime.block_on(future)
+}
