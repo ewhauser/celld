@@ -887,6 +887,7 @@ async fn repair(
     };
     run(
         &bucket,
+        &bucket,
         std::sync::Arc::new(sink),
         rx,
         jobs,
