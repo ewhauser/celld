@@ -664,8 +664,9 @@ unset variable selects its default. A Boolean variable accepts only `0` or
 | `CELLD_ADDR` | The public Worker listener. The same as `--listen` |
 | `CELLD_INTERNAL_ADDR` | The peer and operator listener. The same as `--internal-listen` |
 | `CELLD_ADVERTISE` | The internal address that peers can reach. The same as `--advertise` |
-| `CELLD_UNSAFE_PUBLIC_ADVERTISE` | Set to `1` to permit a literal public IP in `CELLD_ADVERTISE`. It does not resolve a DNS name or restrict the internal listener |
-| `CELLD_NODE` | An explicit node-session ID: 1 to 128 ASCII letters, numbers, dots, dashes, or underscores, but not `.` or `..` |
+| `CELLD_UNSAFE_PUBLIC_ADVERTISE` | Set to `1` to permit a literal public IP in `CELLD_ADVERTISE`. This setting does not resolve a DNS name or restrict the internal listener |
+| `CELLD_NODE` | An explicit node-session ID. Use 1 to 128 ASCII letters, numbers, dots, dashes, or underscores. The value cannot be `.` or `..` |
+| `CELLD_ZONE` | The node's availability zone, such as `us-east-1a`. Use 1 to 128 ASCII letters, numbers, dots, dashes, or underscores. Change export's blob-stream sink uses it to pick the node's writer (see [export](export.md)) |
 | `CELLD_WATCH` | The local work directory for SQLite and replication |
 | `CELLD_ESBUILD` | The path of the esbuild executable |
 | `CELLD_ACTIVATIONS` | Concurrent cold-cell activations (default: 8 per CPU, at least 16, at most 128) |
