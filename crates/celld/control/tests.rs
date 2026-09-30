@@ -184,13 +184,16 @@ impl Transport for FakeTable {
     }
 }
 
+/// A fresh bucket, each with its own name, as separate fleets have.
 fn bucket() -> Bucket {
+    static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let store = Arc::new(InMemory::new());
     Bucket::with_stores(
         store.clone(),
         store,
         StorageBackend::S3,
-        "test".into(),
+        format!("test-{n}"),
         "fleet-a/".into(),
     )
     .with_unresolved_control_for_test()
@@ -552,30 +555,213 @@ fn a_node_refuses_a_store_the_fleet_did_not_choose() {
 }
 
 #[test]
-fn a_table_fleet_cannot_start_beside_live_bucket_leases() {
+fn a_table_fleet_cannot_start_on_existing_bucket_state() {
     crate::asyncrt::test_block_on(async {
-        let bucket = bucket();
-        let far_future = crate::asyncrt::wall_ms() + 60_000;
-        bucket
-            .put(
+        // A stopped bucket fleet: its lease expired long ago, but its cell
+        // data, and every other sign of a fleet, still refuse the switch.
+        for (key, body) in [
+            (
                 "nodes/old.json",
-                format!("{{\"node\":\"old\",\"expires_ms\":{far_future}}}").into_bytes(),
-            )
+                br#"{"node":"old","expires_ms":1}"#.to_vec(),
+            ),
+            ("cells/Room:a/ltx/e7/ltx/0/1-1.ltx", b"ltx".to_vec()),
+            ("log/old/g/bundle/e1-00000001.ltxb", b"bundle".to_vec()),
+            ("deploy/current.json", b"{}".to_vec()),
+            ("deploy/api/current.json", b"{}".to_vec()),
+            ("drain/token.json", b"{}".to_vec()),
+        ] {
+            let bucket = bucket();
+            bucket.put(key, body).await.unwrap();
+            let fake = Arc::new(FakeTable::default());
+            let error = resolve_with(&bucket, Role::Node, &table_settings(), Some(fake.clone()))
+                .await
+                .unwrap_err();
+            assert!(
+                format!("{error:#}").contains("already holds fleet state"),
+                "{key}: {error:#}"
+            );
+            assert!(bucket.get(MARKER_KEY).await.unwrap().is_none(), "{key}");
+            assert!(
+                fake.items.lock().unwrap().is_empty(),
+                "{key}: nothing claimed"
+            );
+        }
+        // Deployments without a pointer are not fleet state.
+        let bucket = bucket();
+        bucket
+            .put("deploy/api/v1/manifest.json", b"{}".to_vec())
             .await
             .unwrap();
-        let error = resolve_with(
+        resolve_with(
             &bucket,
             Role::Node,
             &table_settings(),
             Some(Arc::new(FakeTable::default())),
         )
         .await
+        .unwrap();
+    });
+}
+
+#[test]
+fn an_operator_reaches_a_table_only_through_the_fleet_marker() {
+    crate::asyncrt::test_block_on(async {
+        let (_, fake) = table_fleet().await;
+        let pointer = (DEPLOY_PK.to_string(), "current".to_string());
+        // Another, markerless bucket configured for the same table.
+        let other = bucket();
+        let error = resolve_with(
+            &other,
+            Role::Operator,
+            &table_settings(),
+            Some(fake.clone()),
+        )
+        .await
         .unwrap_err();
         assert!(
-            format!("{error:#}").contains("live node lease"),
+            format!("{error:#}").contains("celld control init"),
             "{error:#}"
         );
-        assert!(bucket.get(MARKER_KEY).await.unwrap().is_none());
+        assert!(!fake.items.lock().unwrap().contains_key(&pointer));
+
+        // A bucket whose marker names a fleet the table does not serve.
+        let other = bucket();
+        other
+            .put(
+                MARKER_KEY,
+                serde_json::to_vec(&Marker {
+                    format: MARKER_FORMAT,
+                    backend: "dynamodb".into(),
+                    table: Some("celld-test".into()),
+                    region: Some("us-east-1".into()),
+                    fleet: Some("someone-else".into()),
+                })
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+        let error = resolve_with(
+            &other,
+            Role::Operator,
+            &Settings::default(),
+            Some(fake.clone()),
+        )
+        .await
+        .unwrap_err();
+        assert!(format!("{error:#}").contains("serves fleet"), "{error:#}");
+    });
+}
+
+#[test]
+fn an_unresolved_client_resolves_before_its_first_record() {
+    crate::asyncrt::test_block_on(async {
+        let (bucket, fake) = table_fleet().await;
+        // A second client over the same bucket that nothing resolved, as the
+        // preview publisher's was.
+        let publisher = bucket
+            .clone()
+            .with_unresolved_control_over_for_test(fake.clone());
+        publisher
+            .put("deploy/current.json", br#"{"version":"v2"}"#.to_vec())
+            .await
+            .unwrap();
+        assert!(publisher
+            .get_bucket_object("deploy/current.json")
+            .await
+            .unwrap()
+            .is_none());
+        let (body, _) = bucket.get("deploy/current.json").await.unwrap().unwrap();
+        assert_eq!(body.as_ref(), br#"{"version":"v2"}"#);
+        // Its resolution was read-only.
+        let marker = bucket.get(MARKER_KEY).await.unwrap();
+        assert!(marker.is_some());
+    });
+}
+
+#[test]
+fn a_rejected_claim_leaves_no_marker() {
+    crate::asyncrt::test_block_on(async {
+        let (_, fake) = table_fleet().await;
+        let second = bucket();
+        let error = resolve_with(&second, Role::Node, &table_settings(), Some(fake.clone()))
+            .await
+            .unwrap_err();
+        assert!(format!("{error:#}").contains("serves fleet"), "{error:#}");
+        assert!(second.get(MARKER_KEY).await.unwrap().is_none());
+        // Correcting the configuration is enough.
+        let resolved = resolve_with(&second, Role::Node, &Settings::default(), Some(fake))
+            .await
+            .unwrap();
+        assert_eq!(resolved.backend, Backend::Bucket);
+    });
+}
+
+#[test]
+fn an_interrupted_setup_adopts_its_own_claim() {
+    crate::asyncrt::test_block_on(async {
+        let bucket = bucket();
+        let fake = Arc::new(FakeTable::default());
+        // A setup claimed the table and stopped before it wrote the marker.
+        let table = Table::with_transport("celld-test".into(), "us-east-1".into(), fake.clone());
+        table
+            .claim("first-attempt", &bucket_identity(&bucket))
+            .await
+            .unwrap();
+        let resolved = resolve_with(&bucket, Role::Node, &table_settings(), Some(fake))
+            .await
+            .unwrap();
+        assert_eq!(resolved.fleet.as_deref(), Some("first-attempt"));
+    });
+}
+
+#[test]
+fn a_node_refuses_a_table_that_lost_its_claim() {
+    crate::asyncrt::test_block_on(async {
+        let (bucket, fake) = table_fleet().await;
+        fake.items
+            .lock()
+            .unwrap()
+            .remove(&(META_PK.to_string(), META_SK.to_string()));
+        let restarted = bucket_sharing(&bucket);
+        let error = resolve_with(
+            &restarted,
+            Role::Node,
+            &table_settings(),
+            Some(fake.clone()),
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            format!("{error:#}").contains("emptied or replaced"),
+            "{error:#}"
+        );
+        assert!(
+            !fake
+                .items
+                .lock()
+                .unwrap()
+                .contains_key(&(META_PK.to_string(), META_SK.to_string())),
+            "the claim is not silently recreated"
+        );
+    });
+}
+
+#[test]
+fn init_claims_before_it_records_and_can_run_again() {
+    crate::asyncrt::test_block_on(async {
+        let bucket = bucket();
+        let fake = Arc::new(FakeTable::default());
+        let first = init_with(&bucket, &table_settings(), false, Some(fake.clone()))
+            .await
+            .unwrap();
+        let again = init_with(&bucket, &table_settings(), false, Some(fake.clone()))
+            .await
+            .unwrap();
+        assert_eq!(first.fleet, again.fleet);
+        let node = bucket_sharing(&bucket);
+        resolve_with(&node, Role::Node, &table_settings(), Some(fake))
+            .await
+            .unwrap();
     });
 }
 
@@ -717,9 +903,11 @@ fn a_live_table_honors_the_contract() {
         assert!(table.create().await.unwrap());
         table.check_shape().await.unwrap();
         table.probe().await.unwrap();
-        table.claim("fleet-1").await.unwrap();
-        table.claim("fleet-1").await.unwrap();
-        assert!(table.claim("fleet-2").await.is_err());
+        assert_eq!(table.claim("fleet-1", "s3://a/").await.unwrap(), "fleet-1");
+        assert_eq!(table.claim("fleet-2", "s3://a/").await.unwrap(), "fleet-1");
+        assert!(table.claim("fleet-3", "s3://b/").await.is_err());
+        table.verify_claim("fleet-1").await.unwrap();
+        assert!(table.verify_claim("fleet-3").await.is_err());
 
         let key = ControlKey::Lease("n1".into());
         let token = table.cas_record(&key, b"{}", None).await.unwrap().unwrap();

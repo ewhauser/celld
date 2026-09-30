@@ -104,7 +104,8 @@ with a conditional create:
 ```
 
 - `celld control init` creates the table if needed, claims it, and writes
-  the marker. It is the recommended first step for a table fleet.
+  the marker. It is the recommended first step for a table fleet, and it
+  can be run again.
 - A serving node resolves the marker at startup, before it reads any
   record (`control::resolve`, role `Node`). If the marker is absent the
   node records its own `CELLD_CONTROL`, so a bucket fleet gets
@@ -112,16 +113,30 @@ with a conditional create:
 - A node whose `CELLD_CONTROL` disagrees with the marker refuses to start
   and names both values. Two nodes therefore never coordinate one fleet
   through two stores.
-- Creating a `dynamodb` marker requires that the bucket holds no unexpired
-  node lease. A running bucket fleet cannot be joined by a table node.
-- The `fleet` value is random. The table's meta item holds the fleet that
-  claimed it, so a second fleet pointed at the same table is refused.
+- A `dynamodb` marker is only created in a bucket (or prefix) that holds
+  no fleet state: no object under `cells/`, `nodes/` or `log/`, and no
+  coordination record. Expired leases are not enough. A stopped bucket
+  fleet's records would stay behind in the bucket, every existing cell
+  would read as absent, and the core would activate it at epoch 1 as a
+  new cell and skip its data.
+- The table is checked and claimed before the marker names it. The claim
+  (the meta item) records a random fleet id and the bucket that made it.
+  A table claimed by another bucket is refused and leaves no marker, so
+  correcting `CELLD_CONTROL` is enough to recover. A table this bucket
+  claimed in a setup that stopped before writing the marker is adopted
+  with the fleet id it holds.
+- Every later resolution checks that the table's claim names the
+  marker's fleet. A table whose claim is gone was emptied or replaced,
+  and with it the ownership records; it is refused rather than claimed
+  again.
 - The node's lease lane is a second bucket client with its own connection
   pool. It resolves second (role `Lease`), follows the marker, and opens
   its own table client, so lease traffic keeps its isolated pool.
 - Operator commands resolve read-only (role `Operator`) and follow the
   marker. `celld deploy`, `celld cell`, `celld queue` and the rest need no
-  new flag.
+  new flag. An operator command reaches a table only through a marker, so
+  a command configured for a table against a bucket without one is
+  refused instead of writing into whichever fleet claimed the table.
 
 Releases before this one do not read the marker, so a table fleet must not
 run an older binary. That is the same constraint the wake-format change
@@ -141,10 +156,11 @@ other key goes to the bucket as before.
 The route is resolved once per opened client and shared by every clone of
 it. A bucket fleet's route is the bucket, and a bucket fleet takes none
 of the new branches: the check is a string match with no I/O, so the
-sequence of store requests is unchanged. A client that is never resolved
-behaves as a bucket fleet, unless the process is configured for a table,
-in which case it refuses every coordination record. That makes a missed
-resolution loud instead of letting it read an empty bucket.
+sequence of store requests is unchanged. A client that was never resolved
+resolves itself, read-only, the first time it touches a coordination
+record, so a code path that forgot to resolve (the preview publisher did)
+still reaches the records where the fleet keeps them instead of an empty
+copy in the bucket.
 
 This replaces the typed `ControlStore` interface of revision 1; see
 [Decisions](#decisions).

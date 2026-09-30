@@ -625,6 +625,17 @@ impl Bucket {
         self
     }
 
+    /// As [`Self::with_unresolved_control_for_test`], resolving lazily over
+    /// `transport` instead of HTTPS.
+    #[cfg(test)]
+    pub(crate) fn with_unresolved_control_over_for_test(
+        mut self,
+        transport: Arc<dyn crate::control::Transport>,
+    ) -> Self {
+        self.control = Route::unresolved_over(transport);
+        self
+    }
+
     /// `bucket` is `[s3://|gs://|az://]NAME[/PREFIX]`. With a PREFIX every
     /// key this client reads or writes lives under `PREFIX/`, so several
     /// fleets can share one bucket without colliding.
@@ -881,8 +892,8 @@ impl Bucket {
     /// Where this bucket's coordination records go, `dynamodb` or the
     /// bucket's own scheme, for the startup banner.
     pub fn control_scheme(&self) -> &'static str {
-        match self.control.table() {
-            Ok(Some(_)) => "dynamodb",
+        match self.control.resolved() {
+            Some(Some(_)) => "dynamodb",
             _ => self.scheme(),
         }
     }
@@ -912,14 +923,29 @@ impl Bucket {
         crate::control::resolve(self, role).await
     }
 
+    /// The control table this bucket's coordination records go to, `None`
+    /// for the bucket. A client that was never resolved resolves itself
+    /// here, read-only, before its first coordination record (see
+    /// [`crate::control::resolve_lazily`]).
+    async fn control_table(&self) -> anyhow::Result<Option<&Arc<Table>>> {
+        if let Some(table) = self.control.resolved() {
+            return Ok(table);
+        }
+        Box::pin(crate::control::resolve_lazily(self)).await?;
+        Ok(self
+            .control
+            .resolved()
+            .expect("resolution installs a route"))
+    }
+
     /// The control table a key is routed to, when the fleet selected one and
     /// the key names a coordination record. Every other key, and every key
     /// of a bucket fleet, stays in the bucket.
-    fn routed(&self, key: &str) -> anyhow::Result<Option<(&Arc<Table>, ControlKey)>> {
+    async fn routed(&self, key: &str) -> anyhow::Result<Option<(&Arc<Table>, ControlKey)>> {
         let Some(record) = ControlKey::parse(key) else {
             return Ok(None);
         };
-        Ok(self.control.table()?.map(|table| (table, record)))
+        Ok(self.control_table().await?.map(|table| (table, record)))
     }
 
     /// Scope a caller's key to this client's prefix.
@@ -993,7 +1019,7 @@ impl Bucket {
 
     /// Body and CAS token, or `None` when the key does not exist.
     pub async fn get(&self, key: &str) -> anyhow::Result<Option<(Bytes, String)>> {
-        if let Some((table, record)) = self.routed(key)? {
+        if let Some((table, record)) = self.routed(key).await? {
             return table.get_record(&record).await;
         }
         self.get_bucket_object(key).await
@@ -1026,7 +1052,7 @@ impl Bucket {
 
     /// Size and CAS token, or `None` when the key does not exist.
     pub async fn head(&self, key: &str) -> anyhow::Result<Option<(u64, String)>> {
-        if let Some((table, record)) = self.routed(key)? {
+        if let Some((table, record)) = self.routed(key).await? {
             return table.head_record(&record).await;
         }
         let key = self.key(key);
@@ -1046,7 +1072,7 @@ impl Bucket {
     }
 
     pub async fn put(&self, key: &str, body: impl Into<PutPayload>) -> anyhow::Result<()> {
-        if let Some((table, record)) = self.routed(key)? {
+        if let Some((table, record)) = self.routed(key).await? {
             let body = Bytes::from(body.into());
             return table.put_record(&record, &body).await;
         }
@@ -1129,7 +1155,7 @@ impl Bucket {
         body: impl Into<PutPayload>,
         token: Option<&str>,
     ) -> anyhow::Result<Option<String>> {
-        if let Some((table, record)) = self.routed(key)? {
+        if let Some((table, record)) = self.routed(key).await? {
             let body = Bytes::from(body.into());
             return table.cas_record(&record, &body, token).await;
         }
@@ -1174,7 +1200,7 @@ impl Bucket {
 
     /// Idempotent: deleting an absent key succeeds, as S3's DELETE does.
     pub async fn delete(&self, key: &str) -> anyhow::Result<()> {
-        if let Some((table, record)) = self.routed(key)? {
+        if let Some((table, record)) = self.routed(key).await? {
             table.delete_record(&record, None).await?;
             return Ok(());
         }
@@ -1199,7 +1225,7 @@ impl Bucket {
     /// tombstone's token, so a delete that lands late cannot remove a record
     /// a successor wrote in the meantime.
     pub async fn delete_if_token(&self, key: &str, token: &str) -> anyhow::Result<bool> {
-        if let Some((table, record)) = self.routed(key)? {
+        if let Some((table, record)) = self.routed(key).await? {
             return table.delete_record(&record, Some(token)).await;
         }
         self.delete(key).await?;
@@ -1260,7 +1286,7 @@ impl Bucket {
         if plan.partitions.is_empty() {
             return self.list_bucket_objects(prefix).await;
         }
-        let Some(table) = self.control.table()? else {
+        let Some(table) = self.control_table().await? else {
             return self.list_bucket_objects(prefix).await;
         };
         let mut objects = if plan.table_only {
@@ -1331,7 +1357,7 @@ impl Bucket {
     ) -> anyhow::Result<ObjectPage> {
         let plan = crate::control::listing_plan(prefix);
         if plan.table_only {
-            if let Some(table) = self.control.table()? {
+            if let Some(table) = self.control_table().await? {
                 // Only the node leases are ever paged, and they are one
                 // partition, so the page is exact.
                 anyhow::ensure!(

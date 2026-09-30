@@ -162,21 +162,6 @@ pub fn validate_env() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Whether this process was configured for a table, read once. A bucket that
-/// was never resolved answers as a bucket fleet unless this is set, and then
-/// it refuses instead: a node configured for the table must never fall back
-/// to the bucket's copy of a record because one code path skipped
-/// resolution.
-fn configured_for_table() -> bool {
-    static CONFIGURED: OnceLock<bool> = OnceLock::new();
-    *CONFIGURED.get_or_init(|| {
-        matches!(
-            Settings::from_env().map(|settings| settings.backend),
-            Ok(Some(Backend::DynamoDb { .. }))
-        )
-    })
-}
-
 // ── Records ────────────────────────────────────────────────────────────────
 
 /// One coordination record, named by the bucket key it has always had.
@@ -834,37 +819,69 @@ impl Table {
 
     // ── Administration ──
 
-    /// The fleet this table serves, or `None` for a table no fleet claimed.
-    async fn fleet(&self) -> anyhow::Result<Option<String>> {
+    /// The claim on this table, or `None` for a table no fleet claimed.
+    async fn meta(&self) -> anyhow::Result<Option<Meta>> {
         let Some(record) = self.get(META_PK, META_SK).await? else {
             return Ok(None);
         };
-        let meta: Meta = serde_json::from_slice(&record.body)
-            .with_context(|| format!("decode the meta item of dynamodb://{}", self.name))?;
-        Ok(Some(meta.fleet))
+        Ok(Some(serde_json::from_slice(&record.body).with_context(
+            || format!("decode the meta item of dynamodb://{}", self.name),
+        )?))
     }
 
-    /// Claim the table for `fleet`, or confirm it already serves it.
-    async fn claim(&self, fleet: &str) -> anyhow::Result<()> {
+    /// Claim an unclaimed table for a new fleet in `bucket`, and answer the
+    /// fleet id the table now serves.
+    ///
+    /// A table this bucket already claimed, from a setup that stopped before
+    /// it recorded its marker, is adopted with the fleet id it holds, so the
+    /// setup can simply run again. A table any other bucket claimed is
+    /// refused.
+    async fn claim(&self, fleet: &str, bucket: &str) -> anyhow::Result<String> {
         let body = serde_json::to_vec(&Meta {
             format: MARKER_FORMAT,
             fleet: fleet.to_string(),
+            bucket: Some(bucket.to_string()),
         })?;
         if self
             .put(META_PK, META_SK, &body, Condition::Absent)
             .await?
             .is_some()
         {
-            return Ok(());
+            return Ok(fleet.to_string());
         }
-        match self.fleet().await? {
-            Some(owner) if owner == fleet => Ok(()),
-            Some(owner) => bail!(
-                "dynamodb://{} serves fleet {owner}, not this bucket's fleet {fleet}",
-                self.name
+        match self.meta().await? {
+            Some(meta) if meta.bucket.as_deref() == Some(bucket) => Ok(meta.fleet),
+            Some(meta) => bail!(
+                "dynamodb://{} serves fleet {} of {}, not {bucket}",
+                self.name,
+                meta.fleet,
+                meta.bucket.as_deref().unwrap_or("another bucket")
             ),
             None => bail!(
                 "dynamodb://{} lost its meta item during the claim",
+                self.name
+            ),
+        }
+    }
+
+    /// Confirm that the table still serves the fleet a marker names.
+    ///
+    /// A table without its claim was emptied or replaced after the fleet
+    /// chose it, and with the claim went every ownership record: serving
+    /// from it would activate existing cells as new ones, at epoch 1, and
+    /// skip the data they hold in the bucket. So a missing claim is refused,
+    /// never repaired by claiming again.
+    async fn verify_claim(&self, fleet: &str) -> anyhow::Result<()> {
+        match self.meta().await? {
+            Some(meta) if meta.fleet == fleet => Ok(()),
+            Some(meta) => bail!(
+                "dynamodb://{} serves fleet {}, not this bucket's fleet {fleet}",
+                self.name,
+                meta.fleet
+            ),
+            None => bail!(
+                "dynamodb://{} has no claim for fleet {fleet}; the table was emptied or \
+                 replaced after this fleet chose it, and its ownership records are gone",
                 self.name
             ),
         }
@@ -1097,6 +1114,9 @@ impl Table {
 struct Meta {
     format: u8,
     fleet: String,
+    /// The bucket that claimed the table, as `scheme://name/prefix`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    bucket: Option<String>,
 }
 
 fn string_attribute(item: &Value, name: &str) -> anyhow::Result<String> {
@@ -1194,6 +1214,9 @@ pub enum Role {
 /// opened bucket.
 pub(crate) struct Route {
     resolved: OnceLock<Option<Arc<Table>>>,
+    /// The transport a lazy resolution opens its table over, in place of
+    /// HTTPS. Only tests set it.
+    transport: Option<Arc<dyn Transport>>,
 }
 
 impl Route {
@@ -1202,6 +1225,15 @@ impl Route {
     pub(crate) fn unresolved() -> Arc<Self> {
         Arc::new(Self {
             resolved: OnceLock::new(),
+            transport: None,
+        })
+    }
+
+    #[cfg(test)]
+    pub(crate) fn unresolved_over(transport: Arc<dyn Transport>) -> Arc<Self> {
+        Arc::new(Self {
+            resolved: OnceLock::new(),
+            transport: Some(transport),
         })
     }
 
@@ -1213,16 +1245,10 @@ impl Route {
         route
     }
 
-    /// The table this bucket's records are routed to, `None` for the bucket.
-    pub(crate) fn table(&self) -> anyhow::Result<Option<&Arc<Table>>> {
-        match self.resolved.get() {
-            Some(table) => Ok(table.as_ref()),
-            None if configured_for_table() => bail!(
-                "this process is configured for a DynamoDB control table, but this bucket \
-                 client was never resolved against {MARKER_KEY}"
-            ),
-            None => Ok(None),
-        }
+    /// The resolved route: `Some(None)` for the bucket, `Some(Some(table))`
+    /// for a table, and `None` before resolution.
+    pub(crate) fn resolved(&self) -> Option<Option<&Arc<Table>>> {
+        self.resolved.get().map(Option::as_ref)
     }
 
     fn install(&self, table: Option<Arc<Table>>) -> anyhow::Result<()> {
@@ -1311,27 +1337,80 @@ fn random_fleet_id() -> String {
     format!("{:016x}{:016x}", rng.next_u64(), rng.next_u64())
 }
 
-/// Does the bucket still hold an unexpired node lease? A table fleet cannot
-/// start beside a running bucket fleet: the two would each believe they
-/// alone decide who owns a cell.
-async fn live_bucket_lease(bucket: &Bucket) -> anyhow::Result<Option<String>> {
-    #[derive(Deserialize)]
-    struct Lease {
-        expires_ms: u64,
-    }
-    let now = crate::asyncrt::wall_ms().max(0) as u64;
-    for object in bucket.list_bucket_objects("nodes/").await? {
-        let key = object.location.as_ref().to_string();
-        let Some((bytes, _)) = bucket.get_bucket_object(&key).await? else {
-            continue;
-        };
-        let lease: Lease =
-            serde_json::from_slice(&bytes).with_context(|| format!("decode {key}"))?;
-        if lease.expires_ms > now {
-            return Ok(Some(key));
+/// The first sign that the bucket already holds a fleet, or `None` for a
+/// bucket (or prefix) a new table fleet can start in.
+///
+/// Until `celld control migrate` exists, a fleet chooses its store before it
+/// holds any state. A stopped bucket fleet's ownership records, folded logs
+/// and pointers stay in the bucket when the table is selected, so every
+/// existing cell would read as absent and activate at epoch 1 as a new cell,
+/// skipping the data it holds. Expired leases are therefore not enough: any
+/// cell data, node record, log, or coordination record refuses the switch.
+async fn fleet_state_in_bucket(bucket: &Bucket) -> anyhow::Result<Option<String>> {
+    for prefix in ["cells/", "nodes/", "log/"] {
+        if bucket.list_any(prefix).await? {
+            return Ok(Some(prefix.to_string()));
         }
     }
-    Ok(None)
+    for key in ["drain/token.json", "wake/waker.json", "deploy/current.json"] {
+        if bucket.get_bucket_object(key).await?.is_some() {
+            return Ok(Some(key.to_string()));
+        }
+    }
+    Ok(bucket
+        .list_bucket_objects("deploy/")
+        .await?
+        .into_iter()
+        .map(|object| object.location.to_string())
+        .find(|key| ControlKey::parse(key).is_some()))
+}
+
+/// The identity a table's claim records for the bucket that made it.
+fn bucket_identity(bucket: &Bucket) -> String {
+    format!("{}://{}/{}", bucket.scheme(), bucket.name, bucket.prefix)
+}
+
+fn table_region(
+    bucket: &Bucket,
+    marker: Option<&Marker>,
+    settings: &Settings,
+) -> anyhow::Result<String> {
+    marker
+        .and_then(|marker| marker.region.clone())
+        .or_else(|| settings.region.clone())
+        .or_else(|| bucket.aws_access().map(|access| access.region.clone()))
+        .context("no region for the DynamoDB control table")
+}
+
+fn table_for(
+    bucket: &Bucket,
+    name: &str,
+    region: String,
+    settings: &Settings,
+    transport: &Option<Arc<dyn Transport>>,
+    app: Option<&str>,
+) -> anyhow::Result<Table> {
+    match transport {
+        Some(transport) => Ok(Table::with_transport(
+            name.to_string(),
+            region,
+            transport.clone(),
+        )),
+        None => open_table(bucket, name, &region, settings, app),
+    }
+}
+
+/// Resolve an unresolved client the first time it touches a coordination
+/// record, as an operator: it follows the marker and writes nothing. A
+/// client that skipped resolution therefore still reaches the records
+/// where the fleet keeps them, instead of an empty copy in the bucket.
+pub(crate) async fn resolve_lazily(bucket: &Bucket) -> anyhow::Result<()> {
+    let settings = Settings::from_env()?;
+    let transport = bucket.control_route().transport.clone();
+    resolve_with(bucket, Role::Operator, &settings, transport)
+        .await
+        .context("resolve the fleet's coordination store")?;
+    Ok(())
 }
 
 /// Resolve which store `bucket` routes its coordination records to, and
@@ -1349,64 +1428,57 @@ pub(crate) async fn resolve_with(
     settings: &Settings,
     transport: Option<Arc<dyn Transport>>,
 ) -> anyhow::Result<Resolved> {
-    let mut marker = read_marker(bucket).await?;
-    if marker.is_none() && role == Role::Node {
-        marker = Some(create_marker(bucket, settings).await?);
-    }
-    if marker.is_none() && role == Role::Lease {
-        bail!("{MARKER_KEY} is missing; the node resolves its store before its lease lane");
-    }
-
-    let (backend, region, fleet) = match &marker {
-        Some(marker) => {
-            let backend = marker.backend()?;
-            if let Some(configured) = &settings.backend {
-                ensure!(
-                    *configured == backend,
-                    "CELLD_CONTROL is {configured}, but this fleet's {MARKER_KEY} selects \
-                     {backend}; a fleet keeps its coordination records in one store"
-                );
+    let marker = match read_marker(bucket).await? {
+        Some(marker) => marker,
+        None => match role {
+            Role::Node => establish(bucket, settings, &transport, None).await?,
+            Role::Lease => {
+                bail!("{MARKER_KEY} is missing; the node resolves its store before its lease lane")
             }
-            (backend, marker.region.clone(), marker.fleet.clone())
-        }
-        // An operator command against a fleet that has not started yet.
-        None => (
-            settings.backend.clone().unwrap_or(Backend::Bucket),
-            settings.region.clone(),
-            None,
-        ),
+            Role::Operator => {
+                // A table is only ever reached through a marker that names
+                // the fleet the table's claim must match. Without one, a
+                // command could read and overwrite another fleet's records.
+                if let Some(Backend::DynamoDb { table }) = &settings.backend {
+                    bail!(
+                        "this bucket has no {MARKER_KEY}; run `celld control init --table \
+                         {table}` before using a DynamoDB control table"
+                    );
+                }
+                // A bucket fleet that has not started yet.
+                bucket.control_route().install(None)?;
+                return Ok(Resolved {
+                    backend: Backend::Bucket,
+                    region: None,
+                    fleet: None,
+                });
+            }
+        },
     };
-
+    let backend = marker.backend()?;
+    if let Some(configured) = &settings.backend {
+        ensure!(
+            *configured == backend,
+            "CELLD_CONTROL is {configured}, but this fleet's {MARKER_KEY} selects \
+             {backend}; a fleet keeps its coordination records in one store"
+        );
+    }
     let table = match &backend {
         Backend::Bucket => None,
         Backend::DynamoDb { table } => {
-            let region = region
-                .clone()
-                .or_else(|| settings.region.clone())
-                .or_else(|| bucket.aws_access().map(|access| access.region.clone()))
-                .context("no region for the DynamoDB control table")?;
+            let fleet = marker
+                .fleet
+                .as_deref()
+                .with_context(|| format!("{MARKER_KEY} selects a table without a fleet id"))?;
             let app = (role == Role::Lease).then_some("celld-lease");
-            let table = match &transport {
-                Some(transport) => Table::with_transport(table.clone(), region, transport.clone()),
-                None => open_table(bucket, table, &region, settings, app)?,
-            };
+            let region = table_region(bucket, Some(&marker), settings)?;
+            let table = table_for(bucket, table, region, settings, &transport, app)?;
             if role == Role::Node {
                 table.check_shape().await?;
-                let fleet = fleet
-                    .as_deref()
-                    .with_context(|| format!("{MARKER_KEY} selects a table without a fleet id"))?;
-                table.claim(fleet).await?;
+            }
+            table.verify_claim(fleet).await?;
+            if role == Role::Node {
                 table.probe().await?;
-            } else if let Some(fleet) = &fleet {
-                match table.fleet().await? {
-                    Some(owner) if &owner == fleet => {}
-                    Some(owner) => bail!(
-                        "dynamodb://{} serves fleet {owner}, not this bucket's fleet {fleet}",
-                        table.name
-                    ),
-                    // A table the fleet named but no node has claimed yet.
-                    None => {}
-                }
             }
             Some(Arc::new(table))
         }
@@ -1414,14 +1486,25 @@ pub(crate) async fn resolve_with(
     bucket.control_route().install(table)?;
     Ok(Resolved {
         backend,
-        region,
-        fleet,
+        region: marker.region.clone(),
+        fleet: marker.fleet.clone(),
     })
 }
 
-/// Record this node's configured store as the fleet's choice. Two nodes can
-/// race; the loser reads the winner's marker and follows it or refuses.
-async fn create_marker(bucket: &Bucket, settings: &Settings) -> anyhow::Result<Marker> {
+/// Choose the store for a fleet that has not chosen one, and record the
+/// choice. Two nodes can race; the loser reads the winner's marker, and the
+/// caller then follows it or refuses.
+///
+/// A table is checked and claimed before the marker names it, so a table
+/// that is misshapen or serves another fleet leaves no marker behind, and
+/// correcting `CELLD_CONTROL` is enough to recover. `table` is an already
+/// opened table, from `celld control init`.
+async fn establish(
+    bucket: &Bucket,
+    settings: &Settings,
+    transport: &Option<Arc<dyn Transport>>,
+    table: Option<&Table>,
+) -> anyhow::Result<Marker> {
     let backend = settings.backend.clone().unwrap_or(Backend::Bucket);
     let marker = match &backend {
         Backend::Bucket => Marker {
@@ -1431,22 +1514,34 @@ async fn create_marker(bucket: &Bucket, settings: &Settings) -> anyhow::Result<M
             region: None,
             fleet: None,
         },
-        Backend::DynamoDb { table } => {
-            if let Some(key) = live_bucket_lease(bucket).await? {
+        Backend::DynamoDb { table: name } => {
+            if let Some(found) = fleet_state_in_bucket(bucket).await? {
                 bail!(
-                    "{key} is a live node lease in the bucket; a fleet moves to a DynamoDB \
-                     control table only after every node has stopped"
+                    "this bucket already holds fleet state ({found}); a fleet chooses a \
+                     DynamoDB control table before it holds any, because moving an existing \
+                     fleet's records needs `celld control migrate`, which does not exist yet. \
+                     Start the table fleet in an empty bucket or prefix"
                 );
             }
+            let region = table_region(bucket, None, settings)?;
+            let opened;
+            let table = match table {
+                Some(table) => table,
+                None => {
+                    opened = table_for(bucket, name, region.clone(), settings, transport, None)?;
+                    &opened
+                }
+            };
+            table.check_shape().await?;
+            let fleet = table
+                .claim(&random_fleet_id(), &bucket_identity(bucket))
+                .await?;
             Marker {
                 format: MARKER_FORMAT,
                 backend: backend.name().to_string(),
-                table: Some(table.clone()),
-                region: settings
-                    .region
-                    .clone()
-                    .or_else(|| bucket.aws_access().map(|access| access.region.clone())),
-                fleet: Some(random_fleet_id()),
+                table: Some(name.clone()),
+                region: Some(region),
+                fleet: Some(fleet),
             }
         }
     };
@@ -1467,40 +1562,42 @@ pub async fn init(
     settings: &Settings,
     create_table: bool,
 ) -> anyhow::Result<Resolved> {
-    let Some(Backend::DynamoDb { table }) = &settings.backend else {
+    init_with(bucket, settings, create_table, None).await
+}
+
+pub(crate) async fn init_with(
+    bucket: &Bucket,
+    settings: &Settings,
+    create_table: bool,
+    transport: Option<Arc<dyn Transport>>,
+) -> anyhow::Result<Resolved> {
+    let Some(Backend::DynamoDb { table: name }) = &settings.backend else {
         bail!("celld control init needs --table NAME or CELLD_CONTROL=dynamodb://NAME");
     };
-    if let Some(marker) = read_marker(bucket).await? {
-        let existing = marker.backend()?;
+    let existing = read_marker(bucket).await?;
+    if let Some(marker) = &existing {
+        let chosen = marker.backend()?;
         ensure!(
-            existing
+            chosen
                 == Backend::DynamoDb {
-                    table: table.clone()
+                    table: name.clone()
                 },
-            "this fleet's {MARKER_KEY} already selects {existing}"
+            "this fleet's {MARKER_KEY} already selects {chosen}"
         );
     }
-    let region = settings
-        .region
-        .clone()
-        .or_else(|| bucket.aws_access().map(|access| access.region.clone()))
-        .context("no region for the DynamoDB control table")?;
-    let opened = open_table(bucket, table, &region, settings, None)?;
-    if create_table && opened.create().await? {
-        tracing::info!(table = %table, "created the control table");
+    let region = table_region(bucket, existing.as_ref(), settings)?;
+    let table = table_for(bucket, name, region, settings, &transport, None)?;
+    if create_table && table.create().await? {
+        tracing::info!(table = %name, "created the control table");
     }
-    opened.check_shape().await?;
-    let marker = match read_marker(bucket).await? {
+    let marker = match existing {
         Some(marker) => marker,
-        None => {
-            let mut settings = settings.clone();
-            settings.region = Some(region);
-            create_marker(bucket, &settings).await?
-        }
+        None => establish(bucket, settings, &transport, Some(&table)).await?,
     };
+    table.check_shape().await?;
     let fleet = marker.fleet.clone().context("the marker has no fleet id")?;
-    opened.claim(&fleet).await?;
-    opened.probe().await?;
+    table.verify_claim(&fleet).await?;
+    table.probe().await?;
     Ok(Resolved {
         backend: marker.backend()?,
         region: marker.region,
@@ -1538,7 +1635,10 @@ pub async fn show(bucket: &Bucket) -> anyhow::Result<Map<String, Value>> {
                 Err(error) => format!("{error:#}"),
             }),
         );
-        out.insert("table_fleet".into(), json!(opened.fleet().await?));
+        out.insert(
+            "table_fleet".into(),
+            json!(opened.meta().await?.map(|meta| meta.fleet)),
+        );
         out.insert(
             "point_in_time_recovery".into(),
             json!(opened.point_in_time_recovery().await.ok()),

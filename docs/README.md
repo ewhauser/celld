@@ -280,9 +280,13 @@ prints the choice and the table's health.
 The table authenticates with the same AWS credential chain as the bucket.
 celld refuses a global table, a secondary index, and time-to-live, because
 each can serve or delete a record that another node already replaced. A
-fleet that already runs on the bucket cannot switch while any node lease
-is live; stop the fleet first. `celld control migrate` does not exist yet,
-so a running fleet's records are not copied.
+fleet chooses the table before it holds any state: celld refuses a bucket
+or prefix that already holds cell data, node records, logs, or deploy
+pointers, even when every node has stopped, because `celld control migrate`
+does not exist yet and the fleet's existing records would not be copied.
+Start a table fleet in an empty bucket or prefix. An operator command
+configured for a table also needs `fleet/control.json`, so run `celld
+control init` before the first `celld deploy`.
 
 A bucket value can add a key prefix: `s3://YOUR-BUCKET/PREFIX`. Every
 object of the fleet then goes below `PREFIX/`, so two fleets can share one

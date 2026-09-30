@@ -41,9 +41,9 @@ APIs, and Wrangler configuration.
 
 - A DynamoDB control table needs an `s3://` fleet bucket, because the table
   signs with the bucket's AWS credential chain.
-- A running bucket fleet cannot move to a table, and a table fleet cannot
-  move back: `celld control migrate` is not implemented. Start a new fleet
-  on the table, or stop every node before the first table node starts.
+- An existing bucket fleet cannot move to a table, even when stopped, and a
+  table fleet cannot move back: `celld control migrate` is not implemented.
+  Start a table fleet in an empty bucket or prefix.
 - `celld cell list` reads the cell prefixes in the bucket. On a table fleet
   a cell that has an ownership record but has never written data has no
   prefix, so the listing leaves it out. Such a cell holds no data.
