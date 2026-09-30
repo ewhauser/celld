@@ -14,11 +14,10 @@ use std::io::Write as _;
 use std::process::ExitCode;
 use std::time::Duration;
 
-use celld_export_snowflake::consume::{Batch, Limits};
+use celld_export_snowflake::consume::Batch;
 use celld_export_snowflake::loader::{DeployReport, Erasure, SyncReport};
-use celld_export_snowflake::sql_api::{Clock, Connection, KeyPair, SqlApi};
-use celld_export_snowflake::streaming::Streaming;
-use celld_export_snowflake::{Deployment, Loader, LoaderConfig, Rows};
+use celld_export_snowflake::settings::{self, loader};
+use celld_export_snowflake::Rows;
 
 const USAGE: &str = "\
 usage: celld-export-loader COMMAND
@@ -66,72 +65,11 @@ fn main() -> ExitCode {
     }
 }
 
-type Error = Box<dyn std::error::Error>;
+type Error = settings::Error;
 
+#[cfg(any(feature = "blob-stream", feature = "kafka"))]
 fn env(name: &str) -> Result<String, Error> {
     std::env::var(name).map_err(|_| format!("{name} is not set").into())
-}
-
-fn env_or(name: &str, default: &str) -> String {
-    std::env::var(name).unwrap_or_else(|_| default.to_string())
-}
-
-#[allow(clippy::disallowed_methods)] // The loader is a host tool; its clock and key file are the host's.
-fn credentials() -> Result<(Connection, KeyPair, Clock), Error> {
-    let pem = std::fs::read_to_string(env("SNOWFLAKE_PRIVATE_KEY_FILE")?)?;
-    let passphrase = std::env::var("SNOWFLAKE_PRIVATE_KEY_PASSPHRASE").ok();
-    let key = KeyPair::from_pem(&pem, passphrase.as_deref())?;
-    let connection = Connection {
-        account: env("SNOWFLAKE_ACCOUNT")?,
-        user: env("SNOWFLAKE_USER")?,
-        role: std::env::var("SNOWFLAKE_ROLE").ok(),
-        database: env("SNOWFLAKE_DATABASE")?,
-        schema: env("SNOWFLAKE_SCHEMA")?,
-        warehouse: env("SNOWFLAKE_WAREHOUSE")?,
-        url: std::env::var("SNOWFLAKE_URL").ok(),
-        statement_timeout: 600,
-    };
-    let clock: Clock = Box::new(|| {
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map_or(0, |d| d.as_secs())
-    });
-    Ok((connection, key, clock))
-}
-
-/// Where batches land: Snowpipe Streaming, as the same user.
-fn streaming() -> Result<Streaming, Error> {
-    let (connection, key, clock) = credentials()?;
-    Ok(Streaming::new(&connection, key, clock))
-}
-
-fn env_number<T: std::str::FromStr>(name: &str, default: T) -> Result<T, Error> {
-    match std::env::var(name) {
-        Ok(v) => v
-            .parse()
-            .map_err(|_| format!("{name} must be a number, not {v:?}").into()),
-        Err(_) => Ok(default),
-    }
-}
-
-fn limits() -> Result<Limits, Error> {
-    let d = Limits::default();
-    Ok(Limits {
-        records: env_number("EXPORT_BATCH_RECORDS", d.records)?.max(1),
-        bytes: env_number("EXPORT_BATCH_BYTES", d.bytes)?.max(1),
-    })
-}
-
-fn loader() -> Result<Loader<SqlApi>, Error> {
-    let config = LoaderConfig {
-        deployment: Deployment {
-            warehouse: env("SNOWFLAKE_WAREHOUSE")?,
-        },
-        target_lag: env_or("EXPORT_TARGET_LAG", "1 minute"),
-        dynamic_table_prefix: env_or("EXPORT_DYNAMIC_TABLE_PREFIX", "CF"),
-    };
-    let (connection, key, clock) = credentials()?;
-    Ok(Loader::new(SqlApi::new(connection, key, clock), config))
 }
 
 fn out(line: &str) -> Result<(), Error> {
@@ -243,14 +181,10 @@ fn ingest(file: &str) -> Result<(), Error> {
     } else {
         Box::new(std::io::BufReader::new(std::fs::File::open(file)?))
     };
-    let limits = limits()?;
+    let limits = settings::limits()?;
     let mut l = loader()?;
-    let mut to = streaming()?;
-    let started = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)?
-        .as_millis();
-    // No `%` or `_`: `visible` matches it with LIKE.
-    let tag = format!(" (ingest {started}-{})", std::process::id());
+    let mut to = settings::streaming()?;
+    let tag = settings::run_tag("ingest");
     let mut batch = Batch::tagged(&tag);
     let (mut landed, mut bad) = (0, 0);
     for (n, line) in reader.lines().enumerate() {
@@ -272,16 +206,8 @@ fn ingest(file: &str) -> Result<(), Error> {
     }
     landed += batch.len();
     batch.land(&mut to)?;
-    let timeout = Duration::from_secs(env_number("EXPORT_VISIBLE_SECONDS", 300)?);
-    let deadline = std::time::Instant::now() + timeout;
-    let mut pause = Duration::from_millis(100);
-    let mut visible = l.visible(&tag)?;
-    while visible < landed as u64 && std::time::Instant::now() < deadline {
-        std::thread::sleep(pause);
-        pause = (pause * 2).min(Duration::from_secs(2));
-        visible = l.visible(&tag)?;
-    }
-    l.route()?;
+    let timeout = settings::visible_timeout()?;
+    let visible = l.settle(&tag, landed as u64, settings::backoff(timeout))?;
     if visible < landed as u64 {
         return Err(format!(
             "landed {landed} records, but only {visible} were visible after {timeout:?} and \
@@ -325,8 +251,8 @@ fn consume(sync_every: Duration) -> Result<(), Error> {
         .ok();
     let group = std::env::var("EXPORT_GROUP").ok();
     let settings = Settings {
-        limits: limits()?,
-        linger: Duration::from_millis(env_number("EXPORT_BATCH_MS", 5000)?),
+        limits: settings::limits()?,
+        linger: Duration::from_millis(settings::number("EXPORT_BATCH_MS", 5000)?),
         sync_every,
         skip: std::env::var("EXPORT_SKIP")
             .unwrap_or_default()
@@ -341,7 +267,7 @@ fn consume(sync_every: Duration) -> Result<(), Error> {
     // first.
     let source = Consumer::configure(transport, group.as_deref(), member.as_deref())?;
     let mut l = loader()?;
-    let mut to = streaming()?;
+    let mut to = settings::streaming()?;
     print_deploy(&l.deploy()?)?;
 
     let runtime = tokio::runtime::Builder::new_multi_thread()

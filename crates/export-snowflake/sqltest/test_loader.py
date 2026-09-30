@@ -261,3 +261,82 @@ def test_bound_statements_as_the_reconciler_runs_them(emulator, loader):
     )
     out = loader("query", "SELECT cell, reason FROM EXPORT_TOMBSTONES WHERE cleared_at IS NOT NULL AND ?", "true").stdout
     assert out.splitlines() == ["CELL\tREASON", "r9\ttest"]
+
+
+AUDIT = ROOT / "crates" / "celld" / "export_audit" / "snowflake.rs"
+FAR = '"99999999999999999999.99999999999999999999.99999999999999999999"'
+
+
+def audit_statements():
+    """The statements `celld export --consumer snowflake` runs, read from
+    crates/celld/export_audit/snowflake.rs so this checks what it sends."""
+    import re
+    text = AUDIT.read_text()
+    return {m[1]: m[2] for m in re.finditer(r'pub const (\w+): &str = "\\\n(.*?)";', text, re.S)}
+
+
+def query_rows(loader, sql, *binds):
+    lines = loader("query", sql, *binds).stdout.splitlines()
+    header = [c.lower() for c in lines[0].split("\t")]
+    return [dict(zip(header, line.split("\t"))) for line in lines[1:]]
+
+
+@pytest.mark.parametrize("name", ["basic", "certification", "deletions", "recovery", "snapshots"])
+def test_the_audit_statements_run(emulator, loader, scenarios, tmp_path, name):
+    st = audit_statements()
+    loader("deploy")
+    records = scenarios[name]["records"]
+    path = tmp_path / "records.jsonl"
+    write_jsonl(records, path)
+    loader("ingest", str(path))
+
+    streams = query_rows(loader, st["SELECT_STREAMS"])
+    held = query_rows(loader, "SELECT script, class, cell, facet, incarnation FROM CELL_STREAMS WHERE NOT removed")
+    key = lambda r: (r["script"], r["class"], r["cell"], r["facet"], r["incarnation"])
+    assert sorted(map(key, streams)) == sorted(map(key, held))
+    certified = query_rows(loader, st["SELECT_CERTIFIED"])
+    assert len(certified) == len(query_rows(loader, "SELECT * FROM CELL_CERTIFIED"))
+    query_rows(loader, st["SELECT_STREAM_SNAPSHOTS"])
+    query_rows(loader, st["SELECT_RECOVERED"])
+    activity = query_rows(loader, st["SELECT_ACTIVITY"])
+    newest = max(r["committed_at"] for r in records if r["kind"] != "recovered")
+    assert max(int(float(r["last_committed_ms"])) for r in activity) == newest
+    for r in activity:
+        assert isinstance(json.loads(r["nodes"]), list)
+
+    # One cell's records come back whole, with their commit times.
+    first = records[0]
+    cell = [r for r in records if r["class"] == first["class"] and r["cell"] == first["cell"]]
+    binds = (json.dumps(first["class"]), json.dumps(first["cell"]), FAR)
+    changes = query_rows(loader, st["SELECT_CELL_CHANGES_AT"], *binds)
+    meta = query_rows(loader, st["SELECT_CELL_META_AT"], *binds)
+    stored = query_rows(
+        loader,
+        "SELECT COUNT(*) AS n FROM (SELECT script FROM CELL_CHANGES WHERE class = ? AND cell = ? "
+        "UNION ALL SELECT script FROM CELL_META WHERE class = ? AND cell = ?)",
+        json.dumps(first["class"]), json.dumps(first["cell"]),
+        json.dumps(first["class"]), json.dumps(first["cell"]),
+    )
+    assert len(changes) + len(meta) == int(stored[0]["n"])
+    assert {int(float(r["committed_at_ms"])) for r in changes + meta} <= {r["committed_at"] for r in cell}
+    for r in meta:
+        assert isinstance(json.loads(r["body"]), dict)
+    for r in changes:
+        assert isinstance(json.loads(r["row_changes"]), list)
+
+
+def test_reconciler_runs_replace_the_open_findings(emulator, loader):
+    st = audit_statements()
+    loader("deploy")
+
+    def finding(cell, run):
+        detail = json.dumps({"scope": f"Room:{cell}", "run": run})
+        return ('"app"', '"Room"', f'"Room:{cell}"', '""', "1", '"gap"', "5", "9", json.dumps(detail))
+
+    loader("query", st["INSERT_FINDING"], *finding("a", "1"))
+    loader("query", st["INSERT_FINDING"], *finding("b", "1"))
+    loader("query", st["RESOLVE_FINDINGS"], '"1"')
+    loader("query", st["INSERT_FINDING"], *finding("b", "2"))
+    loader("query", st["RESOLVE_FINDINGS"], '"2"')
+    open_ = query_rows(loader, "SELECT cell, reason FROM EXPORT_GAPS WHERE gap_kind = 'reconciler'")
+    assert open_ == [{"cell": "Room:b", "reason": "gap"}]
