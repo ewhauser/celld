@@ -5,6 +5,11 @@ on:
     branches: [main]
   pull_request:
   workflow_dispatch:
+  # Republish the compatibility results when a TCK run on main finishes.
+  workflow_run:
+    workflows: [TCK]
+    types: [completed]
+    branches: [main]
 
 permissions: {}
 
@@ -17,6 +22,7 @@ jobs:
     name: site-build
     permissions:
       contents: read
+      actions: read # Download the TCK workflow's results dashboard.
     runs-on: ubuntu-latest
     timeout-minutes: 15
     defaults:
@@ -34,6 +40,28 @@ jobs:
           node-version-file: site/.node-version
           package-manager-cache: false
       - run: pnpm install --frozen-lockfile
+      # The TCK workflow builds the results dashboard on main. Publish the
+      # one from the latest run that finished rather than being cancelled.
+      # Without one, pnpm sync leaves a placeholder page.
+      - name: Fetch the compatibility results
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          runs=$(gh api "repos/$GITHUB_REPOSITORY/actions/workflows/tck.yml/runs?branch=main&status=completed&per_page=50" \
+            | jq -r --arg repo "$GITHUB_REPOSITORY" '[.workflow_runs[]
+                | select(.event == "push" or .event == "workflow_dispatch")
+                | select(.conclusion == "success" or .conclusion == "failure")
+                | select(.head_repository.full_name == $repo)
+                | .id][:5][]')
+          for run in $runs; do
+            if gh run download "$run" --repo "$GITHUB_REPOSITORY" --name compatibility-site --dir public/compatibility; then
+              echo "Compatibility results from TCK run $run"
+              exit 0
+            fi
+            rm -rf public/compatibility
+          done
+          echo "::warning::No recent TCK run on main has a results dashboard; publishing a placeholder."
       # Generate only fork references; fail on broken internal links.
       - run: pnpm build
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4

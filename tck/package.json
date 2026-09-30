@@ -1,0 +1,55 @@
+{
+  "name": "celld-tck",
+  "version": "0.0.0",
+  "private": true,
+  "license": "Apache-2.0",
+  "type": "module",
+  "packageManager": "pnpm@11.15.0",
+  "engines": {
+    "node": ">=24 <27"
+  },
+  "scripts": {
+    "tck": "tsx src/main.ts",
+    "test": "vitest run",
+    "test:reference": "tsx src/main.ts --profile reference",
+    "test:local": "tsx src/main.ts --profile local",
+    "types:fixtures": "wrangler types --config fixtures/core/wrangler.jsonc fixtures/core/worker-configuration.d.ts && wrangler types --config fixtures/extensions/wrangler.jsonc --env-interface ExtensionEnv --include-runtime=false fixtures/extensions/worker-configuration.d.ts && wrangler types --config fixtures/repro/wrangler.jsonc --env-interface ReproEnv --include-runtime=false fixtures/repro/worker-configuration.d.ts && wrangler types --config fixtures/qualification/wrangler.jsonc --env-interface QualificationEnv --include-runtime=false fixtures/qualification/worker-configuration.d.ts",
+    "typecheck": "tsc --noEmit && tsc --noEmit -p fixtures/tsconfig.json && tsc --noEmit -p fixtures/node/tsconfig.json",
+    "format": "oxfmt --write .",
+    "format:check": "oxfmt --check .",
+    "lint": "oxlint --deny-warnings .",
+    "lint:fix": "oxlint --fix --deny-warnings .",
+    "check": "pnpm format:check && pnpm lint && pnpm typecheck && pnpm test",
+    "test:recovery": "tsx src/main.ts --profile local --suite recovery",
+    "test:multinode": "tsx src/main.ts --profile local --suite multinode",
+    "test:fleet": "tsx src/main.ts --profile local --suite fleet",
+    "test:resilience": "tsx src/main.ts --profile local --suite resilience",
+    "test:qualification": "tsx src/main.ts --profile local --suite qualification",
+    "test:traffic": "tsx src/main.ts --profile local --suite traffic",
+    "test:dependencies": "tsx src/main.ts --profile local --suite dependencies",
+    "test:faults": "tsx src/main.ts --profile local --suite faults",
+    "test:capacity": "tsx src/main.ts --profile local --suite capacity",
+    "test:security": "tsx src/main.ts --profile local --suite security",
+    "test:telemetry": "tsx src/main.ts --profile local --suite telemetry",
+    "test:operations": "tsx src/main.ts --profile local --suite operations",
+    "site:build": "tsx src/site/main.ts"
+  },
+  "dependencies": {
+    "@effect/platform-node": "4.0.0-rc.115",
+    "effect": "4.0.0-rc.115",
+    "jsonc-parser": "3.3.1"
+  },
+  "devDependencies": {
+    "@effect/vitest": "4.0.0-rc.115",
+    "@mpsuesser/oxlint-plugin-effect": "0.5.0",
+    "@types/node": "24.13.5",
+    "esbuild": "0.28.2",
+    "miniflare": "4.20260730.0",
+    "oxfmt": "0.68.0",
+    "oxlint": "1.83.0",
+    "tsx": "4.23.13",
+    "typescript": "7.0.2",
+    "vitest": "5.0.1",
+    "wrangler": "4.112.0"
+  }
+}

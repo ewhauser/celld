@@ -1,0 +1,35 @@
+services:
+  minio:
+    networks: [store]
+  storage:
+    networks: [store]
+  tool:
+    networks: [store]
+  proxy:
+    networks: [store]
+  celld:
+    environment:
+      CELLD_NODE: celld
+    networks: [default, store]
+  celld2:
+    extends:
+      file: compose.yaml
+      service: celld
+    command:
+      [
+        --listen,
+        "0.0.0.0:8080",
+        --internal-listen,
+        "0.0.0.0:8081",
+        --advertise,
+        "celld2:8081",
+      ]
+    environment:
+      CELLD_NODE: celld2
+    volumes: [celld2-state:/state]
+    networks: [default, store]
+networks:
+  store:
+  default:
+volumes:
+  celld2-state:

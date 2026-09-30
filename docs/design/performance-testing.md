@@ -12,7 +12,7 @@ benchmark covers the request path, the output gate, replication, restore,
 ownership, WebSockets, the platform services, or deploys. The numbers in
 [testing.md](../testing.md#a-few-numbers-we-trust) come from a fleet lab
 whose tooling is not in this repository, and nothing reproduces them from a
-checkout. The [celld-tck](https://github.com/ewhauser/celld-tck) suite runs
+checkout. The [celld-tck](../../tck/) suite runs
 a real multi-node fleet with faults, but it checks behavior, not speed.
 
 This plan adds performance tests in four tiers. The tiers go from pure

@@ -43,6 +43,6 @@ peer-disk durability. [Install and upgrade](./install/) covers the boundary.
 ## Companion projects
 
 The [celld operator](https://ewhauser.github.io/celld-operator/) manages Kubernetes
-fleets and preview resources. [celld-tck](https://ewhauser.github.io/celld-tck/)
-publishes compatibility and recovery test results. Check the exact version and
-commit behind a result when evaluating a release.
+fleets and preview resources. The [compatibility results](./compatibility/) come
+from the TCK in this repository, run on main. Check the exact
+version and commit behind a result when evaluating a release.

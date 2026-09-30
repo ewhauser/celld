@@ -1,0 +1,36 @@
+# Fleet-operations overlay.
+#
+# Layered after infra/qualification.yaml. Every value here is a documented
+# v0.5.0 control; the inventory that establishes them is in
+# docs/FLEET-OPERATIONS.md.
+#
+#   * Distinct placement weights (8 / 1 / 1) give the fleet a deliberately
+#     uneven ownership target, so a weighted placement is distinguishable from
+#     an even one. The default weight is the container's CPU count, which is
+#     identical on all three nodes and therefore proves nothing about weighting.
+#   * A short total stop bound keeps a graceful drain inside the case deadline.
+#     celld derives the drain-token wait (three quarters) and the handoff
+#     no-progress interval (five eighths) from this one value; the removed
+#     CELLD_SHUTDOWN_DRAIN_MS and CELLD_DRAIN_TOKEN_WAIT_MS are never set.
+#   * A short first-readiness gate keeps a restarted or replacement node inside
+#     the case deadline while still exercising the gate.
+#
+# Balancing stays disabled here: infra/qualification.yaml pins
+# CELLD_REBALANCE_INTERVAL_MS to 0 and only infra/balancing.yaml turns it on,
+# so a case that snapshots ownership is not raced by a background move.
+services:
+  celld:
+    environment:
+      CELLD_PLACEMENT_WEIGHT: "8"
+      CELLD_SHUTDOWN_TOTAL_MS: "20000"
+      CELLD_READY_FLEET_GATE_MS: "60000"
+  celld2:
+    environment:
+      CELLD_PLACEMENT_WEIGHT: "1"
+      CELLD_SHUTDOWN_TOTAL_MS: "20000"
+      CELLD_READY_FLEET_GATE_MS: "60000"
+  celld3:
+    environment:
+      CELLD_PLACEMENT_WEIGHT: "1"
+      CELLD_SHUTDOWN_TOTAL_MS: "20000"
+      CELLD_READY_FLEET_GATE_MS: "60000"

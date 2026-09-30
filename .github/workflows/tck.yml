@@ -1,10 +1,10 @@
 name: TCK
 
-# Gates pull requests on the celld-tck compatibility and recovery suites,
-# run against this change's own image instead of the upstream release the
-# TCK pins. The image is built once (its test stage runs the workspace
-# tests and clippy) and handed to one job per suite. `TCK passed` is the
-# single check to require in branch protection.
+# Gates pull requests on the TCK in tck/: its static checks and reference
+# run, and its compatibility and recovery suites run against this change's
+# own image instead of the upstream release the TCK pins. The image is
+# built once and handed to one job per suite. `TCK passed` is the single
+# check to require in branch protection.
 on:
   pull_request:
   push:
@@ -20,13 +20,78 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  # A celld-tck commit, not a branch, so a TCK change cannot turn this gate
-  # red on its own. Bump it deliberately.
-  TCK_REPOSITORY: ewhauser/celld-tck
-  TCK_REF: f6f0b0e7ea48a06306444517c9161740939dd820
   TCK_CELLD_IMAGE: celld:tck
 
 jobs:
+  # Format, lint, typecheck and unit tests, then two independent workerd
+  # instances against each other. Neither needs the celld image.
+  checks:
+    name: TCK ${{ matrix.name }}
+    runs-on: ubuntu-22.04
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: checks
+            command: pnpm check
+          - name: reference
+            command: pnpm test:reference
+    defaults:
+      run:
+        working-directory: tck
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: pnpm/action-setup@v4
+        with:
+          package_json_file: tck/package.json
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version-file: tck/.node-version
+          cache: pnpm
+          cache-dependency-path: tck/pnpm-lock.yaml
+
+      - name: Install
+        run: pnpm install --frozen-lockfile
+
+      - name: Run
+        env:
+          COMMAND: ${{ matrix.command }}
+        run: $COMMAND
+
+      # The per-suite reports the dashboard job below builds from.
+      - name: Collect dashboard evidence
+        if: always()
+        env:
+          SUITE: ${{ matrix.name }}
+          JOB_STATUS: ${{ job.status }}
+        run: |
+          mkdir -p site-input
+          node -e 'const fs = require("node:fs"); const e = process.env; fs.writeFileSync("site-input/job.json", JSON.stringify({suite:e.SUITE, conclusion:e.JOB_STATUS, sha:e.GITHUB_SHA, runId:e.GITHUB_RUN_ID, attempt:e.GITHUB_RUN_ATTEMPT}))'
+          for report in artifacts/*/report.json; do
+            [ -f "$report" ] || continue
+            destination="site-input/$(basename "$(dirname "$report")")"
+            mkdir -p "$destination"
+            cp "$report" "$destination/report.json"
+          done
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: compatibility-summary-${{ matrix.name }}
+          path: tck/site-input/
+          retention-days: 7
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: tck-evidence-${{ matrix.name }}
+          path: tck/artifacts/
+          if-no-files-found: ignore
+          retention-days: 7
+
   image:
     name: Build candidate image
     runs-on: ubuntu-22.04
@@ -130,18 +195,12 @@ jobs:
     timeout-minutes: 60
     strategy:
       fail-fast: false
+      # Pull requests run the core suites. Pushes to main and manual runs
+      # add the slower resilience, qualification and operations suites.
       matrix:
-        suite:
-          - local
-          - recovery
-          - multinode
-          - fleet
+        suite: ${{ fromJSON(github.event_name == 'pull_request' && '["local","recovery","multinode","fleet"]' || '["local","recovery","multinode","fleet","resilience","traffic","dependencies","faults","capacity","security","telemetry","operations"]') }}
     steps:
       - uses: actions/checkout@v6
-        with:
-          repository: ${{ env.TCK_REPOSITORY }}
-          ref: ${{ env.TCK_REF }}
-          path: tck
 
       - uses: actions/download-artifact@v4
         with:
@@ -170,6 +229,30 @@ jobs:
           SUITE: ${{ matrix.suite }}
         run: pnpm "test:$SUITE"
 
+      # The per-suite reports the dashboard job below builds from.
+      - name: Collect dashboard evidence
+        if: always()
+        env:
+          SUITE: ${{ matrix.suite }}
+          JOB_STATUS: ${{ job.status }}
+        working-directory: tck
+        run: |
+          mkdir -p site-input
+          node -e 'const fs = require("node:fs"); const e = process.env; fs.writeFileSync("site-input/job.json", JSON.stringify({suite:e.SUITE, conclusion:e.JOB_STATUS, sha:e.GITHUB_SHA, runId:e.GITHUB_RUN_ID, attempt:e.GITHUB_RUN_ATTEMPT}))'
+          for report in artifacts/*/report.json; do
+            [ -f "$report" ] || continue
+            destination="site-input/$(basename "$(dirname "$report")")"
+            mkdir -p "$destination"
+            cp "$report" "$destination/report.json"
+          done
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: compatibility-summary-${{ matrix.suite }}
+          path: tck/site-input/
+          retention-days: 7
+
       - uses: actions/upload-artifact@v4
         if: always()
         with:
@@ -178,17 +261,66 @@ jobs:
           if-no-files-found: ignore
           retention-days: 7
 
+  # The results dashboard, built from this run's reports by the TCK source
+  # at this commit. The docs site (site.yaml) publishes the one from the
+  # latest finished run on main at /compatibility/. Pull requests skip it:
+  # they run only some suites, so most of the matrix would read as missing.
+  dashboard:
+    name: TCK dashboard
+    needs: [checks, suite]
+    if: ${{ !cancelled() && github.event_name != 'pull_request' }}
+    runs-on: ubuntu-22.04
+    timeout-minutes: 10
+    defaults:
+      run:
+        working-directory: tck
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: pnpm/action-setup@v4
+        with:
+          package_json_file: tck/package.json
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version-file: tck/.node-version
+          cache: pnpm
+          cache-dependency-path: tck/pnpm-lock.yaml
+
+      - name: Install
+        run: pnpm install --frozen-lockfile
+
+      - uses: actions/download-artifact@v4
+        continue-on-error: true # Missing evidence must appear on the dashboard.
+        with:
+          pattern: compatibility-summary-*
+          path: tck/.cache/site-input
+
+      - name: Build
+        env:
+          CI_RESULT: ${{ needs.checks.result == 'success' && needs.suite.result == 'success' && 'success' || 'failure' }}
+        run: pnpm site:build --docs-url ../
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: compatibility-site
+          path: tck/.cache/site/
+          include-hidden-files: true
+          retention-days: 90
+
   # One stable check name for branch protection, whatever the matrix holds.
   gate:
     name: TCK passed
-    needs: suite
+    needs: [checks, suite]
     if: always()
     runs-on: ubuntu-22.04
     timeout-minutes: 5
     steps:
-      - name: Require every suite
+      - name: Require every job
         env:
-          RESULT: ${{ needs.suite.result }}
+          CHECKS: ${{ needs.checks.result }}
+          SUITES: ${{ needs.suite.result }}
         run: |
-          echo "suites: $RESULT"
-          test "$RESULT" = success
+          echo "checks: $CHECKS, suites: $SUITES"
+          test "$CHECKS" = success
+          test "$SUITES" = success

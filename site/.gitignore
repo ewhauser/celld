@@ -3,3 +3,5 @@ dist/
 .astro/
 # Generated from the repository docs by pnpm sync.
 src/content/docs/fork/
+# The TCK results dashboard, downloaded by CI or left as a placeholder by pnpm sync.
+public/compatibility/

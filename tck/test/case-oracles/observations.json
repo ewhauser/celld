@@ -1,0 +1,2707 @@
+{
+  "seed": 42,
+  "compatibilityDate": "2026-07-30",
+  "sources": [
+    {
+      "runId": "tck-9d1891f6-1f3e-423e-95b0-9dfd4510ab06",
+      "sourceRevision": "working-tree@393bba5"
+    },
+    {
+      "runId": "tck-c1b2e1d0-8efe-4dbf-aecc-4809f74146ba",
+      "sourceRevision": "working-tree@393bba5"
+    },
+    {
+      "runId": "tck-bf2ac88f-2e51-4d6a-9907-a701eba71f42",
+      "sourceRevision": "d3f911d84635caa89e8fcee5693b7fe36c220c1f"
+    },
+    {
+      "runId": "tck-064f1aeb-a3d0-4699-881a-1a9edff174aa",
+      "sourceRevision": "bf320271eab112573d3134502c99874af7013850"
+    },
+    {
+      "runId": "tck-d05ff807-0700-4ab6-816a-98e7021bb207",
+      "sourceRevision": "d3f911d84635caa89e8fcee5693b7fe36c220c1f"
+    },
+    {
+      "runId": "tck-d5670dc9-85a5-470a-96c2-b6f412c8eb38",
+      "sourceRevision": "413ce135411c4a2445feb4e992ad5a375160d79c"
+    },
+    {
+      "runId": "tck-6cb5ffb3-9df0-4843-9075-1d81ca382396",
+      "sourceRevision": "413ce135411c4a2445feb4e992ad5a375160d79c"
+    },
+    {
+      "runId": "tck-874df9a3-64c6-4e4e-8dad-82995972fca3",
+      "sourceRevision": "413ce135411c4a2445feb4e992ad5a375160d79c"
+    },
+    {
+      "runId": "tck-082f810e-5fb7-477b-a9bd-f202de438ca7",
+      "sourceRevision": "f9f2e538db459a5ef0270b25cd003037d42590cd"
+    },
+    {
+      "runId": "tck-0c9aa3ed-1709-4edd-9651-fb1b244bc9b8",
+      "sourceRevision": "b723207c722f30400994f13075d993216a9b91a7"
+    },
+    {
+      "runId": "tck-6cd64cf6-980a-495c-9159-92b3ce50bba5",
+      "sourceRevision": "5f7b777031fcfa4979a9da48bfabf4fd7e392543"
+    },
+    {
+      "runId": "tck-b468f0a9-841f-472d-b65b-4cb870f09ce2",
+      "sourceRevision": "790c81c7c2108a5669c95be34a1aac2a91c80438"
+    },
+    {
+      "runId": "tck-ac34e3c4-c3af-48c6-8c52-80727e1b8aeb",
+      "sourceRevision": "790c81c7c2108a5669c95be34a1aac2a91c80438"
+    },
+    {
+      "runId": "tck-0c3c37cf-d018-4e54-b741-aeec138d7628",
+      "sourceRevision": "0b59e3217d67aa00e2b887a0de4ca83fc26c0c52"
+    },
+    {
+      "runId": "tck-9bfff958-d432-4206-8a3f-942cb5ffc715",
+      "sourceRevision": "afe5550ff0ccc11a1cdfaeff6ea5ed7b465766d5"
+    },
+    {
+      "runId": "tck-b7682d00-020f-425d-a55c-a22edf58d5a7",
+      "sourceRevision": "94f52f73ce295c81fe0226b89870a4100b328a6f"
+    },
+    {
+      "runId": "tck-f504445f-115e-419e-9fa7-b4ec2aaa43e9",
+      "sourceRevision": "e45af25f757cfe2b5d07aad05d6b3b8b4dba2d1b"
+    },
+    {
+      "runId": "tck-54253fb5-e471-4983-b3b3-dacd6d0c8ec9",
+      "sourceRevision": "df31dd6c50e2cc77bf0cd43c115f949a0a56eabe"
+    },
+    {
+      "runId": "tck-85100d73-461c-47eb-96af-af2ca7631c6a",
+      "sourceRevision": "working-tree@6150234"
+    },
+    {
+      "runId": "tck-45a6130d-d82f-4327-9418-7559beda0a4f",
+      "sourceRevision": "working-tree@6150234"
+    }
+  ],
+  "cases": {
+    "http.request-response": {
+      "status": 201,
+      "headers": {
+        "content-type": "application/json",
+        "x-tck-response": "echo"
+      },
+      "body": {
+        "method": "POST",
+        "query": ["first", "second"],
+        "header": "seed-42",
+        "body": "hello λ 🌍\n"
+      }
+    },
+    "storage.round-trip": [
+      {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json"
+        },
+        "body": {
+          "present": false
+        }
+      },
+      {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json"
+        },
+        "body": {
+          "stored": true
+        }
+      },
+      {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json"
+        },
+        "body": {
+          "stored": true
+        }
+      },
+      {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json"
+        },
+        "body": {
+          "present": true,
+          "value": {
+            "text": "λ",
+            "empty": "",
+            "zero": 0,
+            "flag": false,
+            "nil": null,
+            "nested": [42, "x"]
+          }
+        }
+      },
+      {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json"
+        },
+        "body": [
+          ["item:a", "first"],
+          [
+            "item:b",
+            {
+              "text": "λ",
+              "empty": "",
+              "zero": 0,
+              "flag": false,
+              "nil": null,
+              "nested": [42, "x"]
+            }
+          ]
+        ]
+      },
+      {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json"
+        },
+        "body": {
+          "present": false
+        }
+      },
+      {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json"
+        },
+        "body": {
+          "deleted": true
+        }
+      },
+      {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json"
+        },
+        "body": {
+          "present": false
+        }
+      },
+      {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json"
+        },
+        "body": {
+          "deleted": false
+        }
+      }
+    ],
+    "storage.transaction-rollback": [
+      {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json"
+        },
+        "body": {
+          "stored": true
+        }
+      },
+      {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json"
+        },
+        "body": {
+          "error": "tck intentional rollback"
+        }
+      },
+      {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json"
+        },
+        "body": {
+          "present": true,
+          "value": 7
+        }
+      },
+      {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json"
+        },
+        "body": {
+          "present": false
+        }
+      }
+    ],
+    "sql.transaction-rollback": [
+      {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json"
+        },
+        "body": {
+          "prepared": true
+        }
+      },
+      {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json"
+        },
+        "body": {
+          "error": "tck intentional rollback"
+        }
+      },
+      {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json"
+        },
+        "body": [
+          {
+            "id": 1,
+            "value": "committed"
+          }
+        ]
+      }
+    ],
+    "http.fetch-abort": {
+      "status": 200,
+      "headers": {
+        "content-type": "application/json"
+      },
+      "body": {
+        "error": "AbortError"
+      }
+    },
+    "storage.synchronous-kv": {
+      "status": 200,
+      "headers": {
+        "content-type": "application/json"
+      },
+      "body": {
+        "a": {
+          "value": 1
+        },
+        "list": [
+          ["b", "λ"],
+          [
+            "a",
+            {
+              "value": 1
+            }
+          ]
+        ],
+        "removed": true,
+        "missing": true
+      }
+    },
+    "sql.mixed-rollback": {
+      "status": 200,
+      "headers": {
+        "content-type": "application/json"
+      },
+      "body": {
+        "error": "Error",
+        "balance": 1,
+        "rows": []
+      }
+    },
+    "context.wait-until": {
+      "status": 200,
+      "headers": {
+        "content-type": "application/json"
+      },
+      "body": {
+        "present": true,
+        "value": "complete"
+      }
+    },
+    "cache.documented-miss": {
+      "status": 200,
+      "headers": {
+        "content-type": "application/json"
+      },
+      "body": {
+        "value": "cached",
+        "deleted": true
+      }
+    },
+    "http.body-consumption": {
+      "status": 200,
+      "headers": {
+        "content-type": "application/json"
+      },
+      "body": {
+        "before": false,
+        "after": true,
+        "text": "λ🌍",
+        "cloned": "λ🌍",
+        "twice": "TypeError",
+        "lateClone": "TypeError"
+      }
+    },
+    "http.headers": {
+      "status": 200,
+      "headers": {
+        "content-type": "application/json"
+      },
+      "body": {
+        "joined": "first, second",
+        "replaced": "replacement",
+        "deleted": true,
+        "invalid": "TypeError"
+      }
+    },
+    "http.url-formdata": {
+      "status": 200,
+      "headers": {
+        "content-type": "application/json"
+      },
+      "body": {
+        "pathname": "/a%20b",
+        "query": ["1", "2"],
+        "values": ["first", "λ"],
+        "file": {
+          "name": "bytes.bin",
+          "type": "application/octet-stream",
+          "bytes": [0, 128, 255]
+        }
+      }
+    },
+    "http.encoding": {
+      "status": 200,
+      "headers": {
+        "content-type": "application/json"
+      },
+      "body": {
+        "bytes": [206, 187, 240, 159, 140, 141],
+        "decoded": "λ🌍",
+        "base64": "AP8=",
+        "decodedBase64": [0, 255],
+        "invalid": "TypeError"
+      }
+    },
+    "http.abort": {
+      "status": 200,
+      "headers": {
+        "content-type": "application/json"
+      },
+      "body": {
+        "aborted": true,
+        "calls": 1,
+        "reason": "test abort",
+        "thrown": "Error"
+      }
+    },
+    "http.redirect": {
+      "status": 200,
+      "headers": {
+        "content-type": "application/json"
+      },
+      "body": {
+        "status": 307,
+        "location": "https://example.test/next",
+        "invalid": "RangeError"
+      }
+    },
+    "crypto.sha256-hmac": {
+      "status": 200,
+      "headers": {
+        "content-type": "application/json"
+      },
+      "body": {
+        "digest": "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad",
+        "hmac": "f7bc83f430538424b13298e6aa6fb143ef4d59a14946175997479dbc2d1a3cd8",
+        "verified": true,
+        "rejected": false,
+        "uuid": true
+      }
+    },
+    "crypto.aes-gcm": {
+      "status": 200,
+      "headers": {
+        "content-type": "application/json"
+      },
+      "body": {
+        "ciphertext": "58e2fccefa7e3061367f1d57a4e7455a",
+        "plaintext": [],
+        "tampered": "OperationError"
+      }
+    },
+    "web.html-rewriter": {
+      "status": 200,
+      "headers": {
+        "content-type": "application/json"
+      },
+      "body": {
+        "html": "<p data-test=\"yes\">λ &amp; text</p>"
+      }
+    },
+    "storage.rich-values": {
+      "status": 200,
+      "headers": {
+        "content-type": "application/json"
+      },
+      "body": {
+        "type": "Object",
+        "value": [
+          [
+            "big",
+            {
+              "type": "bigint",
+              "value": "9007199254740993"
+            }
+          ],
+          [
+            "buffer",
+            {
+              "type": "ArrayBuffer",
+              "value": [8, 9]
+            }
+          ],
+          [
+            "bytes",
+            {
+              "type": "Uint8Array",
+              "value": [0, 127, 128, 255]
+            }
+          ],
+          [
+            "date",
+            {
+              "type": "Date",
+              "value": "2020-01-02T03:04:05.000Z"
+            }
+          ],
+          [
+            "map",
+            {
+              "type": "Map",
+              "value": [
+                [
+                  {
+                    "type": "string",
+                    "value": "first"
+                  },
+                  {
+                    "type": "number",
+                    "value": 1
+                  }
+                ],
+                [
+                  {
+                    "type": "number",
+                    "value": 2
+                  },
+                  {
+                    "type": "string",
+                    "value": "second"
+                  }
+                ]
+              ]
+            }
+          ],
+          [
+            "missing",
+            {
+              "type": "undefined"
+            }
+          ],
+          [
+            "nan",
+            {
+              "type": "number",
+              "value": "NaN"
+            }
+          ],
+          [
+            "negativeInfinity",
+            {
+              "type": "number",
+              "value": "-Infinity"
+            }
+          ],
+          [
+            "negativeZero",
+            {
+              "type": "number",
+              "value": "-0"
+            }
+          ],
+          [
+            "nested",
+            {
+              "type": "Array",
+              "value": [
+                {
+                  "type": "boolean",
+                  "value": false
+                },
+                {
+                  "type": "string",
+                  "value": ""
+                },
+                {
+                  "type": "Object",
+                  "value": [
+                    [
+                      "x",
+                      {
+                        "type": "undefined"
+                      }
+                    ]
+                  ]
+                }
+              ]
+            }
+          ],
+          [
+            "nil",
+            {
+              "type": "null"
+            }
+          ],
+          [
+            "positiveInfinity",
+            {
+              "type": "number",
+              "value": "+Infinity"
+            }
+          ],
+          [
+            "set",
+            {
+              "type": "Set",
+              "value": [
+                {
+                  "type": "string",
+                  "value": "b"
+                },
+                {
+                  "type": "string",
+                  "value": "a"
+                }
+              ]
+            }
+          ]
+        ]
+      }
+    },
+    "storage.batch-ranges": {
+      "status": 200,
+      "headers": {
+        "content-type": "application/json"
+      },
+      "body": {
+        "got": [
+          ["k:a", 1],
+          ["k:c", 3]
+        ],
+        "forward": [["k:b", 2]],
+        "reverse": [
+          ["k:c", 3],
+          ["k:b", 2]
+        ],
+        "after": [["k:b", 2]],
+        "deleted": 2,
+        "remaining": [
+          ["k:b", 2],
+          ["other", 9]
+        ]
+      }
+    },
+    "storage.delete-all": {
+      "status": 200,
+      "headers": {
+        "content-type": "application/json"
+      },
+      "body": {
+        "values": [],
+        "alarm": null
+      }
+    },
+    "storage.transaction-commit": {
+      "status": 200,
+      "headers": {
+        "content-type": "application/json"
+      },
+      "body": {
+        "result": 7,
+        "entries": [
+          ["a", 7],
+          ["b", 8]
+        ]
+      }
+    },
+    "storage.explicit-rollback": {
+      "status": 200,
+      "headers": {
+        "content-type": "application/json"
+      },
+      "body": {
+        "value": 1
+      }
+    },
+    "storage.invalid-input": {
+      "status": 200,
+      "headers": {
+        "content-type": "application/json"
+      },
+      "body": {
+        "limit": "TypeError",
+        "unserializable": "DataCloneError"
+      }
+    },
+    "sql.bindings-cursors": {
+      "status": 200,
+      "headers": {
+        "content-type": "application/json"
+      },
+      "body": {
+        "columns": ["id", "text", "n", "empty", "nil", "bytes"],
+        "inserted": [
+          {
+            "id": 1,
+            "text": "λ'",
+            "n": 1.25,
+            "empty": "",
+            "nil": null,
+            "bytes": {
+              "type": "ArrayBuffer",
+              "value": [0, 128, 255]
+            }
+          }
+        ],
+        "raw": [[1, "λ'", null]],
+        "count": {
+          "n": 1
+        }
+      }
+    },
+    "sql.constraints": {
+      "status": 200,
+      "headers": {
+        "content-type": "application/json"
+      },
+      "body": {
+        "duplicate": true,
+        "nil": true,
+        "multiple": true,
+        "empty": true,
+        "rows": [
+          {
+            "id": 1,
+            "v": "a"
+          }
+        ]
+      }
+    },
+    "sql.transaction-commit": {
+      "status": 200,
+      "headers": {
+        "content-type": "application/json"
+      },
+      "body": {
+        "returned": 42,
+        "row": {
+          "n": 3
+        }
+      }
+    },
+    "identity.namespace": {
+      "status": 200,
+      "headers": {
+        "content-type": "application/json"
+      },
+      "body": {
+        "same": true,
+        "different": true,
+        "roundTrip": true,
+        "unique": true,
+        "invalid": "TypeError"
+      }
+    },
+    "concurrency.input-gates": [
+      {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json"
+        },
+        "body": {
+          "before": 0,
+          "after": 1,
+          "initialized": true
+        }
+      },
+      {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json"
+        },
+        "body": {
+          "before": 1,
+          "after": 2,
+          "initialized": true
+        }
+      },
+      {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json"
+        },
+        "body": {
+          "before": 4,
+          "after": 5,
+          "initialized": true
+        }
+      },
+      {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json"
+        },
+        "body": {
+          "before": 11,
+          "after": 12,
+          "initialized": true
+        }
+      },
+      {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json"
+        },
+        "body": {
+          "before": 2,
+          "after": 3,
+          "initialized": true
+        }
+      },
+      {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json"
+        },
+        "body": {
+          "before": 3,
+          "after": 4,
+          "initialized": true
+        }
+      },
+      {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json"
+        },
+        "body": {
+          "before": 5,
+          "after": 6,
+          "initialized": true
+        }
+      },
+      {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json"
+        },
+        "body": {
+          "before": 6,
+          "after": 7,
+          "initialized": true
+        }
+      },
+      {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json"
+        },
+        "body": {
+          "before": 7,
+          "after": 8,
+          "initialized": true
+        }
+      },
+      {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json"
+        },
+        "body": {
+          "before": 10,
+          "after": 11,
+          "initialized": true
+        }
+      },
+      {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json"
+        },
+        "body": {
+          "before": 8,
+          "after": 9,
+          "initialized": true
+        }
+      },
+      {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json"
+        },
+        "body": {
+          "before": 9,
+          "after": 10,
+          "initialized": true
+        }
+      }
+    ],
+    "concurrency.explicit-gate": [
+      {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json"
+        },
+        "body": {
+          "before": 1,
+          "after": 2,
+          "initialized": true
+        }
+      },
+      {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json"
+        },
+        "body": {
+          "before": 10,
+          "after": 11,
+          "initialized": true
+        }
+      },
+      {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json"
+        },
+        "body": {
+          "before": 2,
+          "after": 3,
+          "initialized": true
+        }
+      },
+      {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json"
+        },
+        "body": {
+          "before": 0,
+          "after": 1,
+          "initialized": true
+        }
+      },
+      {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json"
+        },
+        "body": {
+          "before": 3,
+          "after": 4,
+          "initialized": true
+        }
+      },
+      {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json"
+        },
+        "body": {
+          "before": 8,
+          "after": 9,
+          "initialized": true
+        }
+      },
+      {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json"
+        },
+        "body": {
+          "before": 4,
+          "after": 5,
+          "initialized": true
+        }
+      },
+      {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json"
+        },
+        "body": {
+          "before": 5,
+          "after": 6,
+          "initialized": true
+        }
+      },
+      {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json"
+        },
+        "body": {
+          "before": 6,
+          "after": 7,
+          "initialized": true
+        }
+      },
+      {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json"
+        },
+        "body": {
+          "before": 7,
+          "after": 8,
+          "initialized": true
+        }
+      },
+      {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json"
+        },
+        "body": {
+          "before": 11,
+          "after": 12,
+          "initialized": true
+        }
+      },
+      {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json"
+        },
+        "body": {
+          "before": 9,
+          "after": 10,
+          "initialized": true
+        }
+      }
+    ],
+    "rpc.structured-clone": {
+      "status": 200,
+      "headers": {
+        "content-type": "application/json"
+      },
+      "body": {
+        "type": "Object",
+        "value": [
+          [
+            "big",
+            {
+              "type": "bigint",
+              "value": "9007199254740993"
+            }
+          ],
+          [
+            "buffer",
+            {
+              "type": "ArrayBuffer",
+              "value": [8, 9]
+            }
+          ],
+          [
+            "bytes",
+            {
+              "type": "Uint8Array",
+              "value": [0, 127, 128, 255]
+            }
+          ],
+          [
+            "date",
+            {
+              "type": "Date",
+              "value": "2020-01-02T03:04:05.000Z"
+            }
+          ],
+          [
+            "map",
+            {
+              "type": "Map",
+              "value": [
+                [
+                  {
+                    "type": "string",
+                    "value": "first"
+                  },
+                  {
+                    "type": "number",
+                    "value": 1
+                  }
+                ],
+                [
+                  {
+                    "type": "number",
+                    "value": 2
+                  },
+                  {
+                    "type": "string",
+                    "value": "second"
+                  }
+                ]
+              ]
+            }
+          ],
+          [
+            "missing",
+            {
+              "type": "undefined"
+            }
+          ],
+          [
+            "nan",
+            {
+              "type": "number",
+              "value": "NaN"
+            }
+          ],
+          [
+            "negativeInfinity",
+            {
+              "type": "number",
+              "value": "-Infinity"
+            }
+          ],
+          [
+            "negativeZero",
+            {
+              "type": "number",
+              "value": "-0"
+            }
+          ],
+          [
+            "nested",
+            {
+              "type": "Array",
+              "value": [
+                {
+                  "type": "boolean",
+                  "value": false
+                },
+                {
+                  "type": "string",
+                  "value": ""
+                },
+                {
+                  "type": "Object",
+                  "value": [
+                    [
+                      "x",
+                      {
+                        "type": "undefined"
+                      }
+                    ]
+                  ]
+                }
+              ]
+            }
+          ],
+          [
+            "nil",
+            {
+              "type": "null"
+            }
+          ],
+          [
+            "positiveInfinity",
+            {
+              "type": "number",
+              "value": "+Infinity"
+            }
+          ],
+          [
+            "set",
+            {
+              "type": "Set",
+              "value": [
+                {
+                  "type": "string",
+                  "value": "b"
+                },
+                {
+                  "type": "string",
+                  "value": "a"
+                }
+              ]
+            }
+          ]
+        ]
+      }
+    },
+    "rpc.thrown-error": {
+      "status": 200,
+      "headers": {
+        "content-type": "application/json"
+      },
+      "body": {
+        "error": "TypeError"
+      }
+    },
+    "rpc.returned-target": {
+      "status": 200,
+      "headers": {
+        "content-type": "application/json"
+      },
+      "body": {
+        "sum": 42
+      }
+    },
+    "alarms.set-replace-delete": {
+      "status": 200,
+      "headers": {
+        "content-type": "application/json"
+      },
+      "body": {
+        "set": true,
+        "replaced": true,
+        "deleted": null
+      }
+    },
+    "alarms.fire": {
+      "status": 200,
+      "headers": {
+        "content-type": "application/json"
+      },
+      "body": {
+        "fires": 1,
+        "retry": false,
+        "retryCount": 0
+      }
+    },
+    "alarms.retry": {
+      "status": 200,
+      "headers": {
+        "content-type": "application/json"
+      },
+      "body": {
+        "fires": 2,
+        "retry": true,
+        "retryCount": 1
+      }
+    },
+    "streams.tee": {
+      "status": 200,
+      "headers": {
+        "content-type": "application/json"
+      },
+      "body": {
+        "a": [0, 128, 255, 10],
+        "b": [0, 128, 255, 10]
+      }
+    },
+    "streams.cancel": {
+      "status": 200,
+      "headers": {
+        "content-type": "application/json"
+      },
+      "body": {
+        "first": {
+          "value": "first",
+          "done": false
+        },
+        "reason": "stop",
+        "pulls": 1,
+        "after": {
+          "done": true
+        }
+      }
+    },
+    "streams.error": {
+      "status": 200,
+      "headers": {
+        "content-type": "application/json"
+      },
+      "body": {
+        "error": "TypeError"
+      }
+    },
+    "streams.transform": {
+      "status": 200,
+      "headers": {
+        "content-type": "application/json"
+      },
+      "body": {
+        "text": "AΛ"
+      }
+    },
+    "streams.backpressure": {
+      "status": 200,
+      "headers": {
+        "content-type": "application/json"
+      },
+      "body": {
+        "initial": 1,
+        "blocked": 0,
+        "resumed": 1,
+        "trace": ["one"]
+      }
+    },
+    "streams.http-binary": {
+      "status": 200,
+      "headers": {
+        "content-type": "application/octet-stream"
+      },
+      "body": [0, 1, 128, 255, 10]
+    },
+    "websocket.protocol-attachment": [
+      {
+        "type": "open"
+      },
+      {
+        "type": "message",
+        "value": "hello λ"
+      },
+      {
+        "type": "message",
+        "value": [0, 128, 255]
+      },
+      {
+        "type": "message",
+        "value": "{\"label\":\"durable\",\"count\":7}"
+      },
+      {
+        "type": "close",
+        "code": 1000,
+        "reason": "done",
+        "clean": true
+      }
+    ],
+    "workflows.retry": {
+      "status": 200,
+      "headers": {
+        "content-type": "application/json"
+      },
+      "body": {
+        "status": "complete",
+        "output": {
+          "attempts": 2
+        }
+      }
+    },
+    "workflows.event": {
+      "status": 200,
+      "headers": {
+        "content-type": "application/json"
+      },
+      "body": {
+        "status": "complete",
+        "output": {
+          "payload": {
+            "value": "λ"
+          },
+          "type": "continue"
+        }
+      }
+    },
+    "rpc.named-service": {
+      "status": 200,
+      "headers": {
+        "content-type": "application/json"
+      },
+      "body": {
+        "greeting": "hello λ"
+      }
+    },
+    "kv.metadata-list": {
+      "status": 200,
+      "headers": {
+        "content-type": "application/json"
+      },
+      "body": {
+        "value": {
+          "value": {
+            "value": "λ"
+          },
+          "metadata": {
+            "tag": 7
+          }
+        },
+        "names": ["/a"],
+        "complete": true,
+        "missing": null
+      }
+    },
+    "kv.binary-pagination": {
+      "status": 200,
+      "headers": {
+        "content-type": "application/json"
+      },
+      "body": {
+        "bytes": [0, 128, 255],
+        "first": ["/a"],
+        "second": ["/b"],
+        "complete": true
+      }
+    },
+    "kv.stream-put": {
+      "status": 200,
+      "headers": {
+        "content-type": "application/json"
+      },
+      "body": {
+        "bytes": [0, 128, 255, 65, 206, 187],
+        "metadata": {
+          "source": "stream"
+        },
+        "deleted": null
+      }
+    },
+    "kv.stream-limit": {
+      "status": 200,
+      "headers": {
+        "content-type": "application/json"
+      },
+      "body": {
+        "rejected": true,
+        "missing": true
+      }
+    },
+    "d1.bindings-results": {
+      "status": 200,
+      "headers": {
+        "content-type": "application/json"
+      },
+      "body": {
+        "success": true,
+        "inserted": [
+          {
+            "n": 7,
+            "text": "λ'"
+          }
+        ],
+        "first": {
+          "n": 7,
+          "text": "λ'",
+          "bytes": [0, 255]
+        },
+        "raw": [[7, "λ'"]]
+      }
+    },
+    "d1.batch-rollback": {
+      "status": 200,
+      "headers": {
+        "content-type": "application/json"
+      },
+      "body": {
+        "rejected": true,
+        "value": 1
+      }
+    },
+    "r2.metadata-range-delete": {
+      "status": 200,
+      "headers": {
+        "content-type": "application/json"
+      },
+      "body": {
+        "bytes": [0, 128, 255, 10],
+        "range": [128, 255],
+        "size": 4,
+        "type": "application/test",
+        "metadata": {
+          "label": "λ"
+        },
+        "sameEtag": true,
+        "names": ["/a"],
+        "missing": null
+      }
+    },
+    "r2.conditional-write": {
+      "status": 200,
+      "headers": {
+        "content-type": "application/json"
+      },
+      "body": {
+        "rejected": true,
+        "accepted": true,
+        "value": "second"
+      }
+    },
+    "r2.multipart": {
+      "status": 200,
+      "headers": {
+        "content-type": "application/json"
+      },
+      "body": {
+        "part": 1,
+        "value": "single final part",
+        "aborted": null
+      }
+    },
+    "queues.batch-ack-retry": {
+      "status": 200,
+      "headers": {
+        "content-type": "application/json"
+      },
+      "body": {
+        "batch-a": {
+          "attempts": 1,
+          "retry": false
+        },
+        "batch-b": {
+          "attempts": 1,
+          "retry": false
+        },
+        "single": {
+          "attempts": 2,
+          "retry": true
+        }
+      }
+    },
+    "workflows.steps-sleep-result": {
+      "status": 200,
+      "headers": {
+        "content-type": "application/json"
+      },
+      "body": {
+        "status": "complete",
+        "output": {
+          "result": 41
+        }
+      }
+    },
+    "node.buffer": {
+      "status": 200,
+      "headers": {
+        "content-type": "application/json"
+      },
+      "body": {
+        "hex": "cebbf09f8c8d",
+        "base64": "zrvwn4yN",
+        "roundTrip": "λ🌍",
+        "slice": [206, 187]
+      }
+    },
+    "node.path-events": {
+      "status": 200,
+      "headers": {
+        "content-type": "application/json"
+      },
+      "body": {
+        "path": "/b/c",
+        "basename": "b",
+        "trace": ["once:a", "on:a", "on:b"],
+        "remaining": 0
+      }
+    },
+    "node.async-context": {
+      "status": 200,
+      "headers": {
+        "content-type": "application/json"
+      },
+      "body": {
+        "inside": "request",
+        "outsideMissing": true
+      }
+    },
+    "node.hash-compression": {
+      "status": 200,
+      "headers": {
+        "content-type": "application/json"
+      },
+      "body": {
+        "sha256": "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad",
+        "gzip": "hello λ",
+        "gzipBytes": "H4sIAAAAAAAAE8tIzcnJVzi3GwA5Y5TOCAAAAA==",
+        "deflate": "hello λ",
+        "deflateBytes": "eJzLSM3JyVc4txsADyIDvg=="
+      }
+    },
+    "wasm.module": {
+      "status": 200,
+      "headers": {
+        "content-type": "application/json"
+      },
+      "body": {
+        "positive": 42,
+        "negative": -5,
+        "overflow": -2147483648
+      }
+    },
+    "assets.binding": {
+      "status": 200,
+      "headers": {
+        "content-type": "application/json"
+      },
+      "body": {
+        "status": 200,
+        "text": "hello asset λ\n",
+        "header": "present",
+        "missing": 404
+      }
+    },
+    "dynamic.fetch": {
+      "status": 200,
+      "headers": {
+        "content-type": "application/json"
+      },
+      "body": {
+        "status": 200,
+        "text": "dynamic λ"
+      }
+    },
+    "facets.isolation": {
+      "status": 200,
+      "headers": {
+        "content-type": "application/json"
+      },
+      "body": {
+        "a": {
+          "n": 1
+        },
+        "b": {
+          "n": 2
+        },
+        "c": {
+          "n": 1
+        }
+      }
+    },
+    "repro.body-readers": {
+      "status": 200,
+      "headers": {
+        "content-type": "application/json"
+      },
+      "body": [
+        {
+          "kind": "Request",
+          "method": "text",
+          "before": false,
+          "after": true,
+          "second": {
+            "outcome": "rejected",
+            "name": "TypeError",
+            "domException": false
+          }
+        },
+        {
+          "kind": "Request",
+          "method": "json",
+          "before": false,
+          "after": true,
+          "second": {
+            "outcome": "rejected",
+            "name": "TypeError",
+            "domException": false
+          }
+        },
+        {
+          "kind": "Request",
+          "method": "arrayBuffer",
+          "before": false,
+          "after": true,
+          "second": {
+            "outcome": "rejected",
+            "name": "TypeError",
+            "domException": false
+          }
+        },
+        {
+          "kind": "Request",
+          "method": "blob",
+          "before": false,
+          "after": true,
+          "second": {
+            "outcome": "rejected",
+            "name": "TypeError",
+            "domException": false
+          }
+        },
+        {
+          "kind": "Request",
+          "method": "formData",
+          "before": false,
+          "after": true,
+          "second": {
+            "outcome": "rejected",
+            "name": "TypeError",
+            "domException": false
+          }
+        },
+        {
+          "kind": "Request",
+          "method": "null-body-control",
+          "first": "",
+          "second": "",
+          "used": false
+        },
+        {
+          "kind": "Response",
+          "method": "text",
+          "before": false,
+          "after": true,
+          "second": {
+            "outcome": "rejected",
+            "name": "TypeError",
+            "domException": false
+          }
+        },
+        {
+          "kind": "Response",
+          "method": "json",
+          "before": false,
+          "after": true,
+          "second": {
+            "outcome": "rejected",
+            "name": "TypeError",
+            "domException": false
+          }
+        },
+        {
+          "kind": "Response",
+          "method": "arrayBuffer",
+          "before": false,
+          "after": true,
+          "second": {
+            "outcome": "rejected",
+            "name": "TypeError",
+            "domException": false
+          }
+        },
+        {
+          "kind": "Response",
+          "method": "blob",
+          "before": false,
+          "after": true,
+          "second": {
+            "outcome": "rejected",
+            "name": "TypeError",
+            "domException": false
+          }
+        },
+        {
+          "kind": "Response",
+          "method": "formData",
+          "before": false,
+          "after": true,
+          "second": {
+            "outcome": "rejected",
+            "name": "TypeError",
+            "domException": false
+          }
+        },
+        {
+          "kind": "Response",
+          "method": "null-body-control",
+          "first": "",
+          "second": "",
+          "used": false
+        }
+      ]
+    },
+    "repro.storage-errors": {
+      "status": 200,
+      "headers": {
+        "content-type": "application/json"
+      },
+      "body": {
+        "asyncLimit": {
+          "outcome": "rejected",
+          "name": "TypeError",
+          "domException": false
+        },
+        "syncLimit": {
+          "outcome": "rejected",
+          "name": "TypeError",
+          "domException": false
+        },
+        "asyncPut": {
+          "outcome": "rejected",
+          "name": "DataCloneError",
+          "domException": true
+        },
+        "syncPut": {
+          "outcome": "rejected",
+          "name": "DataCloneError",
+          "domException": true
+        },
+        "batchPut": {
+          "outcome": "rejected",
+          "name": "DataCloneError",
+          "domException": true
+        },
+        "absent": true,
+        "validLimit": []
+      }
+    },
+    "storage.sync-committed": {
+      "status": 200,
+      "headers": {
+        "content-type": "application/json"
+      },
+      "body": {
+        "retained": "durable λ",
+        "removed": null,
+        "rows": [
+          {
+            "id": 1,
+            "value": "committed"
+          }
+        ]
+      }
+    },
+    "sql.consumed-write-cursor": {
+      "status": 200,
+      "headers": {
+        "content-type": "application/json"
+      },
+      "body": {
+        "returned": [
+          {
+            "n": 1
+          },
+          {
+            "n": 2
+          },
+          {
+            "n": 3
+          }
+        ],
+        "rows": [
+          {
+            "n": 1
+          },
+          {
+            "n": 2
+          },
+          {
+            "n": 3
+          }
+        ]
+      }
+    },
+    "sql.open-read-cursor": {
+      "status": 200,
+      "headers": {
+        "content-type": "application/json"
+      },
+      "body": {
+        "first": {
+          "n": 1
+        },
+        "remaining": [
+          {
+            "n": 2
+          },
+          {
+            "n": 3
+          }
+        ]
+      }
+    },
+    "assets.html-routing": {
+      "status": 200,
+      "headers": {
+        "content-type": "application/json"
+      },
+      "body": {
+        "page": {
+          "status": 200,
+          "location": null,
+          "page": "html",
+          "contentType": "text/html; charset=utf-8",
+          "body": "<!doctype html>\n<title>tck page</title>"
+        },
+        "pageHtml": {
+          "status": 307,
+          "location": "/page",
+          "page": null,
+          "contentType": null,
+          "body": null
+        },
+        "folder": {
+          "status": 307,
+          "location": "/folder/",
+          "page": null,
+          "contentType": null,
+          "body": null
+        },
+        "folderSlash": {
+          "status": 200,
+          "location": null,
+          "page": null,
+          "contentType": "text/html; charset=utf-8",
+          "body": "<!doctype html>\n<title>tck folder index</title>"
+        },
+        "missing": {
+          "status": 404,
+          "location": null,
+          "page": null,
+          "contentType": null,
+          "body": null
+        }
+      }
+    },
+    "assets.redirects": {
+      "status": 200,
+      "headers": {
+        "content-type": "application/json"
+      },
+      "body": {
+        "permanent": {
+          "status": 301,
+          "location": "/page",
+          "page": null,
+          "contentType": null,
+          "body": null
+        },
+        "temporary": {
+          "status": 302,
+          "location": "/page",
+          "page": null,
+          "contentType": null,
+          "body": null
+        },
+        "unmatched": {
+          "status": 404,
+          "location": null,
+          "page": null,
+          "contentType": null,
+          "body": null
+        }
+      }
+    },
+    "assets.worker-first": [
+      {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json"
+        },
+        "body": {
+          "served": "worker",
+          "path": "/shadowed.txt"
+        }
+      },
+      {
+        "status": 200,
+        "headers": {
+          "content-type": "text/plain; charset=utf-8"
+        },
+        "body": "asset-first λ\n"
+      }
+    ],
+    "dynamic.props": {
+      "status": 200,
+      "headers": {
+        "content-type": "application/json"
+      },
+      "body": {
+        "tenant": {
+          "props": {
+            "tenant": "alpha",
+            "seed": 7
+          }
+        },
+        "other": {
+          "props": {
+            "tenant": "beta",
+            "seed": 9
+          }
+        }
+      }
+    },
+    "dynamic.bindings": {
+      "status": 200,
+      "headers": {
+        "content-type": "application/json"
+      },
+      "body": {
+        "token": "token λ",
+        "count": 3,
+        "upstream": "gateway /binding"
+      }
+    },
+    "dynamic.outbound": {
+      "status": 200,
+      "headers": {
+        "content-type": "application/json"
+      },
+      "body": {
+        "blocked": {
+          "global": "blocked",
+          "binding": "gateway /binding"
+        },
+        "gateway": {
+          "global": "gateway /global",
+          "binding": "gateway /binding"
+        }
+      }
+    },
+    "dynamic.limits": {
+      "status": 200,
+      "headers": {
+        "content-type": "application/json"
+      },
+      "body": {
+        "token": "limited λ",
+        "count": 1,
+        "upstream": "gateway /binding"
+      }
+    },
+    "facets.transaction": {
+      "status": 200,
+      "headers": {
+        "content-type": "application/json"
+      },
+      "body": {
+        "seeded": {
+          "seeded": true
+        },
+        "initial": {
+          "balance": 10
+        },
+        "commit": {
+          "inside": 20
+        },
+        "committed": {
+          "balance": 20
+        },
+        "rollback": {
+          "inside": 30
+        },
+        "restored": {
+          "balance": 20
+        }
+      }
+    },
+    "facets.outbound-transaction": {
+      "status": 200,
+      "headers": {
+        "content-type": "application/json"
+      },
+      "body": {
+        "control": {
+          "balance": 40,
+          "outbound": "gateway /facet"
+        },
+        "inTransaction": {
+          "balance": 40,
+          "outbound": "gateway /facet"
+        },
+        "after": {
+          "balance": 40
+        }
+      }
+    },
+    "crypto.ecdsa-p256": {
+      "status": 200,
+      "headers": {
+        "content-type": "application/json"
+      },
+      "body": {
+        "signatureBytes": 64,
+        "verified": true,
+        "tampered": false,
+        "jwkVerified": true,
+        "rawVerified": true,
+        "jwk": {
+          "kty": "EC",
+          "crv": "P-256",
+          "ext": true,
+          "keyOps": ["verify"],
+          "xBytes": 32,
+          "yBytes": 32,
+          "privateOmitted": true
+        },
+        "raw": {
+          "bytes": 65,
+          "uncompressed": true
+        },
+        "usages": {
+          "private": ["sign"],
+          "public": ["verify"]
+        },
+        "algorithm": {
+          "name": "ECDSA",
+          "namedCurve": "P-256"
+        },
+        "types": ["private", "public"]
+      }
+    },
+    "crypto.key-derivation": {
+      "status": 200,
+      "headers": {
+        "content-type": "application/json"
+      },
+      "body": {
+        "pbkdf2": "c5e478d59288c841aa530db6845c4c8d962893a001ce4e11a4963873aa98134a",
+        "hkdf": "3cb25f25faacd57a90434f64d0362f2a2d2d0a90cf1a5a4c5db02d56ecc4c5bf34007208d5b887185865",
+        "derivedMac": "08d3277c85e4850fcc2d3599090b3e13814fdb36925068cb91273b336fe3f5b0",
+        "derivedAlgorithm": {
+          "name": "HMAC",
+          "hash": {
+            "name": "SHA-256"
+          },
+          "length": 256
+        },
+        "unalignedLength": "OperationError",
+        "zeroIterations": "OperationError"
+      }
+    },
+    "crypto.key-export": {
+      "status": 200,
+      "headers": {
+        "content-type": "application/json"
+      },
+      "body": {
+        "hmacRaw": [107, 101, 121],
+        "aesRaw": [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15],
+        "hmacJwk": {
+          "kty": "oct",
+          "alg": "HS256",
+          "keyOps": ["sign", "verify"],
+          "ext": true,
+          "k": "a2V5"
+        },
+        "aesJwk": {
+          "kty": "oct",
+          "alg": "A128GCM",
+          "keyOps": ["encrypt", "decrypt"],
+          "ext": true,
+          "k": "AAECAwQFBgcICQoLDA0ODw"
+        },
+        "algorithms": [
+          {
+            "name": "HMAC",
+            "hash": {
+              "name": "SHA-256"
+            },
+            "length": 24
+          },
+          {
+            "name": "AES-GCM",
+            "length": 128
+          }
+        ]
+      }
+    },
+    "crypto.invalid-input": {
+      "status": 200,
+      "headers": {
+        "content-type": "application/json"
+      },
+      "body": {
+        "wrongUsage": "InvalidAccessError",
+        "unknownAlgorithm": "NotSupportedError",
+        "unknownHash": "NotSupportedError",
+        "badKeyLength": "DataError",
+        "malformedJwk": "DataError",
+        "emptyUsages": "SyntaxError",
+        "mismatchedUsage": "SyntaxError",
+        "nonExtractable": "InvalidAccessError",
+        "emptyIv": "OperationError"
+      }
+    },
+    "messaging.message-channel": {
+      "status": 200,
+      "headers": {
+        "content-type": "application/json"
+      },
+      "body": {
+        "synchronous": 0,
+        "messages": {
+          "type": "Array",
+          "value": [
+            {
+              "type": "string",
+              "value": "first"
+            },
+            {
+              "type": "Object",
+              "value": [
+                [
+                  "bytes",
+                  {
+                    "type": "Uint8Array",
+                    "value": [0, 255]
+                  }
+                ],
+                [
+                  "n",
+                  {
+                    "type": "number",
+                    "value": 2
+                  }
+                ],
+                [
+                  "set",
+                  {
+                    "type": "Set",
+                    "value": [
+                      {
+                        "type": "string",
+                        "value": "a"
+                      }
+                    ]
+                  }
+                ]
+              ]
+            },
+            {
+              "type": "Array",
+              "value": [
+                {
+                  "type": "number",
+                  "value": 3
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          ]
+        },
+        "unserializable": "DataCloneError",
+        "afterClose": "accepted",
+        "droppedAfterClose": true
+      }
+    },
+    "messaging.event-source": {
+      "status": 200,
+      "headers": {
+        "content-type": "application/json"
+      },
+      "body": {
+        "events": [
+          {
+            "type": "greeting",
+            "data": "hello λ",
+            "lastEventId": "1"
+          },
+          {
+            "type": "message",
+            "data": "line one\nline two",
+            "lastEventId": "1"
+          }
+        ],
+        "trace": ["error"],
+        "exhausted": 2,
+        "closed": 2,
+        "states": [0, 1, 2],
+        "withCredentials": false
+      }
+    },
+    "node.util": {
+      "status": 200,
+      "headers": {
+        "content-type": "application/json"
+      },
+      "body": {
+        "promisified": "value:x",
+        "promisifiedError": "TypeError",
+        "inspect": "{ a: 1, b: [ 1, 2 ], c: 'λ' }",
+        "inspectDepth": "{ a: { b: { c: [Object] } } }",
+        "format": "x:2:{\"a\":1}",
+        "types": {
+          "date": true,
+          "view": true,
+          "promise": true,
+          "map": true,
+          "notDate": false
+        },
+        "deepEqual": [true, false],
+        "sharedEncoder": [2, "λ"]
+      }
+    },
+    "node.assert": {
+      "status": 200,
+      "headers": {
+        "content-type": "application/json"
+      },
+      "body": {
+        "satisfied": "accepted",
+        "strictEqual": {
+          "name": "AssertionError",
+          "code": "ERR_ASSERTION",
+          "operator": "strictEqual",
+          "actual": 1,
+          "expected": 2
+        },
+        "deepStrictEqual": {
+          "name": "AssertionError",
+          "code": "ERR_ASSERTION",
+          "operator": "deepStrictEqual",
+          "actual": {
+            "a": [1]
+          },
+          "expected": {
+            "a": [2]
+          }
+        },
+        "typeSensitive": {
+          "name": "AssertionError",
+          "code": "ERR_ASSERTION",
+          "operator": "deepStrictEqual",
+          "actual": {
+            "a": 1
+          },
+          "expected": {
+            "a": "1"
+          }
+        },
+        "throws": "accepted",
+        "throwsMissing": {
+          "name": "AssertionError",
+          "code": "ERR_ASSERTION",
+          "operator": "throws"
+        },
+        "rejects": "accepted",
+        "resolvedNotRejected": "AssertionError"
+      }
+    },
+    "node.stream-timers": {
+      "status": 200,
+      "headers": {
+        "content-type": "application/json"
+      },
+      "body": {
+        "chunks": ["a", "λ"],
+        "chunkType": "string",
+        "binary": [0, 128, 255],
+        "fromWeb": "aλ",
+        "race": "fast",
+        "immediate": "soon",
+        "aborted": "AbortError"
+      }
+    },
+    "websocket.outbound-close": {
+      "status": 200,
+      "headers": {
+        "content-type": "application/json"
+      },
+      "body": {
+        "echo": {
+          "type": "message",
+          "data": "echo:ping λ"
+        },
+        "closed": {
+          "type": "close",
+          "code": 4001,
+          "reason": "server λ",
+          "clean": true
+        },
+        "readyState": 3,
+        "invalidCode": "InvalidAccessError"
+      }
+    },
+    "websocket.concurrent-sockets": {
+      "status": 200,
+      "headers": {
+        "content-type": "application/json"
+      },
+      "body": {
+        "echoes": [
+          "echo:n0",
+          "echo:n1",
+          "echo:n10",
+          "echo:n11",
+          "echo:n12",
+          "echo:n13",
+          "echo:n14",
+          "echo:n15",
+          "echo:n2",
+          "echo:n3",
+          "echo:n4",
+          "echo:n5",
+          "echo:n6",
+          "echo:n7",
+          "echo:n8",
+          "echo:n9"
+        ],
+        "open": 16
+      }
+    },
+    "flags.enabled-defaults": {
+      "status": 200,
+      "headers": {
+        "content-type": "application/json"
+      },
+      "body": {
+        "binaryType": "blob",
+        "deleteAll": {
+          "values": [],
+          "alarmPresent": false
+        }
+      }
+    },
+    "flags.disabled-counterparts": {
+      "status": 200,
+      "headers": {
+        "content-type": "application/json"
+      },
+      "body": {
+        "binaryType": "arraybuffer",
+        "deleteAll": {
+          "values": [],
+          "alarmPresent": true
+        }
+      }
+    },
+    "kv.expiration": {
+      "status": 200,
+      "headers": {
+        "content-type": "application/json"
+      },
+      "body": {
+        "value": "λ",
+        "metadata": {
+          "tag": 1
+        },
+        "names": ["/keep", "/ttl"],
+        "keepExpiration": null,
+        "expiringInWindow": true,
+        "tooShort": "Error"
+      }
+    },
+    "d1.exec-batch": {
+      "status": 200,
+      "headers": {
+        "content-type": "application/json"
+      },
+      "body": {
+        "execCount": 2,
+        "success": [true, true, true],
+        "results": [
+          [],
+          [],
+          [
+            {
+              "n": 1
+            },
+            {
+              "n": 2
+            }
+          ]
+        ],
+        "changes": [1, 1, 0]
+      }
+    },
+    "r2.list-options": {
+      "status": 200,
+      "headers": {
+        "content-type": "application/json"
+      },
+      "body": {
+        "objects": ["/top"],
+        "prefixes": ["/dir/"],
+        "truncated": false,
+        "nested": ["/dir/a", "/dir/b"],
+        "nestedPrefixes": [],
+        "bare": {
+          "http": {},
+          "custom": {}
+        },
+        "included": {
+          "http": "text/plain; charset=utf-8",
+          "custom": {
+            "label": "λ"
+          }
+        },
+        "written": {
+          "type": "text/plain; charset=utf-8",
+          "disposition": "attachment; filename=\"report.txt\"",
+          "cache": "max-age=42"
+        }
+      }
+    },
+    "queues.retry-delay": {
+      "status": 200,
+      "headers": {
+        "content-type": "application/json"
+      },
+      "body": {
+        "delayed:1": {
+          "attempts": 1,
+          "at": 1789785828962,
+          "id": "4e233dafb42fa44e6b82e48710a0bc4e"
+        },
+        "delayed:2": {
+          "attempts": 2,
+          "at": 1789785832969,
+          "id": "4e233dafb42fa44e6b82e48710a0bc4e"
+        }
+      }
+    },
+    "workflows.timeout": {
+      "status": 200,
+      "headers": {
+        "content-type": "application/json"
+      },
+      "body": {
+        "status": "complete",
+        "output": {
+          "timedOut": "Error",
+          "after": 25
+        }
+      }
+    },
+    "alarms.rearm-pending-timer": {
+      "status": 200,
+      "headers": {
+        "content-type": "application/json"
+      },
+      "body": {
+        "fires": 2,
+        "beforeTimer": true
+      }
+    },
+    "websocket.handler-streaming": [
+      {
+        "body": {
+          "messages": ["first", "second", "finished"],
+          "receivedAt": [5112.031166, 5615.298833, 6116.62]
+        }
+      }
+    ],
+    "websocket.peer-close": {
+      "status": 200,
+      "headers": {
+        "content-type": "application/json"
+      },
+      "body": {
+        "code": 4002,
+        "reason": "peer λ",
+        "wasClean": true
+      }
+    },
+    "crypto.ed25519": {
+      "status": 200,
+      "headers": {
+        "content-type": "application/json"
+      },
+      "body": {
+        "publicKeys": [
+          "d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a",
+          "d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a"
+        ],
+        "signatures": [
+          "e5564300c360ac729086e2cc806e828a84877f1eb8e5d974d873e065224901555fb8821590a33bacc61e39701cf9b46bd25bf5f0595bbe24655141438e7a100b",
+          "e5564300c360ac729086e2cc806e828a84877f1eb8e5d974d873e065224901555fb8821590a33bacc61e39701cf9b46bd25bf5f0595bbe24655141438e7a100b"
+        ],
+        "verified": [
+          [true, true],
+          [true, true]
+        ],
+        "tampered": false
+      }
+    },
+    "crypto.x25519": {
+      "status": 200,
+      "headers": {
+        "content-type": "application/json"
+      },
+      "body": {
+        "publicKey": "de9edb7d7b7dc1b4d35b61c2ece435373f8343c85b78674dadfc7e146f882b4f",
+        "shared": "4a5d9d5ba4ce2de1728e3bf480350f25e07e21c947d19e3376f09b3c1e161742",
+        "lowOrder": "OperationError"
+      }
+    },
+    "sql.nested-sync": {
+      "status": 200,
+      "headers": {
+        "content-type": "application/json"
+      },
+      "body": {
+        "arities": [0, 0],
+        "returned": 42,
+        "rows": [
+          {
+            "n": 1
+          },
+          {
+            "n": 2
+          },
+          {
+            "n": 4
+          }
+        ]
+      }
+    },
+    "sql.invalid-utf8": {
+      "status": 200,
+      "headers": {
+        "content-type": "application/json"
+      },
+      "body": {
+        "value": "a�b",
+        "bytes": "61FF62"
+      }
+    },
+    "http.unicode-headers": {
+      "status": 200,
+      "headers": {
+        "content-type": "application/json"
+      },
+      "body": {
+        "constructed": "λ🌍, 雪",
+        "response": "λ🌍, 雪",
+        "fetched": "λ🌍, 雪"
+      }
+    },
+    "r2.key-identity": {
+      "status": 200,
+      "headers": {
+        "content-type": "application/json"
+      },
+      "body": {
+        "values": [
+          "value-0",
+          "value-1",
+          "value-2",
+          "value-3",
+          "value-4",
+          "value-5"
+        ],
+        "listed": [
+          "/case/a/b",
+          "case/a/%2F",
+          "case/a//b",
+          "case/a/b",
+          "case/a/b/",
+          "case/λ/%"
+        ],
+        "deleted": true,
+        "sibling": "value-1"
+      }
+    },
+    "context.exports-fetch": {
+      "status": 200,
+      "headers": {
+        "content-type": "application/json"
+      },
+      "body": {
+        "default": {
+          "target": "default",
+          "method": "POST",
+          "body": "loopback λ"
+        },
+        "named": "gateway /loopback"
+      }
+    },
+    "facets.exports-class": {
+      "status": 200,
+      "headers": {
+        "content-type": "application/json"
+      },
+      "body": {
+        "first": {
+          "n": 1
+        },
+        "second": {
+          "n": 2
+        },
+        "isolated": {
+          "n": 1
+        }
+      }
+    },
+    "dynamic.relative-imports": {
+      "status": 200,
+      "headers": {
+        "content-type": "application/json"
+      },
+      "body": {
+        "status": 200,
+        "text": "dynamic λ"
+      }
+    },
+    "dynamic.validation": {
+      "status": 200,
+      "headers": {
+        "content-type": "application/json"
+      },
+      "body": {
+        "control": "dynamic λ",
+        "missingDate": "Error",
+        "exportValue": "Error"
+      }
+    },
+    "dynamic.wasm-shape": {
+      "status": 200,
+      "headers": {
+        "content-type": "application/json"
+      },
+      "body": {
+        "valid": {
+          "sum": 42
+        },
+        "raw": "TypeError"
+      }
+    },
+    "assets.root-worker-first": {
+      "status": 200,
+      "headers": {
+        "content-type": "application/json"
+      },
+      "body": {
+        "served": "worker",
+        "path": "/"
+      }
+    }
+  },
+  "divergences": {
+    "cache.documented-miss": {
+      "status": 200,
+      "headers": {
+        "content-type": "application/json"
+      },
+      "body": {
+        "value": null,
+        "deleted": false
+      }
+    },
+    "rpc.returned-target": {
+      "status": 200,
+      "headers": {
+        "content-type": "application/json"
+      },
+      "body": {
+        "error": {
+          "name": "Error",
+          "message": "RPC stubs cannot cross isolate boundaries yet."
+        }
+      }
+    },
+    "crypto.key-export": {
+      "status": 200,
+      "headers": {
+        "content-type": "application/json"
+      },
+      "body": {
+        "hmacRaw": [107, 101, 121],
+        "aesRaw": [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15],
+        "hmacJwk": "NotSupportedError",
+        "aesJwk": "NotSupportedError",
+        "algorithms": [
+          {
+            "name": "HMAC",
+            "hash": {
+              "name": "SHA-256"
+            },
+            "length": 24
+          },
+          {
+            "name": "AES-GCM",
+            "length": 128
+          }
+        ]
+      }
+    }
+  }
+}
