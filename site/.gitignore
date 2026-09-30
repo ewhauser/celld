@@ -5,3 +5,5 @@ dist/
 src/content/docs/fork/
 # The TCK results dashboard, downloaded by CI or left as a placeholder by pnpm sync.
 public/compatibility/
+# The Performance workflow's results, downloaded by CI for the performance page.
+perf-results/
