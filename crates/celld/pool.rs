@@ -444,7 +444,7 @@ impl Residency {
     pub(crate) async fn adopt(
         mut self,
         cell: &str,
-        storage: js::CellStorage<'_>,
+        storage: js::CellStorage,
     ) -> Result<(Self, celld_logic::wake::AlarmSnapshot)> {
         anyhow::ensure!(!self.adopted, "cell residency already adopted");
         let slot = self.slot.clone();

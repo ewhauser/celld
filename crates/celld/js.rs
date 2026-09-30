@@ -2117,6 +2117,11 @@ impl WorkerConfig {
         self
     }
 
+    /// Whether this Worker's SQLite connections load sqlite-vec.
+    pub(crate) fn sqlite_vec(&self) -> bool {
+        self.compat.sqlite_vec
+    }
+
     /// Whether cells of `class` supervise a container.
     pub fn container_class(&self, class: &str) -> bool {
         self.containers.iter().any(|spec| spec.class_name == class)
@@ -2207,20 +2212,22 @@ impl WorkerConfig {
     }
 }
 
-/// The storage authority installed when a cell enters an isolate.
-///
-/// The path and epoch form one value because opening either one without the
+/// The storage authority installed when a cell enters an isolate: its
+/// database, opened and migrated before the adoption turn
+/// (`storage::prepare_at_epoch`), for that turn to install. The path and
+/// epoch stay one value inside it because opening either one without the
 /// other would let later asynchronous work use the wrong ownership epoch.
 #[doc(hidden)]
-pub struct CellStorage<'a> {
-    pub path: &'a str,
-    pub epoch: u64,
-    /// Fleet ownership supplies persistent writer epochs. Standalone ownership
-    /// resets on restart and never publishes discovery objects.
-    pub replicated_wake: bool,
-    /// The activation's paged VFS, when its restore paged. The file at `path`
-    /// is then sparse; opening it without this VFS reads holes as data.
-    pub vfs: Option<&'a str>,
+pub struct CellStorage(storage::PreparedCell);
+
+impl CellStorage {
+    pub(crate) fn new(prepared: storage::PreparedCell) -> Self {
+        Self(prepared)
+    }
+
+    pub(crate) fn into_prepared(self) -> storage::PreparedCell {
+        self.0
+    }
 }
 
 pub struct Worker {
@@ -6122,16 +6129,15 @@ impl Worker {
     pub fn own_cell(
         &mut self,
         cell: &str,
-        storage: Option<CellStorage<'_>>,
+        storage: Option<CellStorage>,
     ) -> Result<celld_logic::wake::AlarmSnapshot> {
-        let compat = self.inner.as_ref().expect("live worker isolate").compat;
         let (mut locker, _cells) = self.lock();
         v8::scope!(let hs, &mut *locker);
         let realm = self.realm(hs);
         let context = realm.context;
         let cs = &mut v8::ContextScope::new(hs, context);
         let tc = std::pin::pin!(v8::TryCatch::new(cs));
-        let alarm = adopt_cell(&mut tc.init(), cell, storage, compat)?;
+        let alarm = adopt_cell(&mut tc.init(), cell, storage)?;
         // The source identity belongs to this installed SQLite turn. Reading
         // it from the pool after this guard drops reaches no cell connection.
         Ok(observe_alarm(cell, alarm))
