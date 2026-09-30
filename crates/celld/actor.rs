@@ -26,14 +26,13 @@ use std::pin::Pin;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use tokio::sync::{mpsc, oneshot, watch, Mutex};
-use tokio_util::time::{delay_queue, DelayQueue};
 
 mod effects;
 mod local_request;
 mod production;
 pub use celld_logic::{EvictCancellation, EvictError, EvictFailure, EvictRefusal, EvictSuccess};
 pub use effects::StepOutput;
-pub(crate) use effects::{drain_step_output, LeaseRequest};
+pub(crate) use effects::{drain_step_output, LeaseRequest, Timers};
 pub use local_request::{LocalRequest, LocalRequestCompletion, LocalRequestFailure};
 
 type EvictionReply = oneshot::Sender<Result<EvictSuccess, EvictError>>;
