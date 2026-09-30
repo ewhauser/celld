@@ -359,6 +359,25 @@ impl<W: Warehouse> Loader<W> {
         })
     }
 
+    /// Once `landed` rows tagged `tag` have landed: wait until queries see
+    /// them all, asking `wait` before each new look (it pauses and says
+    /// whether to keep waiting), then route them. Returns how many were
+    /// visible; fewer than `landed` means the wait ran out, and the route
+    /// task routes the rest when they appear.
+    pub fn settle(
+        &mut self,
+        tag: &str,
+        landed: u64,
+        mut wait: impl FnMut() -> bool,
+    ) -> Result<u64, LoadError> {
+        let mut visible = self.visible(tag)?;
+        while visible < landed && wait() {
+            visible = self.visible(tag)?;
+        }
+        self.route()?;
+        Ok(visible)
+    }
+
     pub fn gaps(&mut self) -> Result<Rows, LoadError> {
         self.run("gaps", "SELECT * FROM EXPORT_GAPS")
     }

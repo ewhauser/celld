@@ -18,6 +18,7 @@ per transport.
 | `src/loader.rs` | `Loader`: deploy, Dynamic Table sync, routing, erasure, the read side |
 | `src/sql_api.rs` | (`sql-api`) a `Warehouse` on Snowflake's SQL API with key-pair auth |
 | `src/streaming.rs` | (`sql-api`) `Streaming`: appends to the landing pipe's elastic channel over Snowpipe Streaming's REST API |
+| `src/settings.rs` | (`sql-api`) the settings below, from the environment, for the binary and for `celld export` |
 | `src/source.rs` | (`blob-stream` or `kafka`) the consumer loop over any `Source`: read the topic, land batches, commit offsets, sync the Dynamic Tables |
 | `src/blob_stream.rs` | (`blob-stream`) the blob-stream consumer iterator as a `Source`, and its config file |
 | `src/kafka.rs` | (`kafka`) a librdkafka consumer-group member as a `Source` |
@@ -114,6 +115,12 @@ committed. A newer loader may read it; `EXPORT_SKIP` (comma-separated
 `blob-stream/<partition>/<offset>` or `kafka/<partition>/<offset>`) drops
 ones an operator has looked at.
 Nothing downstream would report the record a dropped message held missing.
+
+`celld export reconcile | verify | erase --consumer snowflake`, in a celld
+built with its `export-snowflake` feature, audit these tables with the same
+settings: they read `CELL_STREAMS`, `CELL_CERTIFIED`, `CELL_SNAPSHOTS` and
+one cell's records at a time, write `EXPORT_RECONCILER_FINDINGS` and
+tombstones, and land the reconciler's records as `ingest` does.
 
 `deploy` creates objects `IF NOT EXISTS`, so it never changes one that
 exists. After an upgrade changes a table, the pipe, the stream or a task,
