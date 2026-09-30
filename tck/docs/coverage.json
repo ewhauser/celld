@@ -1,0 +1,236 @@
+{
+  "version": 1,
+  "scope": "Public API behavior on the pinned local workerd and celld releases. A representative contract corpus, not an exhaustive proof for every input or distributed schedule.",
+  "families": [
+    {
+      "family": "http",
+      "cases": [
+        "http.request-response",
+        "http.body-consumption",
+        "http.headers",
+        "http.url-formdata",
+        "http.encoding",
+        "http.abort",
+        "http.redirect",
+        "http.fetch-abort",
+        "http.unicode-headers"
+      ]
+    },
+    {
+      "family": "storage",
+      "cases": [
+        "storage.round-trip",
+        "storage.transaction-rollback",
+        "storage.rich-values",
+        "storage.batch-ranges",
+        "storage.delete-all",
+        "storage.transaction-commit",
+        "storage.explicit-rollback",
+        "storage.invalid-input",
+        "storage.synchronous-kv",
+        "storage.sync-committed"
+      ]
+    },
+    {
+      "family": "sql",
+      "cases": [
+        "sql.transaction-rollback",
+        "sql.bindings-cursors",
+        "sql.constraints",
+        "sql.transaction-commit",
+        "sql.mixed-rollback",
+        "sql.consumed-write-cursor",
+        "sql.open-read-cursor",
+        "sql.nested-sync",
+        "sql.invalid-utf8"
+      ]
+    },
+    {
+      "family": "cache",
+      "cases": ["cache.documented-miss"]
+    },
+    {
+      "family": "crypto",
+      "cases": [
+        "crypto.sha256-hmac",
+        "crypto.aes-gcm",
+        "crypto.ecdsa-p256",
+        "crypto.key-derivation",
+        "crypto.key-export",
+        "crypto.invalid-input",
+        "crypto.ed25519",
+        "crypto.x25519"
+      ]
+    },
+    {
+      "family": "web",
+      "cases": ["web.html-rewriter"]
+    },
+    {
+      "family": "messaging",
+      "cases": ["messaging.message-channel", "messaging.event-source"]
+    },
+    {
+      "family": "identity",
+      "cases": ["identity.namespace"]
+    },
+    {
+      "family": "concurrency",
+      "cases": ["concurrency.input-gates", "concurrency.explicit-gate"]
+    },
+    {
+      "family": "rpc",
+      "cases": [
+        "rpc.structured-clone",
+        "rpc.thrown-error",
+        "rpc.returned-target",
+        "rpc.named-service"
+      ]
+    },
+    {
+      "family": "alarms",
+      "cases": [
+        "alarms.set-replace-delete",
+        "alarms.fire",
+        "alarms.retry",
+        "alarms.rearm-pending-timer"
+      ]
+    },
+    {
+      "family": "streams",
+      "cases": [
+        "streams.tee",
+        "streams.cancel",
+        "streams.error",
+        "streams.transform",
+        "streams.backpressure",
+        "streams.http-binary"
+      ]
+    },
+    {
+      "family": "websocket",
+      "cases": [
+        "websocket.protocol-attachment",
+        "websocket.outbound-close",
+        "websocket.concurrent-sockets",
+        "websocket.handler-streaming",
+        "websocket.peer-close"
+      ]
+    },
+    {
+      "family": "flags",
+      "cases": ["flags.enabled-defaults", "flags.disabled-counterparts"]
+    },
+    {
+      "family": "kv",
+      "cases": [
+        "kv.metadata-list",
+        "kv.binary-pagination",
+        "kv.expiration",
+        "kv.stream-put",
+        "kv.stream-limit"
+      ]
+    },
+    {
+      "family": "d1",
+      "cases": ["d1.bindings-results", "d1.batch-rollback", "d1.exec-batch"]
+    },
+    {
+      "family": "r2",
+      "cases": [
+        "r2.metadata-range-delete",
+        "r2.conditional-write",
+        "r2.multipart",
+        "r2.list-options",
+        "r2.key-identity"
+      ]
+    },
+    {
+      "family": "queues",
+      "cases": ["queues.batch-ack-retry", "queues.retry-delay"]
+    },
+    {
+      "family": "workflows",
+      "cases": [
+        "workflows.steps-sleep-result",
+        "workflows.retry",
+        "workflows.event",
+        "workflows.timeout"
+      ]
+    },
+    {
+      "family": "node",
+      "cases": [
+        "node.buffer",
+        "node.path-events",
+        "node.async-context",
+        "node.hash-compression",
+        "node.util",
+        "node.assert",
+        "node.stream-timers"
+      ]
+    },
+    {
+      "family": "wasm",
+      "cases": ["wasm.module"]
+    },
+    {
+      "family": "assets",
+      "cases": [
+        "assets.binding",
+        "assets.html-routing",
+        "assets.redirects",
+        "assets.worker-first",
+        "assets.root-worker-first"
+      ]
+    },
+    {
+      "family": "dynamic",
+      "cases": [
+        "dynamic.fetch",
+        "dynamic.props",
+        "dynamic.bindings",
+        "dynamic.outbound",
+        "dynamic.limits",
+        "dynamic.relative-imports",
+        "dynamic.validation",
+        "dynamic.wasm-shape"
+      ]
+    },
+    {
+      "family": "facets",
+      "cases": [
+        "facets.isolation",
+        "facets.transaction",
+        "facets.outbound-transaction",
+        "facets.exports-class"
+      ]
+    },
+    {
+      "family": "context",
+      "cases": ["context.wait-until", "context.exports-fetch"]
+    },
+    {
+      "family": "repro",
+      "cases": ["repro.body-readers", "repro.storage-errors"]
+    }
+  ],
+  "excluded": [
+    {
+      "family": "AWS provisioning and distributed recovery",
+      "reason": "AWS remains unqualified. Local distributed fault scenarios run separately in the recovery, multinode, fleet, resilience, and qualification suites; they are not API differential cases."
+    },
+    {
+      "family": "Containers, Sandbox, and edge-only services",
+      "reason": "Require a separate container runtime or managed Cloudflare environment; not implied by the local celld container."
+    },
+    {
+      "family": "Cron, TCP/TLS, and managed Cloudflare service guarantees",
+      "reason": "Require a clock-controlled or externally reachable reference environment; not established by Miniflare API emulation. Miniflare has no scheduler and celld v0.5.0 exposes no scheduled trigger, so cron has no shared triggering mechanism; TLS certificate validation needs a publicly trusted certificate neither runtime can be given locally. See RUNTIME-BREADTH.md."
+    },
+    {
+      "family": "PITR",
+      "reason": "PITR-specific controls are not implemented. WebSocket hibernation is tested separately by dependencies.hibernation, with actual eviction and a surviving socket. Multi-node routing is covered by the multinode, fleet, and resilience suites."
+    }
+  ]
+}

@@ -1,0 +1,362 @@
+{
+  "checkedAt": "2026-09-18",
+  "upstreamCommit": "12d5b6333fe52717325addcfe1e99e9fd4f77bcd",
+  "celldVersion": "0.5.0",
+  "referenceSelfCheckRun": "tck-ddfc1bfb-9f36-4929-bae9-c30c9a2aeb59",
+  "localRun": "tck-fdff5d81-b4bf-45b9-a651-debe3808879d",
+  "compatibilityDate": "2026-07-30",
+  "fixtureSha256": "37b0ba8392ea47b18c877c3b9d200aba24d082bfdb58433387138fcb96b8e520",
+  "referenceRuntime": {
+    "engine": "workerd",
+    "miniflare": "4.20260730.0",
+    "workerd": "1.20260730.1",
+    "fixtureSha256": "37b0ba8392ea47b18c877c3b9d200aba24d082bfdb58433387138fcb96b8e520"
+  },
+  "celldImage": [
+    "ghcr.io/denoland/celld:v0.5.0@sha256:df8e74bb9a059df5779644368984933eba76acd6a2d196672732f4368f760fc8"
+  ],
+  "cases": [
+    {
+      "id": "repro.body-readers",
+      "status": "fail",
+      "reference": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json"
+        },
+        "body": [
+          {
+            "kind": "Request",
+            "method": "text",
+            "before": false,
+            "after": true,
+            "second": {
+              "outcome": "rejected",
+              "name": "TypeError",
+              "domException": false
+            }
+          },
+          {
+            "kind": "Request",
+            "method": "json",
+            "before": false,
+            "after": true,
+            "second": {
+              "outcome": "rejected",
+              "name": "TypeError",
+              "domException": false
+            }
+          },
+          {
+            "kind": "Request",
+            "method": "arrayBuffer",
+            "before": false,
+            "after": true,
+            "second": {
+              "outcome": "rejected",
+              "name": "TypeError",
+              "domException": false
+            }
+          },
+          {
+            "kind": "Request",
+            "method": "blob",
+            "before": false,
+            "after": true,
+            "second": {
+              "outcome": "rejected",
+              "name": "TypeError",
+              "domException": false
+            }
+          },
+          {
+            "kind": "Request",
+            "method": "formData",
+            "before": false,
+            "after": true,
+            "second": {
+              "outcome": "rejected",
+              "name": "TypeError",
+              "domException": false
+            }
+          },
+          {
+            "kind": "Request",
+            "method": "null-body-control",
+            "first": "",
+            "second": "",
+            "used": false
+          },
+          {
+            "kind": "Response",
+            "method": "text",
+            "before": false,
+            "after": true,
+            "second": {
+              "outcome": "rejected",
+              "name": "TypeError",
+              "domException": false
+            }
+          },
+          {
+            "kind": "Response",
+            "method": "json",
+            "before": false,
+            "after": true,
+            "second": {
+              "outcome": "rejected",
+              "name": "TypeError",
+              "domException": false
+            }
+          },
+          {
+            "kind": "Response",
+            "method": "arrayBuffer",
+            "before": false,
+            "after": true,
+            "second": {
+              "outcome": "rejected",
+              "name": "TypeError",
+              "domException": false
+            }
+          },
+          {
+            "kind": "Response",
+            "method": "blob",
+            "before": false,
+            "after": true,
+            "second": {
+              "outcome": "rejected",
+              "name": "TypeError",
+              "domException": false
+            }
+          },
+          {
+            "kind": "Response",
+            "method": "formData",
+            "before": false,
+            "after": true,
+            "second": {
+              "outcome": "rejected",
+              "name": "TypeError",
+              "domException": false
+            }
+          },
+          {
+            "kind": "Response",
+            "method": "null-body-control",
+            "first": "",
+            "second": "",
+            "used": false
+          }
+        ]
+      },
+      "candidate": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json"
+        },
+        "body": [
+          {
+            "kind": "Request",
+            "method": "text",
+            "before": false,
+            "after": true,
+            "second": {
+              "outcome": "accepted",
+              "name": null,
+              "domException": false
+            }
+          },
+          {
+            "kind": "Request",
+            "method": "json",
+            "before": false,
+            "after": true,
+            "second": {
+              "outcome": "accepted",
+              "name": null,
+              "domException": false
+            }
+          },
+          {
+            "kind": "Request",
+            "method": "arrayBuffer",
+            "before": false,
+            "after": true,
+            "second": {
+              "outcome": "accepted",
+              "name": null,
+              "domException": false
+            }
+          },
+          {
+            "kind": "Request",
+            "method": "blob",
+            "before": false,
+            "after": true,
+            "second": {
+              "outcome": "accepted",
+              "name": null,
+              "domException": false
+            }
+          },
+          {
+            "kind": "Request",
+            "method": "formData",
+            "before": false,
+            "after": true,
+            "second": {
+              "outcome": "accepted",
+              "name": null,
+              "domException": false
+            }
+          },
+          {
+            "kind": "Request",
+            "method": "null-body-control",
+            "first": "",
+            "second": "",
+            "used": true
+          },
+          {
+            "kind": "Response",
+            "method": "text",
+            "before": false,
+            "after": true,
+            "second": {
+              "outcome": "accepted",
+              "name": null,
+              "domException": false
+            }
+          },
+          {
+            "kind": "Response",
+            "method": "json",
+            "before": false,
+            "after": true,
+            "second": {
+              "outcome": "accepted",
+              "name": null,
+              "domException": false
+            }
+          },
+          {
+            "kind": "Response",
+            "method": "arrayBuffer",
+            "before": false,
+            "after": true,
+            "second": {
+              "outcome": "accepted",
+              "name": null,
+              "domException": false
+            }
+          },
+          {
+            "kind": "Response",
+            "method": "blob",
+            "before": false,
+            "after": true,
+            "second": {
+              "outcome": "accepted",
+              "name": null,
+              "domException": false
+            }
+          },
+          {
+            "kind": "Response",
+            "method": "formData",
+            "before": false,
+            "after": true,
+            "second": {
+              "outcome": "accepted",
+              "name": null,
+              "domException": false
+            }
+          },
+          {
+            "kind": "Response",
+            "method": "null-body-control",
+            "first": "",
+            "second": "",
+            "used": true
+          }
+        ]
+      }
+    },
+    {
+      "id": "repro.storage-errors",
+      "status": "fail",
+      "reference": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json"
+        },
+        "body": {
+          "asyncLimit": {
+            "outcome": "rejected",
+            "name": "TypeError",
+            "domException": false
+          },
+          "syncLimit": {
+            "outcome": "rejected",
+            "name": "TypeError",
+            "domException": false
+          },
+          "asyncPut": {
+            "outcome": "rejected",
+            "name": "DataCloneError",
+            "domException": true
+          },
+          "syncPut": {
+            "outcome": "rejected",
+            "name": "DataCloneError",
+            "domException": true
+          },
+          "batchPut": {
+            "outcome": "rejected",
+            "name": "DataCloneError",
+            "domException": true
+          },
+          "absent": true,
+          "validLimit": []
+        }
+      },
+      "candidate": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json"
+        },
+        "body": {
+          "asyncLimit": {
+            "outcome": "rejected",
+            "name": "Error",
+            "domException": false
+          },
+          "syncLimit": {
+            "outcome": "rejected",
+            "name": "Error",
+            "domException": false
+          },
+          "asyncPut": {
+            "outcome": "rejected",
+            "name": "TypeError",
+            "domException": false
+          },
+          "syncPut": {
+            "outcome": "rejected",
+            "name": "TypeError",
+            "domException": false
+          },
+          "batchPut": {
+            "outcome": "rejected",
+            "name": "TypeError",
+            "domException": false
+          },
+          "absent": true,
+          "validLimit": []
+        }
+      }
+    }
+  ]
+}

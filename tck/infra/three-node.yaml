@@ -1,0 +1,29 @@
+services:
+  celld:
+    environment:
+      CELLD_REBALANCE_INTERVAL_MS: "0"
+  celld2:
+    environment:
+      CELLD_REBALANCE_INTERVAL_MS: "0"
+  celld3:
+    extends:
+      file: compose.yaml
+      service: celld
+    command:
+      [
+        --listen,
+        "0.0.0.0:8080",
+        --internal-listen,
+        "0.0.0.0:8081",
+        --advertise,
+        "celld3:8081",
+      ]
+    environment:
+      CELLD_REBALANCE_INTERVAL_MS: "0"
+      CELLD_NODE: celld3
+      CELLD_DURABILITY: fleet
+      RUST_LOG: info,timing=debug
+    volumes: [celld3-state:/state]
+    networks: [default, store]
+volumes:
+  celld3-state:
