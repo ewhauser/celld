@@ -33,6 +33,40 @@ pub fn open_local_bucket(database: &Path) -> anyhow::Result<Bucket> {
     Bucket::open_dev(database)
 }
 
+/// How often a supervised node checks that its supervisor is still its parent.
+const SUPERVISOR_POLL: Duration = Duration::from_millis(250);
+
+/// Kill this node when the `celld dev` supervisor that started it exits.
+///
+/// A supervisor that dies without its graceful stop (SIGKILL, a crash, a
+/// test harness's `Child::kill`) cannot stop its node. Linux kills the node
+/// through `PR_SET_PDEATHSIG`, but other Unix kernels, macOS among them, have
+/// no parent-death signal and leave the node serving under init with nothing
+/// left to stop it. The kernel reparents an orphan, so a thread that watches
+/// `getppid` notices the death and delivers the same SIGKILL; it also covers a
+/// supervisor that exited before the node started watching.
+#[doc(hidden)]
+#[allow(clippy::disallowed_methods)] // Parent death is a host process fact.
+pub fn exit_with_supervisor(supervisor: u32) -> anyhow::Result<()> {
+    #[cfg(unix)]
+    std::thread::Builder::new()
+        .name("celld-dev-supervisor".to_string())
+        .spawn(move || {
+            while std::os::unix::process::parent_id() == supervisor {
+                std::thread::sleep(SUPERVISOR_POLL);
+            }
+            eprintln!("celld dev supervisor {supervisor} exited; killing the local node");
+            // SAFETY: signalling this process has no memory-safety preconditions.
+            unsafe {
+                libc::kill(libc::getpid(), libc::SIGKILL);
+            }
+        })
+        .context("watch the celld dev supervisor")?;
+    #[cfg(not(unix))]
+    let _ = supervisor;
+    Ok(())
+}
+
 #[derive(Debug)]
 struct Options {
     project: Option<PathBuf>,
@@ -653,12 +687,17 @@ async fn start_node(
         .env("CELLD_INTERNAL_DEV_STORE", &store.database)
         .env("CELLD_WATCH", state.join("runtime"))
         .env("CELLD_NODE", format!("dev-{}", &project_hash[..12]))
+        .env(
+            "CELLD_INTERNAL_DEV_SUPERVISOR",
+            std::process::id().to_string(),
+        )
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::inherit());
     // `run_stack` normally consumes `RunningNode` through the graceful stop
     // path. An error or cancellation can instead drop it, so the child must
-    // not outlive the value that proves the supervisor still owns it.
+    // not outlive the value that proves the supervisor still owns it. When
+    // the supervisor itself dies, `exit_with_supervisor` kills the node.
     command.kill_on_drop(true);
     if !logs {
         // The supervisor still forwards ERROR records and the child's stderr.
@@ -680,7 +719,8 @@ async fn start_node(
 
         let supervisor = unsafe { libc::getpid() };
         // Drop cannot run after SIGKILL or a supervisor crash. Ask the kernel
-        // to kill the node in that case. The parent check closes the race in
+        // to kill the node in that case; other platforms rely on the node's
+        // own `exit_with_supervisor` watch. The parent check closes the race in
         // which the supervisor exits between `fork` and `prctl`.
         unsafe {
             command.as_std_mut().pre_exec(move || {

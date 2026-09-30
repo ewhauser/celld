@@ -22,6 +22,9 @@ pub(crate) struct Settings {
     /// Set only by the `celld dev` supervisor for its child node. No fleet
     /// flag or public environment variable selects the local backend.
     pub(crate) dev_store: Option<std::path::PathBuf>,
+    /// The `celld dev` supervisor's pid, present exactly when `dev_store` is.
+    /// The node kills itself once it is no longer that process's child.
+    pub(crate) dev_supervisor: Option<u32>,
 }
 
 pub(crate) enum Action {
@@ -161,6 +164,7 @@ pub(crate) fn action_from_process() -> anyhow::Result<Action> {
         } else {
             std::env::var_os("CELLD_INTERNAL_DEV_STORE").map(std::path::PathBuf::from)
         },
+        dev_supervisor: None,
     };
     let mut args = arguments.into_iter();
     while let Some(argument) = args.next() {
@@ -254,6 +258,13 @@ pub(crate) fn action_from_process() -> anyhow::Result<Action> {
                 && settings.advertise.is_none(),
             "the internal development store requires the celld dev node configuration"
         );
+        let supervisor = env("CELLD_INTERNAL_DEV_SUPERVISOR").ok_or_else(|| {
+            anyhow::anyhow!("the internal development store requires its celld dev supervisor")
+        })?;
+        settings.dev_supervisor =
+            Some(supervisor.parse().map_err(|_| {
+                anyhow::anyhow!("CELLD_INTERNAL_DEV_SUPERVISOR must be a process id")
+            })?);
     }
     Ok(if diagnose {
         Action::Diagnose {

@@ -12,6 +12,8 @@
 //! consumer that removes the streams at or below the bound keeps the
 //! recreated facets, the nested one included.
 
+mod support;
+
 use celld_export_format::{Body, Record};
 use std::net::TcpListener;
 use std::path::{Path, PathBuf};
@@ -72,8 +74,7 @@ struct Dev {
 
 impl Drop for Dev {
     fn drop(&mut self) {
-        let _ = self.child.kill();
-        let _ = self.child.wait();
+        support::stop_dev(&mut self.child);
     }
 }
 

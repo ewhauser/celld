@@ -3464,6 +3464,7 @@ fn shutdown_accept_failure_test_action() -> Action {
         unsafe_public_advertise: false,
         trust_forwarded_headers: false,
         dev_store: None,
+        dev_supervisor: None,
     })
 }
 
@@ -3750,6 +3751,9 @@ async fn async_main(
         }
         Action::Run(settings) => settings,
     };
+    if let Some(supervisor) = settings.dev_supervisor {
+        celld::dev::exit_with_supervisor(supervisor)?;
+    }
     celld::startup::raise_file_limit();
     let max_resident = celld::env_vars::optional("CELLD_MAX_RESIDENT_CELLS")?
         // celld has no resident ceiling unless the operator configures one.

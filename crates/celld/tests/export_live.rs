@@ -17,6 +17,8 @@
 //! consumer keeps only the recreated facets, whose rows match what they hold,
 //! before and after the restart.
 
+mod support;
+
 use celld_export_format::{
     Body, Consumer, LinkMode, Position, Record, StreamId, StreamState, Value,
 };
@@ -157,8 +159,7 @@ struct Dev {
 
 impl Drop for Dev {
     fn drop(&mut self) {
-        let _ = self.child.kill();
-        let _ = self.child.wait();
+        support::stop_dev(&mut self.child);
     }
 }
 
