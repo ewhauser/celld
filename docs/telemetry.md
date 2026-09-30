@@ -63,12 +63,17 @@ celld reads the W3C `traceparent` header on incoming requests and sends it on
 outbound `fetch()`. A malformed header starts a new trace. A Worker call to a
 Durable Object stays in one trace.
 
-The sampler decides at the start of a request, and an unsampled request
-records nothing. A ratio of `0` records no traces and `1` records all. An
-intermediate ratio makes the same trace-id decision on each node. celld keeps
-a valid incoming context that the sampler rejects: an outbound `fetch()` or
-Durable Object call keeps the trace id, uses a new span id, and keeps the
-sampled flag clear.
+The sampler decides at the start of a request. An unsampled request
+records nothing and costs almost nothing. Under load, telemetry sheds
+before requests do, and celld counts what it sheds.
+
+A sampling ratio of `0` records no traces, and a ratio of `1` records
+every trace. An intermediate ratio makes the same trace-id decision on
+each node.
+
+celld keeps a valid incoming context when the sampler rejects it. An
+outbound `fetch()` or Durable Object call keeps the trace id, uses a new
+span id, and keeps the sampled flag clear.
 
 ## Metrics
 
@@ -143,6 +148,16 @@ retries one export and holds one more export in a queue. celld drops an export
 that arrives while both places are taken. It counts the drop in
 `celld.metrics.shed`, and it reports that count in the next export that
 goes out.
+
+## Performance counters
+
+Apart from OTLP, every node keeps counters and latency histograms for its
+hot paths. These cover bucket requests by operation, key class and outcome;
+output gates; durability proofs by source; activations by restore path;
+and core and main-loop lag. It serves them as one JSON snapshot on its
+internal listener, at `GET /debug/metrics`. They need no collector and
+cost one atomic add per observation. The benchmark harness reads them; see
+[performance tests](performance-tests.md#what-a-node-counts).
 
 ## Query the bucket with DuckDB
 

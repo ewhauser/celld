@@ -552,6 +552,7 @@ fn log_from_wire(log: &crate::ownership_store::NodeLogWire) -> anyhow::Result<lo
         epoch: log.epoch,
         ensemble: log.ensemble.iter().cloned().collect(),
         tiered: log.tiered,
+        bucket_complete: log.bucket_complete,
         state: match log.state.as_str() {
             "open" => LogState::Open,
             "recovering" => LogState::Recovering,
@@ -572,6 +573,7 @@ pub(crate) fn log_to_wire(
         epoch: record.epoch,
         ensemble: record.ensemble.iter().cloned().collect(),
         tiered: record.tiered,
+        bucket_complete: record.bucket_complete,
         may_have_fleet_acks,
         claimant: record.claimant.clone(),
         claimed_ms: record.claimed_ms,
@@ -2193,6 +2195,13 @@ impl FollowerStore {
         };
         let state_ok = state_persist.is_ok();
         let state_timing = state_persist.unwrap_or_default();
+        if entry_write_us > 0 || entry_fsync_us > 0 {
+            crate::perf_stats::record(crate::perf_stats::Hist::FollowerWrite, entry_write_us);
+            crate::perf_stats::record(
+                crate::perf_stats::Hist::FollowerFsync,
+                entry_fsync_us.saturating_add(entry_directory_us),
+            );
+        }
         info!(
             event = "log_append_serve",
             leader,
@@ -4126,6 +4135,25 @@ fn log_state_name(state: LogState) -> &'static str {
     }
 }
 
+/// The wait before epoch GC retries a cell whose last pass decided nothing
+/// or left an epoch inside the grace.
+pub(crate) const EPOCH_GC_RETRY_MS: u64 = 5 * 60 * 1000;
+
+/// The period of the node-log maintenance loop, which runs epoch GC.
+pub(crate) const LOG_MAINTENANCE_TICK_MS: u64 = 30 * 1000;
+
+/// The wait before epoch GC looks again at a cell whose last pass deleted
+/// everything it could.
+const EPOCH_GC_SETTLED_RETRY_MS: u64 = 60 * 60 * 1000;
+
+/// The most cells one maintenance pass examines for epoch GC. Each costs a
+/// few bucket listings, and on a fleet node the pass shares the 30 s tick
+/// with the lease and log maintenance, so a node holding thousands of cells
+/// spreads them over several ticks instead of stalling the others behind
+/// one pass. A bucket node runs the pass alone on the tick, and the bound
+/// still keeps one tick from listing the bucket thousands of times.
+pub(crate) const EPOCH_GC_CELLS_PER_PASS: usize = 32;
+
 /// Everything node-log recovery needs from the node: the bucket, the signed
 /// peer client, address resolution, and the raw per-cell upload.
 pub struct NodeLogManager {
@@ -5467,7 +5495,11 @@ impl NodeLogManager {
             // verdict rests on the members alone, so it is reached before
             // the bundle drain: a pass that must refuse to seal refuses
             // before it reads the session, not after.
-            if complete_witnesses == 0 && may_have_fleet_acks && !record.ensemble.is_empty() {
+            if complete_witnesses == 0
+                && may_have_fleet_acks
+                && !record.ensemble.is_empty()
+                && !record.bucket_complete
+            {
                 anyhow::ensure!(
                     inconclusive == 0,
                     "node-log recovery for {dead}: no complete true witness among {:?} and \
@@ -5902,15 +5934,6 @@ impl NodeLogManager {
         }
     }
 
-    /// Followers in the installed ensemble, whether or not it is active.
-    fn ensemble_width(&self) -> usize {
-        self.inner
-            .lock()
-            .unwrap()
-            .as_ref()
-            .map_or(0, |shipper| shipper.members.len())
-    }
-
     pub fn healthy(&self) -> bool {
         self.inner
             .lock()
@@ -5942,16 +5965,8 @@ impl NodeLogManager {
         if self.task_stop.is_stopped() {
             return Ok(());
         }
-        // A healthy ensemble below the recruitment target still reads peers.
-        // Returning on `healthy` alone kept a one-follower ensemble at one
-        // forever, because one follower is healthy: a third node that was not
-        // live when the ensemble formed never joined, and the acknowledged
-        // tail had one witness on a three-node fleet (denoland/celld#245).
-        // The width check below returns before any change when no further
-        // peer is eligible, so the cost is one peer listing per tick.
-        if self.healthy() && self.ensemble_width() >= RECRUIT_FOLLOWERS {
-            return Ok(());
-        }
+        // Check peers even when healthy so a draining follower can leave
+        // and a one-follower ensemble can recruit a newly available peer.
         // Self-suspicion parks recruitment: opening epochs into our own
         // partition churns records and proves nothing. Any successful
         // peer response lifts it.
@@ -5959,6 +5974,15 @@ impl NodeLogManager {
             return Ok(());
         }
         let peers = self.ownership.read_capacity_peers().await?;
+        if let Some(current) = self.inner.lock().unwrap().clone() {
+            if current.members.iter().any(|member| {
+                peers
+                    .iter()
+                    .any(|peer| peer.node == member.node && peer.draining)
+            }) {
+                current.degrade("follower draining");
+            }
+        }
         let now = crate::ownership_store::now_ms();
         let mono = mono_ms();
         // Kept before the filters consume the vector: a fleet with no peer at
@@ -5966,11 +5990,11 @@ impl NodeLogManager {
         // ineligible, and an operator needs to be told which one they have.
         let live_peers = peers
             .iter()
-            .filter(|peer| peer.node != self.node && peer.expires_ms > now)
+            .filter(|peer| peer.node != self.node && peer.expires_ms > now && !peer.draining)
             .count();
         let members: Vec<Member> = peers
             .into_iter()
-            .filter(|peer| peer.node != self.node && peer.expires_ms > now)
+            .filter(|peer| peer.node != self.node && peer.expires_ms > now && !peer.draining)
             // Only a follower that cannot serve appends at all sits out a
             // term. A gray one is recruitable again at once, because the
             // latency rule can judge it again and the swap rate cap is what
@@ -6012,6 +6036,12 @@ impl NodeLogManager {
                 ) {
                     return Ok(());
                 }
+                if let Some(mut record) = transition.current() {
+                    if record.epoch == current.epoch && !record.bucket_complete {
+                        record.bucket_complete = true;
+                        transition.write(Some(record)).await?;
+                    }
+                }
             }
         }
         if members.is_empty() {
@@ -6049,6 +6079,7 @@ impl NodeLogManager {
                 epoch,
                 ensemble: ensemble.clone(),
                 tiered: 0,
+                bucket_complete: false,
                 state: LogState::Open,
                 claimant: None,
                 claimed_ms: None,
@@ -7179,6 +7210,8 @@ impl NodeLogManager {
                     &addr,
                     &TailReq {
                         leader: self.session.clone(),
+                        member: Some(member.clone()),
+                        incarnation,
                     },
                 )
                 .await
@@ -7234,7 +7267,7 @@ impl NodeLogManager {
         // appending to any follower, so requiring a follower would strand a
         // bucket-only tail. Possible fleet acknowledgements need the proof.
         anyhow::ensure!(
-            !folded.may_have_fleet_acks || complete_witnesses > 0,
+            !folded.may_have_fleet_acks || record.bucket_complete || complete_witnesses > 0,
             "fold session {} has no complete follower tail for {cell}",
             self.session
         );
