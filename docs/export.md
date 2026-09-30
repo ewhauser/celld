@@ -26,7 +26,9 @@ today:
 - Completeness records: watermarks, activation links, facet deletes, and
   `recovered` records from dead-node recovery.
 - The `celld export` commands: `repair`, `backfill`, `inspect`,
-  `reconcile`, `verify`, and `erase`.
+  `reconcile`, `verify`, and `erase`. `reconcile`, `verify` and `erase`
+  audit either the bucket sink's records or, with `--consumer snowflake`,
+  the Snowflake tables.
 - The Snowflake tables, views, Dynamic Tables and the `celld-export-loader`
   binary, which consumes the blob-stream or Kafka topic and lands its
   records in Snowflake through Snowpipe Streaming.
@@ -38,9 +40,6 @@ Still to come:
 - **Loading the bucket sink into Snowflake.** The loader reads blob-stream
   or Kafka only. A fleet on the bucket sink can pipe `celld export inspect` into
   `celld-export-loader ingest` by hand, but nothing loads it continuously.
-- **Auditing against Snowflake.** `reconcile` and `verify` compare the
-  bucket with the bucket sink's records, not with the Snowflake tables, so
-  a blob-stream or Kafka fleet cannot run them yet.
 - **Several sinks at once.** A node exports through one sink:
   `CELLD_EXPORT_SINK=bucket,blob-stream` (or any list of more than one)
   refuses to start.
@@ -708,7 +707,9 @@ to the snapshots these commands write, as on a node, and so do
 `CELLD_EXPORT_SINK` and its settings: with `blob-stream`, `repair` and
 `backfill` produce to the topic with `CELLD_EXPORT_BROKERS`,
 `CELLD_EXPORT_PARTITIONS`, `CELLD_EXPORT_TOPIC` and the writer's zone
-(`CELLD_EXPORT_WRITER_ID`, or `CELLD_ZONE` with `CELLD_EXPORT_ZONES`).
+(`CELLD_EXPORT_WRITER_ID`, or `CELLD_ZONE` with `CELLD_EXPORT_ZONES`);
+with `kafka`, with `CELLD_EXPORT_KAFKA_BROKERS`, `CELLD_EXPORT_TOPIC` and
+`CELLD_EXPORT_KAFKA_PROPERTIES`.
 
 #### repair
 
@@ -794,19 +795,47 @@ and compares it with what the consumer certified. It reports:
 A difference counts only once the evidence it rests on is older than
 `--settle` (default `1h`). For a gap that is when the first change the
 consumer lacks reached the bucket, not the cell's latest write, so a busy
-cell cannot defer an old gap. Findings go to `export/reconcile/<ms>.json`,
-and `gap` and `deleted` records with `origin: repair` and `node: reconciler`
-go to `export/changes/reconciler/`, where a consumer of the bucket sink
-picks them up. To bring them into Snowflake, pipe them into the loader:
-`celld export inspect --node reconciler | celld-export-loader ingest -`.
+cell cannot defer an old gap. It also writes `gap` and `deleted` records
+with `origin: repair` and `node: reconciler`. With the bucket consumer,
+findings go to `export/reconcile/<ms>.json` and the records to
+`export/changes/reconciler/`, where a consumer of the bucket sink picks
+them up; with `--consumer snowflake`, both go to Snowflake (see
+[Which consumer](#which-consumer)).
 `--dry-run` writes nothing. `--schedule` runs forever, every
 `CELLD_EXPORT_RECONCILE` (default `24h`).
 
-The consumer `reconcile` and `verify` compare against today is the
-reference consumer over the records under `export/changes/`, not the
-Snowflake tables. They answer "does the bucket sink's output cover the
-cells", so they do not yet work for a fleet that exports through
-blob-stream.
+#### Which consumer
+
+`reconcile`, `verify` and `erase` compare the bucket with a consumer's
+copy. `--consumer` (or `CELLD_EXPORT_CONSUMER`) picks it:
+
+- `bucket`, the default: the reference consumer over the bucket sink's
+  records under `export/changes/`. Use it for a fleet on the bucket sink.
+- `snowflake`: the tables `celld-export-loader` fills, for a fleet on the
+  blob-stream or Kafka sink. It reads `CELL_STREAMS`, `CELL_CERTIFIED`,
+  `CELL_SNAPSHOTS` and, for `verify`, one cell's records from
+  `CELL_CHANGES` and `CELL_META`, which it applies with the reference
+  consumer. Findings go to `EXPORT_RECONCILER_FINDINGS`, where
+  `EXPORT_GAPS` lists them; each run closes the findings earlier runs
+  recorded and it no longer reports, so a repaired stream leaves
+  `EXPORT_GAPS`. The reconciler's `gap` and `deleted` records land
+  through Snowpipe Streaming and are routed, as `celld-export-loader
+  ingest` does, instead of going to the bucket. `erase` tombstones the
+  stream in Snowflake and deletes its rows, as `celld-export-loader erase`
+  does, after writing the bucket tombstone, so one command covers both
+  sides. It needs a celld built with the `export-snowflake` feature and
+  the loader's settings: the `SNOWFLAKE_*` variables, and optionally
+  `EXPORT_BATCH_RECORDS`, `EXPORT_BATCH_BYTES` and
+  `EXPORT_VISIBLE_SECONDS`.
+
+```sh
+cargo build --release -p celld --features export-snowflake
+CELLD_EXPORT_CONSUMER=snowflake celld export reconcile --schedule
+```
+
+Run the scheduled reconciler beside the loader, with the fleet bucket's
+settings and the loader's Snowflake settings. `--cache` and
+`--max-cell-history` apply to the bucket consumer only.
 
 These commands index export objects in SQLite on local disk. Use
 `--cache /path/to/export-audit.sqlite` to reuse unchanged objects across
@@ -855,9 +884,10 @@ repair and backfill then skip the stream. `--clear` removes matching
 tombstones, so a stream recreated under the same scope, which for a Durable
 Object means the same name, exports again.
 
-Erasure needs both sides. `celld export erase` stops the bucket-side paths.
-`celld-export-loader erase SCRIPT CLASS CELL` tombstones the stream in
-Snowflake and deletes its rows: routing drops its records from then on, the
+Erasure needs both sides. `celld export erase` stops the bucket-side paths;
+with `--consumer snowflake` it also does what
+`celld-export-loader erase SCRIPT CLASS CELL` does, which tombstones the
+stream in Snowflake and deletes its rows: routing drops its records from then on, the
 views hide it at once, an hourly task deletes rows that arrive later, and
 deleted rows stay in time travel for a day. The
 bucket sink's objects already under `export/changes/` stay until

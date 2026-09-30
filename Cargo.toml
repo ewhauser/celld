@@ -52,6 +52,7 @@ bytes = "1"
 celld-logic = { path = "crates/logic" }
 celld-ltx = { path = "crates/ltx" }
 celld-export-format = { path = "crates/export-format" }
+celld-export-snowflake = { path = "crates/export-snowflake" }
 # The change-export blob-stream sink (`export-blob-stream` feature). The
 # crates are not published, so they are pinned to one revision of the
 # repository; their own git dependencies are pinned by Cargo.lock.

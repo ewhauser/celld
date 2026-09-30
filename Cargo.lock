@@ -1425,6 +1425,7 @@ dependencies = [
  "bytes",
  "cbc",
  "celld-export-format",
+ "celld-export-snowflake",
  "celld-logic",
  "celld-ltx",
  "chrono",

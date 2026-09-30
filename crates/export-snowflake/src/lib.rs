@@ -44,6 +44,8 @@ mod dynamic_table;
 pub mod kafka;
 mod landing;
 pub mod loader;
+#[cfg(feature = "sql-api")]
+pub mod settings;
 #[cfg(any(feature = "blob-stream", feature = "kafka"))]
 pub mod source;
 #[cfg(feature = "sql-api")]

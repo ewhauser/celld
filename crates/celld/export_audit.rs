@@ -10,11 +10,13 @@
 //!   fed with every record the bucket sink wrote under `export/changes/`. It
 //!   is the consumer of a fleet that runs only the bucket sink, and the
 //!   oracle the tests use.
-//! - The Snowflake loader (`celld-export-loader`) implements it over
-//!   `CELL_CERTIFIED`, `CELL_STREAMS`, `CELL_SNAPSHOTS` and
-//!   `CELL_CHANGES_CURRENT`, and writes findings and tombstones with the
-//!   statements in [`snowflake`]. That is where the reconciler runs on its
-//!   schedule (`CELLD_EXPORT_RECONCILE`).
+//! - [`snowflake::SnowflakeConsumer`] is the loader's tables, the consumer
+//!   of a blob-stream or Kafka fleet: it reads `CELL_STREAMS`,
+//!   `CELL_CERTIFIED`, `CELL_SNAPSHOTS` and the records in `CELL_CHANGES`
+//!   and `CELL_META`, writes findings and tombstones with the statements in
+//!   [`snowflake`], and lands the audit's own records through Snowpipe
+//!   Streaming. `--consumer snowflake` picks it (the `export-snowflake`
+//!   feature); run the scheduled reconciler beside the loader.
 //!
 //! Nothing here writes to a cell's objects. The reconciler reads object
 //! names, `verify` restores read-only through [`crate::export_restore`], and
@@ -180,6 +182,10 @@ pub trait ConsumerView: Send + Sync {
     /// Store a tombstone, or its clearing, in the consumer's own table. The
     /// bucket object is written separately and first.
     async fn tombstone(&self, tombstone: &Tombstone) -> anyhow::Result<()>;
+
+    /// Deliver the audit's own records (`gap`, `deleted`) where this
+    /// consumer reads records, and say where they went.
+    async fn deliver(&self, records: Vec<Record>) -> anyhow::Result<Option<String>>;
 }
 
 /// The reference consumer over the bucket sink's records.
@@ -362,11 +368,15 @@ impl ConsumerView for BucketConsumer {
         // The bucket object is this consumer's tombstone table.
         Ok(())
     }
+
+    async fn deliver(&self, records: Vec<Record>) -> anyhow::Result<Option<String>> {
+        emit(&self.bucket, records).await
+    }
 }
 
 /// Write the audit's own records (`gap`, `deleted`) as one bucket-sink
-/// object, where every consumer of the bucket sink and the Snowflake
-/// `COPY INTO` path pick them up. Returns the key.
+/// object, where every consumer of the bucket sink picks them up. Returns
+/// the key.
 pub async fn emit(bucket: &Bucket, records: Vec<Record>) -> anyhow::Result<Option<String>> {
     if records.is_empty() {
         return Ok(None);

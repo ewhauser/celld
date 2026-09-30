@@ -12,7 +12,7 @@ use super::inventory::Inventory;
 use super::reconcile::{reconcile, Options};
 use super::tombstone::{self, Tombstone};
 use super::verify::{self, Verdict};
-use super::{emit, BucketConsumer, ConsumerView};
+use super::{BucketConsumer, ConsumerView};
 use crate::bucket::Bucket;
 use crate::cli_options::{FleetFlags, FLEET_HELP};
 use crate::cli_output::{Format, Output, Record};
@@ -47,15 +47,38 @@ const HELP: &str = "celld export reconcile | verify | erase
     --clear           Clear the tombstones instead, so a stream recreated
                       under the same scope exports again
 
+  --consumer KIND     The consumer to compare with (or CELLD_EXPORT_CONSUMER):
+                      bucket (default), the bucket sink's records; or
+                      snowflake, the loader's tables (SNOWFLAKE_* settings)
   --export-bucket B   Where the export writes, if not the fleet bucket
                       (or CELLD_EXPORT_BUCKET)
-  --cache PATH        Reuse a local SQLite index of export objects
+  --cache PATH        Reuse a local SQLite index of export objects (bucket)
   --max-cell-history N  Maximum encoded bytes evaluated per cell (default 67108864)
   --json              One JSON object per line
 ";
 
+/// Which consumer the audit compares the bucket with.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ConsumerKind {
+    /// The reference consumer over the bucket sink's records.
+    Bucket,
+    /// The loader's Snowflake tables.
+    Snowflake,
+}
+
+impl ConsumerKind {
+    fn parse(value: &str) -> anyhow::Result<Self> {
+        match value {
+            "bucket" => Ok(ConsumerKind::Bucket),
+            "snowflake" => Ok(ConsumerKind::Snowflake),
+            other => bail!("--consumer is bucket or snowflake, not {other:?}"),
+        }
+    }
+}
+
 struct Command {
     fleet: FleetFlags,
+    consumer: ConsumerKind,
     export_bucket: Option<String>,
     cache: Option<std::path::PathBuf>,
     max_cell_history: usize,
@@ -74,8 +97,13 @@ struct Command {
 
 impl Command {
     fn parse(arguments: Vec<String>) -> anyhow::Result<Option<Self>> {
+        let consumer = match crate::env_vars::value("CELLD_EXPORT_CONSUMER")? {
+            Some(kind) => ConsumerKind::parse(&kind).context("CELLD_EXPORT_CONSUMER")?,
+            None => ConsumerKind::Bucket,
+        };
         let mut command = Command {
             fleet: FleetFlags::default(),
+            consumer,
             export_bucket: None,
             cache: None,
             max_cell_history: super::cache::MAX_CELL_HISTORY,
@@ -104,6 +132,7 @@ impl Command {
             match argument.as_str() {
                 "--help" | "-h" => return Ok(None),
                 "--export-bucket" => command.export_bucket = Some(value("--export-bucket")?),
+                "--consumer" => command.consumer = ConsumerKind::parse(&value("--consumer")?)?,
                 "--cache" => command.cache = Some(value("--cache")?.into()),
                 "--max-cell-history" => {
                     command.max_cell_history = value("--max-cell-history")?
@@ -149,7 +178,20 @@ impl Command {
         Ok(Some(command))
     }
 
+    /// The consumer `--consumer` names, holding every stream or only
+    /// `cell`'s.
     async fn consumer(
+        &self,
+        export: &Bucket,
+        cell: Option<String>,
+    ) -> anyhow::Result<Box<dyn ConsumerView>> {
+        match self.consumer {
+            ConsumerKind::Bucket => Ok(Box::new(self.bucket_consumer(export, cell).await?)),
+            ConsumerKind::Snowflake => snowflake_consumer(cell),
+        }
+    }
+
+    async fn bucket_consumer(
         &self,
         export: &Bucket,
         cell: Option<String>,
@@ -198,6 +240,16 @@ impl Command {
         };
         Ok((fleet, export))
     }
+}
+
+#[cfg(feature = "export-snowflake")]
+fn snowflake_consumer(cell: Option<String>) -> anyhow::Result<Box<dyn ConsumerView>> {
+    Ok(Box::new(super::snowflake::from_env(cell)?))
+}
+
+#[cfg(not(feature = "export-snowflake"))]
+fn snowflake_consumer(_: Option<String>) -> anyhow::Result<Box<dyn ConsumerView>> {
+    bail!("--consumer snowflake needs a celld built with the export-snowflake feature")
 }
 
 /// The export settings as a node would read them, whether or not this
@@ -323,8 +375,8 @@ async fn reconcile_once(
     if command.dry_run {
         return Ok(());
     }
-    if let Some(key) = emit(export, result.records).await? {
-        note!("wrote the reconciler's records to {key}");
+    if let Some(to) = consumer.deliver(result.records).await? {
+        note!("delivered the reconciler's records: {to}");
     }
     consumer.record_findings(&result.findings).await
 }
@@ -357,7 +409,7 @@ async fn run_verify(command: Command) -> anyhow::Result<()> {
     let mut out = Output::new(command.format());
     let mut drifted = 0;
     for stream in &chosen {
-        let verdict = verify::verify(&fleet, &consumer, stream, |class, table| {
+        let verdict = verify::verify(&fleet, consumer.as_ref(), stream, |class, table| {
             config.denies_table(class, table)
         })
         .await?;
@@ -454,7 +506,14 @@ async fn run_erase(command: Command) -> anyhow::Result<()> {
     );
     // The bucket first: every path that reads it stops exporting the stream
     // before the consumer's copy goes.
-    let consumer = BucketConsumer::from_records(export.clone(), Vec::new(), &[])?;
+    let consumer: Box<dyn ConsumerView> = match command.consumer {
+        ConsumerKind::Bucket => Box::new(BucketConsumer::from_records(
+            export.clone(),
+            Vec::new(),
+            &[],
+        )?),
+        ConsumerKind::Snowflake => snowflake_consumer(Some(cell.clone()))?,
+    };
     let mut out = Output::new(command.format());
     for t in &targets {
         let key = tombstone::put(&export, t).await?;

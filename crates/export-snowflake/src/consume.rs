@@ -137,6 +137,12 @@ impl Batch {
         Ok(())
     }
 
+    /// Add a record read from `source`.
+    pub fn push(&mut self, record: &Record, source: impl Into<String>) {
+        let bytes = serde_json::to_vec(record).map_or(0, |b| b.len());
+        self.push_record(record, source.into(), bytes);
+    }
+
     fn push_record(&mut self, record: &Record, mut source: String, bytes: usize) {
         source.push_str(&self.tag);
         self.bytes += bytes + source.len();
