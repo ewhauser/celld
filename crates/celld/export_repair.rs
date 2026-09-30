@@ -31,10 +31,15 @@
 //! did then. A cell that has never opened with export on has no stream yet
 //! and is skipped.
 //!
+//! **Facets.** A facet's stream restores from its own LTX scope below the
+//! root (`<root>/facets/<hash>...`, which a record's `facet` names), like a
+//! root's. Its incarnation is the one `crate::facet_streams` stamped in its
+//! `_cf_METADATA`, and its key-value rows are kept under the scope of the
+//! facet's last run, which is the only scope its image holds.
+//!
 //! Table generations are read from the restored capture catalog. Legacy
 //! images without that catalog start at the first generation.
 //! Erasure tombstones are read from the destination bucket before scanning.
-//! Facet streams are refused because restoring a facet's state is not built.
 #![allow(clippy::disallowed_methods)] // Offline operator path, outside Actor execution.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
@@ -184,6 +189,21 @@ pub fn root_stream(script: &str, scope: &str) -> anyhow::Result<StreamId> {
     })
 }
 
+/// The export stream of a bucket scope: a root cell, or a facet of one,
+/// `<root>/facets/<hash>...`, whose stream carries the part below the root
+/// as its `facet`.
+pub fn stream_of(script: &str, scope: &str) -> anyhow::Result<StreamId> {
+    let parsed = Stream::parse(scope)?;
+    let (root, facet) = match parsed.as_str().split_once("/facets/") {
+        Some((root, rest)) => (root, Some(format!("facets/{rest}"))),
+        None => (parsed.as_str(), None),
+    };
+    Ok(StreamId {
+        facet,
+        ..root_stream(script, root)?
+    })
+}
+
 /// The class of a cell scope: what precedes the first `:`, or the whole
 /// scope for a bare instance.
 pub fn class_of(scope: &str) -> &str {
@@ -311,6 +331,36 @@ struct ImageIdentity {
     cell_name: Option<String>,
 }
 
+/// The scope the image's own rows (`_cf_METADATA`, `_cf_KV`) are kept
+/// under. A root's is its cell scope. A facet's changes with every run
+/// (`storage::open_embedded` moves its rows to the run's scope), so it is
+/// whatever scope the image holds.
+fn image_scope(db: &Connection, stream: &StreamId) -> anyhow::Result<String> {
+    if stream.facet.is_none() {
+        return Ok(stream.cell.clone());
+    }
+    let mut scopes = BTreeSet::new();
+    for table in ["_cf_METADATA", "_cf_KV"] {
+        let exists: bool = db.query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name = ?1)",
+            [table],
+            |row| row.get(0),
+        )?;
+        if exists {
+            let mut statement = db.prepare(&format!("SELECT DISTINCT scope FROM main.{table}"))?;
+            for scope in statement.query_map([], |row| row.get::<_, String>(0))? {
+                scopes.insert(scope?);
+            }
+        }
+    }
+    ensure!(
+        scopes.len() <= 1,
+        "the facet's image holds rows of {} scopes; expected one",
+        scopes.len()
+    );
+    Ok(scopes.pop_first().unwrap_or_default())
+}
+
 fn image_identity(db: &Connection, scope: &str) -> anyhow::Result<ImageIdentity> {
     let columns: Vec<String> = db
         .prepare("SELECT name FROM pragma_table_info('_cf_METADATA', 'main')")?
@@ -383,6 +433,8 @@ enum Scanned {
 /// What one stream's snapshot is: its identity, position and id.
 struct Snapshot<'a> {
     stream: &'a StreamId,
+    /// The scope the image's key-value rows are kept under.
+    scope: &'a str,
     position: Position,
     snapshot_id: String,
     cell_name: Option<String>,
@@ -426,7 +478,7 @@ impl Snapshot<'_> {
         let tables = self.tables(db)?;
         let mut scans = Vec::with_capacity(tables.len());
         for table in &tables {
-            let scan = ExportedScan::new(db, table, &self.stream.cell)?;
+            let scan = ExportedScan::new(db, table, self.scope)?;
             let schema = schema_of(db, &scan)?;
             emit(self.record(Body::Schema(schema), 1, 1))?;
             counts.records += 1;
@@ -888,11 +940,6 @@ async fn run_job(
         report.error = Some(format!("class {} is never exported", job.stream.class));
         return report;
     }
-    if job.stream.facet.is_some() {
-        report.status = Status::Skipped;
-        report.error = Some("facet streams cannot be repaired yet".to_string());
-        return report;
-    }
     match snapshot_job(
         source,
         sink,
@@ -931,7 +978,10 @@ async fn snapshot_job(
     report: &mut Report,
     export_bucket: &Bucket,
 ) -> anyhow::Result<Option<String>> {
-    let stream = Stream::cell(&job.stream.cell)?;
+    let stream = Stream::parse(&crate::export_audit::tombstone::scope_of(
+        &job.stream.cell,
+        job.stream.facet.as_deref(),
+    ))?;
     let restored = restore(source, &stream, job.target, pace).await?;
     let reached = Position::new(
         restored.position.epoch,
@@ -961,7 +1011,8 @@ async fn snapshot_job(
         let (job, settings, tombstones) = (job.clone(), settings.clone(), tombstones.to_vec());
         tokio::task::spawn_blocking(move || -> anyhow::Result<Scanned> {
             let db = restored.open()?;
-            let image = image_identity(&db, &job.stream.cell)?;
+            let scope = image_scope(&db, &job.stream)?;
+            let image = image_identity(&db, &scope)?;
             let stream = match resolve_identity(&job, &image) {
                 Ok(stream) => stream,
                 Err(reason) => return Ok(Scanned::Skipped(reason)),
@@ -971,6 +1022,7 @@ async fn snapshot_job(
             }
             let snapshot = Snapshot {
                 stream: &stream,
+                scope: &scope,
                 position: reached,
                 snapshot_id,
                 cell_name: image.cell_name,
