@@ -1018,7 +1018,7 @@ fn the_snowflake_binds_follow_the_statements() {
         epochs: vec![5],
         detail: "d".into(),
     };
-    let binds = snowflake::finding_binds(&finding);
+    let binds = snowflake::finding_binds(&finding, "1");
     assert_eq!(snowflake::INSERT_FINDING.matches('?').count(), binds.len());
     assert_eq!(binds[3], serde_json::json!(""));
     assert_eq!(binds[5], serde_json::json!("gap"));
@@ -1209,4 +1209,379 @@ fn bucket_audit_enforces_an_operator_history_budget() {
         let consumer = consumer.with_history_limit(65536).unwrap();
         assert_eq!(consumer.streams().await.unwrap().len(), 1);
     });
+}
+
+/// A statement the fake ran, with its binds.
+type Statement = (String, Vec<serde_json::Value>);
+
+/// The loader's tables as a fake warehouse: records as the route task
+/// stores them, and the stream statements answered from the reference
+/// consumer, all rendered as the SQL API renders values (text, JSON text
+/// for arrays and variants, `''` for a root's facet).
+#[derive(Clone, Default)]
+struct FakeSnowflake {
+    records: Arc<std::sync::Mutex<Vec<Record>>>,
+    /// What the four stream statements answer.
+    summaries: Arc<std::sync::Mutex<Vec<StreamSummary>>>,
+    statements: Arc<std::sync::Mutex<Vec<Statement>>>,
+}
+
+fn sf_rows(columns: &[&str], data: Vec<Vec<Option<String>>>) -> celld_export_snowflake::Rows {
+    celld_export_snowflake::Rows {
+        columns: columns.iter().map(|c| c.to_ascii_uppercase()).collect(),
+        data,
+    }
+}
+
+fn sf_stream(id: &StreamId) -> Vec<Option<String>> {
+    vec![
+        Some(id.script.clone()),
+        Some(id.class.clone()),
+        Some(id.cell.clone()),
+        Some(id.facet.clone().unwrap_or_default()),
+        Some(id.incarnation.to_string()),
+    ]
+}
+
+const SF_STREAM: [&str; 5] = ["script", "class", "cell", "facet", "incarnation"];
+
+impl FakeSnowflake {
+    /// Hold `records`, and answer the stream statements with what the
+    /// bucket consumer derives from them.
+    async fn with_records(records: Vec<Record>) -> Self {
+        let fake = FakeSnowflake::default();
+        *fake.summaries.lock().unwrap() =
+            BucketConsumer::from_records(bucket(), records.clone(), &[])
+                .unwrap()
+                .streams()
+                .await
+                .unwrap();
+        *fake.records.lock().unwrap() = records;
+        fake
+    }
+
+    fn summaries(&self) -> Vec<StreamSummary> {
+        self.summaries.lock().unwrap().clone()
+    }
+
+    /// `CELL_CHANGES` or `CELL_META` rows of one cell at or below a key.
+    fn stored(
+        &self,
+        changes: bool,
+        class: &str,
+        cell: &str,
+        key: &str,
+    ) -> celld_export_snowflake::Rows {
+        let envelope_columns = [
+            "kind",
+            "script",
+            "class",
+            "cell",
+            "cell_name",
+            "facet",
+            "incarnation",
+            "epoch",
+            "txid",
+            "commit",
+            "committed_at_ms",
+            "node",
+            "origin",
+            "fragment",
+            "fragments",
+        ];
+        let mut columns: Vec<&str> = envelope_columns.to_vec();
+        if changes {
+            columns.extend([
+                "snapshot_id",
+                "table_name",
+                "generation",
+                "columns",
+                "key_columns",
+                "row_changes",
+            ]);
+        } else {
+            columns.push("body");
+        }
+        let mut data = Vec::new();
+        for r in self.records.lock().unwrap().iter() {
+            let landed = celld_export_snowflake::LandingRow::from_record(r, "test");
+            let is_change = matches!(landed.kind.as_str(), "rows" | "snapshot");
+            let p = r.position();
+            if is_change != changes
+                || landed.class != class
+                || landed.cell != cell
+                || snowflake::position_key(p.epoch, p.txid, p.commit).as_str() > key
+            {
+                continue;
+            }
+            let mut row = vec![
+                Some(landed.kind.clone()),
+                Some(landed.script.clone()),
+                Some(landed.class.clone()),
+                Some(landed.cell.clone()),
+                landed.cell_name.clone(),
+                Some(landed.facet.clone().unwrap_or_default()),
+                Some(landed.incarnation.to_string()),
+                Some(landed.epoch.to_string()),
+                Some(landed.txid.to_string()),
+                Some(landed.commit.to_string()),
+                Some(landed.committed_at.to_string()),
+                Some(landed.node.clone()),
+                Some(landed.origin.clone()),
+                Some(landed.fragment.to_string()),
+                Some(landed.fragments.to_string()),
+            ];
+            let body: serde_json::Value = serde_json::from_str(&landed.body).unwrap();
+            if changes {
+                row.extend([
+                    body.get("snapshot_id")
+                        .map(|v| v.as_str().unwrap().to_string()),
+                    Some(body["table"].as_str().unwrap().to_string()),
+                    Some(body["generation"].to_string()),
+                    Some(body["columns"].to_string()),
+                    Some(body["key_columns"].to_string()),
+                    Some(body["rows"].to_string()),
+                ]);
+            } else {
+                row.push(Some(body.to_string()));
+            }
+            data.push(row);
+        }
+        sf_rows(&columns, data)
+    }
+}
+
+impl celld_export_snowflake::Warehouse for FakeSnowflake {
+    fn execute_bound(
+        &mut self,
+        sql: &str,
+        binds: &[serde_json::Value],
+    ) -> Result<celld_export_snowflake::Rows, celld_export_snowflake::WarehouseError> {
+        self.statements
+            .lock()
+            .unwrap()
+            .push((sql.to_string(), binds.to_vec()));
+        let text = |i: usize| binds[i].as_str().unwrap().to_string();
+        let mut stream_columns: Vec<&str> = SF_STREAM.to_vec();
+        Ok(match sql {
+            snowflake::SELECT_STREAMS => {
+                stream_columns.push("deleted_at");
+                let data = self
+                    .summaries()
+                    .iter()
+                    .map(|s| {
+                        let mut row = sf_stream(&s.id);
+                        row.push(
+                            s.deleted_at
+                                .map(|d| snowflake::position_key(d.epoch, d.txid, d.commit)),
+                        );
+                        row
+                    })
+                    .collect();
+                sf_rows(&stream_columns, data)
+            }
+            snowflake::SELECT_CERTIFIED | snowflake::SELECT_STREAM_SNAPSHOTS => {
+                stream_columns.extend(["epoch", "txid", "commit"]);
+                let mut data = Vec::new();
+                for s in self.summaries() {
+                    let positions: Vec<Position> = if sql == snowflake::SELECT_CERTIFIED {
+                        s.certified.values().copied().collect()
+                    } else {
+                        s.snapshot_at.into_iter().collect()
+                    };
+                    for p in positions {
+                        let mut row = sf_stream(&s.id);
+                        row.extend([p.epoch, p.txid, p.commit].map(|n| Some(n.to_string())));
+                        data.push(row);
+                    }
+                }
+                sf_rows(&stream_columns, data)
+            }
+            snowflake::SELECT_ACTIVITY => {
+                stream_columns.extend(["epoch", "nodes", "last_committed_ms"]);
+                let mut data = Vec::new();
+                for s in self.summaries() {
+                    // An epoch with no live record has an empty array.
+                    let mut epochs = s.nodes.clone();
+                    epochs.entry(0).or_default();
+                    for (epoch, nodes) in epochs {
+                        let mut row = sf_stream(&s.id);
+                        row.extend([
+                            Some(epoch.to_string()),
+                            Some(serde_json::to_string(&nodes).unwrap()),
+                            Some(format!("{}.000", s.last_committed_ms)),
+                        ]);
+                        data.push(row);
+                    }
+                }
+                sf_rows(&stream_columns, data)
+            }
+            snowflake::SELECT_CELL_CHANGES_AT => self.stored(true, &text(0), &text(1), &text(2)),
+            snowflake::SELECT_CELL_META_AT => self.stored(false, &text(0), &text(1), &text(2)),
+            s if s.starts_with("SELECT COUNT(*) AS N FROM EXPORT_LANDING") => sf_rows(
+                &["n"],
+                vec![vec![Some(self.records.lock().unwrap().len().to_string())]],
+            ),
+            _ => celld_export_snowflake::Rows::default(),
+        })
+    }
+}
+
+impl celld_export_snowflake::consume::Land for FakeSnowflake {
+    fn land(
+        &mut self,
+        rows: &[celld_export_snowflake::LandingRow],
+    ) -> Result<(), celld_export_snowflake::WarehouseError> {
+        let mut records = self.records.lock().unwrap();
+        records.extend(rows.iter().map(|r| r.to_record().unwrap()));
+        Ok(())
+    }
+}
+
+fn snowflake_consumer(
+    fake: &FakeSnowflake,
+) -> snowflake::SnowflakeConsumer<FakeSnowflake, FakeSnowflake> {
+    let loader = celld_export_snowflake::Loader::new(
+        fake.clone(),
+        celld_export_snowflake::LoaderConfig {
+            deployment: celld_export_snowflake::Deployment {
+                warehouse: "W".into(),
+            },
+            target_lag: "1 minute".into(),
+            dynamic_table_prefix: "CF".into(),
+        },
+    );
+    snowflake::SnowflakeConsumer::new(
+        loader,
+        fake.clone(),
+        celld_export_snowflake::consume::Limits::default(),
+        std::time::Duration::ZERO,
+    )
+}
+
+fn audited_records() -> Vec<Record> {
+    let facet = stream(CELL, Some("room/1"));
+    let mut records = vec![
+        rows(&root(), at(1, 1, 1), "items", &[(1, "a"), (2, "b")]),
+        rows(&root(), at(1, 2, 1), "items", &[(3, "c")]),
+        watermark(&root(), at(1, 2, 1), 2, 2),
+        rows(&facet, at(1, 1, 1), "notes", &[(1, "n")]),
+    ];
+    records.extend(snapshot(&root(), at(1, 2, 1), "items", &[(1, "a")]));
+    for (i, r) in records.iter_mut().enumerate() {
+        r.envelope.committed_at = 1_790_000_000_000 + i as i64;
+    }
+    records
+}
+
+#[test]
+fn the_snowflake_consumer_reads_what_the_bucket_consumer_derives() {
+    crate::asyncrt::test_block_on(async {
+        let fake = FakeSnowflake::with_records(audited_records()).await;
+        let consumer = snowflake_consumer(&fake);
+        let streams = consumer.streams().await.unwrap();
+        assert_eq!(streams, fake.summaries());
+        assert!(streams
+            .iter()
+            .any(|s| s.id.facet.as_deref() == Some("room/1")));
+
+        let bucket = BucketConsumer::from_records(bucket(), audited_records(), &[]).unwrap();
+        let head = consumer
+            .state_at(&root(), at(1, 2, u64::MAX))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(head.tables.values().map(|t| t.rows.len()).sum::<usize>(), 1);
+        for s in &streams {
+            for p in [at(1, 1, 1), at(1, 2, u64::MAX)] {
+                assert_eq!(
+                    consumer.state_at(&s.id, p).await.unwrap(),
+                    bucket.state_at(&s.id, p).await.unwrap(),
+                    "{:?} at {p:?}",
+                    s.id
+                );
+            }
+        }
+    });
+}
+
+#[test]
+fn the_snowflake_consumer_records_findings_tombstones_and_records() {
+    let fake = FakeSnowflake::default();
+    crate::asyncrt::test_block_on(async {
+        let consumer = snowflake_consumer(&fake);
+        let finding = Finding {
+            stream: root(),
+            kind: FindingKind::Gap,
+            scope: CELL.into(),
+            head: Some(at(5, 9, u64::MAX)),
+            from: None,
+            certified: None,
+            epochs: vec![5],
+            detail: "d".into(),
+        };
+        consumer.record_findings(&[finding]).await.unwrap();
+        let mut t = tombstone_for(&root(), None);
+        consumer.tombstone(&t).await.unwrap();
+        t.cleared_at_ms = Some(t.erased_at_ms + 1);
+        consumer.tombstone(&t).await.unwrap();
+
+        let gap = rows(&root(), at(2, 1, 1), "items", &[(9, "z")]);
+        let delivered = consumer.deliver(vec![gap.clone()]).await.unwrap();
+        assert_eq!(
+            delivered.as_deref(),
+            Some("Snowflake: landed and routed 1 record(s)")
+        );
+        assert_eq!(*fake.records.lock().unwrap(), vec![gap]);
+    });
+    let statements = fake.statements.lock().unwrap();
+    let names: Vec<&str> = statements
+        .iter()
+        .map(|(sql, _)| sql.split_whitespace().take(3).collect::<Vec<_>>())
+        .map(|w| match w[..] {
+            ["INSERT", "INTO", "EXPORT_RECONCILER_FINDINGS"] => "finding",
+            ["UPDATE", "EXPORT_RECONCILER_FINDINGS", ..] => "resolve",
+            ["INSERT", "INTO", "EXPORT_TOMBSTONES"] => "tombstone",
+            ["UPDATE", "EXPORT_TOMBSTONES", ..] => "clear",
+            ["SELECT", "COUNT(*)", ..] => "visible",
+            _ => "other",
+        })
+        .collect();
+    // The erase task's body and the route task's body run as "other".
+    assert_eq!(
+        names,
+        [
+            "finding",
+            "resolve",
+            "tombstone",
+            "other",
+            "clear",
+            "visible",
+            "other"
+        ]
+    );
+    // A finding carries its run, and the resolve keeps that run's findings.
+    let run = &statements[1].1[0];
+    let detail: serde_json::Value =
+        serde_json::from_str(statements[0].1[8].as_str().unwrap()).unwrap();
+    assert_eq!(&detail["run"], run);
+}
+
+#[test]
+fn a_snowflake_position_key_and_row_parse_back() {
+    let records = audited_records();
+    let fake = FakeSnowflake::default();
+    *fake.records.lock().unwrap() = records.clone();
+    let key = snowflake::position_key(u64::MAX, u64::MAX, u64::MAX);
+    let mut back = Vec::new();
+    for changes in [true, false] {
+        let rows = fake.stored(changes, "Cart", CELL, &key);
+        for row in 0..rows.len() {
+            back.push(snowflake::record_of(&rows, row).unwrap());
+        }
+    }
+    let mut want = records;
+    want.sort_by_key(|r| serde_json::to_string(r).unwrap());
+    back.sort_by_key(|r| serde_json::to_string(r).unwrap());
+    assert_eq!(back, want);
 }
