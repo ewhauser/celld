@@ -303,7 +303,8 @@ async fn concurrent_writes_to_one_cell_share_uploads() {
     node.get("/do/write?cell=shared&bytes=10").await;
     tokio::time::sleep(Duration::from_millis(500)).await;
     let before = node.metrics().await;
-    let writes: Vec<_> = (0..64)
+    const WRITES: u64 = 64;
+    let writes: Vec<_> = (0..WRITES)
         .map(|_| {
             let node = node.clone();
             tokio::spawn(async move { node.get("/do/write?cell=shared&bytes=100").await })
@@ -315,11 +316,17 @@ async fn concurrent_writes_to_one_cell_share_uploads() {
     let after = node.metrics().await;
     let puts = after.bucket(&["cell_data"], Some(&["put"]))
         - before.bucket(&["cell_data"], Some(&["put"]));
-    eprintln!("64 concurrent writes: {puts} uploads");
-    // 9 on the machine this was written on; one per write would be 64.
+    eprintln!("{WRITES} concurrent writes: {puts} uploads");
+    // A cell has one sync in flight, and the next carries every write
+    // committed meanwhile. Without that, each write is its own upload, as in
+    // the sequential test: 64. How many writes an upload carries is a
+    // write's turn against a sync's round trip, so it depends on the
+    // machine: 6 to 16 uploads on a Mac, where each LTX file is fully
+    // fsynced, and 19 to 22 on a Linux CI runner. So the bound asks only
+    // that uploads carry two writes each on average.
     assert!(
-        puts <= 16,
-        "64 concurrent writes to one cell made {puts} uploads; they should share them"
+        puts <= WRITES / 2,
+        "{WRITES} concurrent writes to one cell made {puts} uploads; they should share them"
     );
 }
 
