@@ -3409,6 +3409,7 @@ fn shutdown_accept_failure_test_action() -> Action {
         unsafe_public_advertise: false,
         trust_forwarded_headers: false,
         dev_store: None,
+        dev_supervisor: None,
     })
 }
 
@@ -3668,6 +3669,9 @@ async fn async_main(
         }
         Action::Run(settings) => settings,
     };
+    if let Some(supervisor) = settings.dev_supervisor {
+        celld::dev::exit_with_supervisor(supervisor)?;
+    }
     // Operators need the applied worker count to verify CELLD_TOKIO_THREADS;
     // a count of process threads also includes unrelated, lazily started
     // thread pools, so it cannot stand in for this value.
