@@ -39,6 +39,12 @@ pub trait HostFileIo: Send {
     fn write_all(&mut self, bytes: &[u8]) -> io::Result<()>;
     fn read_exact_at(&mut self, offset: u64, len: usize) -> io::Result<Vec<u8>>;
     fn sync_all(&mut self) -> io::Result<()>;
+    /// Make the written bytes reach storage before a later rename of this
+    /// file does, so a crash never leaves the new name on a torn file. The
+    /// default is `sync_all`, which also makes them durable on its own.
+    fn sync_before_rename(&mut self) -> io::Result<()> {
+        self.sync_all()
+    }
     /// The file's current length, from the open handle (an `fstat`, not a
     /// path walk).
     fn file_len(&mut self) -> io::Result<u64>;
@@ -60,6 +66,10 @@ impl HostFile {
 
     pub fn sync_all(&mut self) -> io::Result<()> {
         self.inner.sync_all()
+    }
+
+    pub fn sync_before_rename(&mut self) -> io::Result<()> {
+        self.inner.sync_before_rename()
     }
 
     pub fn file_len(&mut self) -> io::Result<u64> {
@@ -135,6 +145,36 @@ impl HostFileIo for DirectFile {
     }
 
     fn sync_all(&mut self) -> io::Result<()> {
+        self.file.sync_all()
+    }
+
+    /// On macOS, `F_BARRIERFSYNC` rather than the `F_FULLFSYNC` of
+    /// `sync_all`. A full sync makes the drive write its whole cache to
+    /// stable storage, which stalls every other write on the volume while it
+    /// runs; one per LTX file, hundreds a second when many cells activate at
+    /// once, left the volume flushing continuously and capped a lone
+    /// development node near 200 fresh activations a second. A barrier keeps
+    /// the order the rename needs without the flush. The file may then be
+    /// lost to a power failure, as the cell's WAL it was built from already
+    /// can be (`synchronous=NORMAL`), and no acknowledgement waits on it.
+    /// Elsewhere `sync_all` is a plain `fsync`, which already does this.
+    fn sync_before_rename(&mut self) -> io::Result<()> {
+        #[cfg(target_os = "macos")]
+        {
+            use std::os::fd::AsRawFd as _;
+            // <sys/fcntl.h>
+            const F_BARRIERFSYNC: i32 = 85;
+            extern "C" {
+                fn fcntl(fd: i32, cmd: i32, ...) -> i32;
+            }
+            // SAFETY: `self.file` owns an open descriptor for the whole call,
+            // and F_BARRIERFSYNC takes no argument.
+            if unsafe { fcntl(self.file.as_raw_fd(), F_BARRIERFSYNC) } == -1 {
+                return Err(io::Error::last_os_error());
+            }
+            Ok(())
+        }
+        #[cfg(not(target_os = "macos"))]
         self.file.sync_all()
     }
 

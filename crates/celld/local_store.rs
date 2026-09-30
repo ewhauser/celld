@@ -34,6 +34,75 @@ const STORE: &str = "celld development store";
 #[derive(Clone, Debug)]
 pub(crate) struct LocalStore {
     database: PathBuf,
+    /// Connections a finished operation gave back. Opening one per operation
+    /// cost more than the operation: SQLite holds one process-wide mutex
+    /// while it opens and closes a file, and every cell's WAL reads and
+    /// commits take that same mutex, so a node activating a few hundred
+    /// cells a second queued its cells' SQLite behind this store's opens.
+    idle: Arc<Mutex<Vec<Connection>>>,
+    writes: Arc<Writes>,
+}
+
+/// Group commit for puts. A put queues itself, then waits for the commit
+/// lock; whoever holds it commits every queued put in one transaction. The
+/// store has one SQLite writer, and a put waiting for it used to sleep in
+/// SQLite's busy handler, which polls with backoff up to 100 ms: at a few
+/// hundred puts a second, dozens of threads slept there while the writer
+/// paid one fsync per put.
+#[derive(Debug, Default)]
+struct Writes {
+    queue: Mutex<Vec<Arc<PendingPut>>>,
+    commit: Mutex<()>,
+}
+
+#[derive(Debug)]
+struct PendingPut {
+    key: String,
+    body: Bytes,
+    mode: PutMode,
+    attributes: String,
+    modified_ms: i64,
+    result: Mutex<Option<object_store::Result<PutResult>>>,
+}
+
+/// Idle connections kept for reuse. A burst can hold more at once; those
+/// close when they come back to a full pool.
+const MAX_IDLE_CONNECTIONS: usize = 32;
+
+/// A connection lent for one operation. It returns to the pool on drop
+/// unless a transaction is still open on it.
+struct Pooled<'a> {
+    store: &'a LocalStore,
+    connection: Option<Connection>,
+}
+
+impl std::ops::Deref for Pooled<'_> {
+    type Target = Connection;
+
+    fn deref(&self) -> &Connection {
+        self.connection.as_ref().expect("pooled connection")
+    }
+}
+
+impl std::ops::DerefMut for Pooled<'_> {
+    fn deref_mut(&mut self) -> &mut Connection {
+        self.connection.as_mut().expect("pooled connection")
+    }
+}
+
+impl Drop for Pooled<'_> {
+    fn drop(&mut self) {
+        let Some(connection) = self.connection.take() else {
+            return;
+        };
+        if !connection.is_autocommit() {
+            return;
+        }
+        let mut idle = self.store.idle.lock().expect("store pool poisoned");
+        if idle.len() < MAX_IDLE_CONNECTIONS {
+            idle.push(connection);
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -56,7 +125,11 @@ struct StoredAttribute {
 impl LocalStore {
     pub(crate) fn open(database: impl AsRef<FsPath>) -> object_store::Result<Self> {
         let database = database.as_ref().to_path_buf();
-        let store = Self { database };
+        let store = Self {
+            database,
+            idle: Arc::default(),
+            writes: Arc::default(),
+        };
         let connection = store.connect()?;
         connection
             .pragma_update(None, "journal_mode", "WAL")
@@ -77,13 +150,24 @@ impl LocalStore {
                  INSERT OR IGNORE INTO store_sequence(singleton, next_etag) VALUES (1, 1);",
             )
             .map_err(db_error)?;
+        drop(connection);
         Ok(store)
     }
 
-    fn connect(&self) -> object_store::Result<Connection> {
-        let connection = Connection::open(&self.database).map_err(db_error)?;
-        configure_connection(&connection)?;
-        Ok(connection)
+    fn connect(&self) -> object_store::Result<Pooled<'_>> {
+        let idle = self.idle.lock().expect("store pool poisoned").pop();
+        let connection = match idle {
+            Some(connection) => connection,
+            None => {
+                let connection = Connection::open(&self.database).map_err(db_error)?;
+                configure_connection(&connection)?;
+                connection
+            }
+        };
+        Ok(Pooled {
+            store: self,
+            connection: Some(connection),
+        })
     }
 
     fn read(&self, key: &str) -> object_store::Result<StoredObject> {
@@ -137,54 +221,73 @@ impl LocalStore {
         body: Bytes,
         options: PutOptions,
     ) -> object_store::Result<PutResult> {
-        let attributes = encode_attributes(&options.attributes)?;
-        let modified_ms = crate::asyncrt::wall_ms();
+        let put = Arc::new(PendingPut {
+            attributes: encode_attributes(&options.attributes)?,
+            modified_ms: crate::asyncrt::wall_ms(),
+            key,
+            body,
+            mode: options.mode,
+            result: Mutex::new(None),
+        });
+        self.writes
+            .queue
+            .lock()
+            .expect("store write queue poisoned")
+            .push(put.clone());
+        let _commit = self.writes.commit.lock().expect("store commit poisoned");
+        // A committer that took this put from the queue answered it before
+        // releasing the lock. Unanswered, it is still queued, and this thread
+        // commits it with whatever queued behind it.
+        if let Some(result) = take_result(&put) {
+            return result;
+        }
+        let batch = std::mem::take(
+            &mut *self
+                .writes
+                .queue
+                .lock()
+                .expect("store write queue poisoned"),
+        );
+        match self.commit_puts(&batch) {
+            Ok(results) => {
+                for (queued, result) in batch.iter().zip(results) {
+                    *queued.result.lock().expect("store put poisoned") = Some(result);
+                }
+            }
+            // One put's failure must not fail the others that shared its
+            // transaction: commit each alone.
+            Err(_) if batch.len() > 1 => {
+                for queued in &batch {
+                    let result = self
+                        .commit_puts(std::slice::from_ref(queued))
+                        .and_then(|mut results| results.pop().expect("one result per put"));
+                    *queued.result.lock().expect("store put poisoned") = Some(result);
+                }
+            }
+            Err(error) => {
+                *put.result.lock().expect("store put poisoned") = Some(Err(error));
+            }
+        }
+        take_result(&put).expect("the committer answers every put it took")
+    }
+
+    /// Apply `puts` in order in one transaction. The outer error aborts all
+    /// of them; an inner one is that put's own precondition failure, which
+    /// writes nothing and leaves the rest to commit.
+    fn commit_puts(
+        &self,
+        puts: &[Arc<PendingPut>],
+    ) -> object_store::Result<Vec<object_store::Result<PutResult>>> {
         let mut connection = self.connect()?;
         let transaction = connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(db_error)?;
-        let current = transaction
-            .query_row("SELECT etag FROM objects WHERE key = ?1", [&key], |row| {
-                row.get::<_, i64>(0)
-            })
-            .optional()
-            .map_err(db_error)?;
-        match options.mode {
-            PutMode::Overwrite => {}
-            PutMode::Create if current.is_some() => return Err(already_exists(&key)),
-            PutMode::Create => {}
-            PutMode::Update(version) => {
-                let current = current.map(|etag| etag.to_string());
-                if current.as_deref().is_none() || version.e_tag.as_deref() != current.as_deref() {
-                    return Err(precondition(&key));
-                }
-            }
+        let mut results = Vec::with_capacity(puts.len());
+        for put in puts {
+            results.push(apply_put(&transaction, put)?);
         }
-        let etag = transaction
-            .query_row(
-                "UPDATE store_sequence SET next_etag = next_etag + 1
-                 WHERE singleton = 1 RETURNING next_etag - 1",
-                [],
-                |row| row.get::<_, i64>(0),
-            )
-            .map_err(db_error)?;
-        transaction
-            .execute(
-                "INSERT INTO objects(key, body, etag, modified_ms, attributes)
-                 VALUES (?1, ?2, ?3, ?4, ?5)
-                 ON CONFLICT(key) DO UPDATE SET
-                   body = excluded.body,
-                   etag = excluded.etag,
-                   modified_ms = excluded.modified_ms,
-                   attributes = excluded.attributes",
-                params![key, body.as_ref(), etag, modified_ms, attributes],
-            )
-            .map_err(db_error)?;
         transaction.commit().map_err(db_error)?;
-        Ok(PutResult {
-            e_tag: Some(etag.to_string()),
-            version: None,
-        })
+        Ok(results)
     }
 
     fn copy_sync(&self, from: &str, to: &str, create: bool) -> object_store::Result<()> {
@@ -205,6 +308,65 @@ impl LocalStore {
         )?;
         Ok(())
     }
+}
+
+fn take_result(put: &PendingPut) -> Option<object_store::Result<PutResult>> {
+    put.result.lock().expect("store put poisoned").take()
+}
+
+fn apply_put(
+    transaction: &rusqlite::Transaction<'_>,
+    put: &PendingPut,
+) -> object_store::Result<object_store::Result<PutResult>> {
+    let current = transaction
+        .query_row(
+            "SELECT etag FROM objects WHERE key = ?1",
+            [&put.key],
+            |row| row.get::<_, i64>(0),
+        )
+        .optional()
+        .map_err(db_error)?;
+    match &put.mode {
+        PutMode::Overwrite => {}
+        PutMode::Create if current.is_some() => return Ok(Err(already_exists(&put.key))),
+        PutMode::Create => {}
+        PutMode::Update(version) => {
+            let current = current.map(|etag| etag.to_string());
+            if current.as_deref().is_none() || version.e_tag.as_deref() != current.as_deref() {
+                return Ok(Err(precondition(&put.key)));
+            }
+        }
+    }
+    let etag = transaction
+        .query_row(
+            "UPDATE store_sequence SET next_etag = next_etag + 1
+             WHERE singleton = 1 RETURNING next_etag - 1",
+            [],
+            |row| row.get::<_, i64>(0),
+        )
+        .map_err(db_error)?;
+    transaction
+        .execute(
+            "INSERT INTO objects(key, body, etag, modified_ms, attributes)
+             VALUES (?1, ?2, ?3, ?4, ?5)
+             ON CONFLICT(key) DO UPDATE SET
+               body = excluded.body,
+               etag = excluded.etag,
+               modified_ms = excluded.modified_ms,
+               attributes = excluded.attributes",
+            params![
+                put.key,
+                put.body.as_ref(),
+                etag,
+                put.modified_ms,
+                put.attributes
+            ],
+        )
+        .map_err(db_error)?;
+    Ok(Ok(PutResult {
+        e_tag: Some(etag.to_string()),
+        version: None,
+    }))
 }
 
 fn configure_connection(connection: &Connection) -> object_store::Result<()> {
@@ -567,3 +729,6 @@ fn precondition(path: &str) -> Error {
         source: Box::new(std::io::Error::other("the ETag does not match")),
     }
 }
+
+#[cfg(test)]
+mod tests;
