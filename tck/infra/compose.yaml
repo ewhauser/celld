@@ -1,0 +1,64 @@
+# TCK_CELLD_IMAGE replaces the pinned release for every node and the tool, so a
+# celld CI job can run the suite against its own build. Unset, the digest-pinned
+# release below is what runs.
+x-celld: &celld
+  image: "${TCK_CELLD_IMAGE:-ghcr.io/denoland/celld:v0.6.0@sha256:e188a7f2bb0b8cec9fb04ee4c3d1ed7cca0ea0419519ae2a9ba36e5b6fe5161b}"
+  environment:
+    AWS_ACCESS_KEY_ID: tck-local
+    AWS_SECRET_ACCESS_KEY: tck-local-disposable-password
+    AWS_REGION: us-east-1
+    AWS_EC2_METADATA_DISABLED: "true"
+    CELLD_BUCKET: s3://tck
+    S3_ENDPOINT: http://minio:9000
+    CELLD_DURABILITY: bucket
+    CELLD_WATCH: /state
+    RUST_LOG: info
+
+services:
+  minio:
+    build:
+      context: ./minio
+      target: minio
+    command: [server, /data]
+    environment:
+      MINIO_ROOT_USER: tck-local
+      MINIO_ROOT_PASSWORD: tck-local-disposable-password
+    volumes: [minio-data:/data]
+  storage:
+    build:
+      context: ./minio
+      target: mc
+    entrypoint: [/bin/sh, -ec]
+    environment:
+      MC_HOST_local: http://tck-local:tck-local-disposable-password@minio:9000
+    command:
+      - |
+        for i in $$(seq 1 60); do
+          if mc mb --ignore-existing local/tck; then exit 0; fi
+          sleep 1
+        done
+        exit 1
+  tool:
+    <<: *celld
+    volumes:
+      - type: bind
+        source: ${TCK_FIXTURE_DIR:?TCK_FIXTURE_DIR must name the built fixture directory}
+        target: /fixture
+        read_only: true
+  celld:
+    <<: *celld
+    command:
+      [
+        --listen,
+        "0.0.0.0:8080",
+        --internal-listen,
+        "0.0.0.0:8081",
+        --advertise,
+        "celld:8081",
+      ]
+    ports: ["127.0.0.1::8080"]
+    volumes: [celld-state:/state]
+
+volumes:
+  minio-data:
+  celld-state:

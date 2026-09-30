@@ -1,0 +1,25 @@
+# CLI overlay.
+#
+# `celld dev` opens its own local object store and keeps every work file under
+# PROJECT/.celld/dev, so this service needs no bucket and no fleet. It gets a
+# writable bind of the built fixture because that directory is the project.
+#
+# The published port is the container's default Worker listener, 9876, so the
+# documented default is exercised rather than restated: nothing passes --port.
+# --host is required only because a published Docker port cannot reach a
+# loopback listener; the operator listener is deliberately left alone, and the
+# case proves it is still not reachable through the Worker listener.
+services:
+  # `celld kv` and `celld d1` find a node through the fleet bucket and then
+  # reach it on the peer network, which the tool container is otherwise not
+  # joined to; without this every operator command fails as unreachable.
+  tool:
+    networks: [default, store]
+  dev:
+    image: "${TCK_CELLD_IMAGE:-ghcr.io/denoland/celld:v0.6.0@sha256:e188a7f2bb0b8cec9fb04ee4c3d1ed7cca0ea0419519ae2a9ba36e5b6fe5161b}"
+    command: [dev, /work, --host, "0.0.0.0", --no-watch, --logs]
+    volumes:
+      - type: bind
+        source: ${TCK_FIXTURE_DIR:?}
+        target: /work
+    ports: ["127.0.0.1::9876"]

@@ -1,0 +1,45 @@
+{
+  "$schema": "./node_modules/oxlint/configuration_schema.json",
+  "jsPlugins": ["@mpsuesser/oxlint-plugin-effect"],
+  "categories": {
+    "correctness": "error"
+  },
+  "rules": {
+    "eslint/no-unused-vars": ["error", { "ignoreRestSiblings": true }],
+    "effect/throw-in-effect-gen": "error",
+    "effect/context-tag-extends": "error",
+    "effect/effect-run-in-body": "error",
+    "effect/avoid-untagged-errors": "error",
+    "effect/use-filesystem-service": "error",
+    "effect/use-command-executor-service": "error",
+    "effect/use-http-client-service": "error",
+    "effect/use-temp-file-scoped": "error"
+  },
+  "overrides": [
+    {
+      "files": ["fixtures/**/*.ts", "test/**/*.ts"],
+      "rules": {
+        "effect/avoid-untagged-errors": "off"
+      }
+    },
+    {
+      "files": [
+        "fixtures/**/worker.ts",
+        "fixtures/extensions/child.ts",
+        "fixtures/recovery/child.ts",
+        "fixtures/core/Services.ts",
+        "fixtures/core/Storage.ts"
+      ],
+      "rules": {
+        "effect/effect-run-in-body": "off"
+      }
+    }
+  ],
+  "ignorePatterns": [
+    ".cache/",
+    ".wrangler/",
+    "artifacts/",
+    "coverage/",
+    "fixtures/**/worker-configuration.d.ts"
+  ]
+}

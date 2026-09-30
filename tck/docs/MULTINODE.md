@@ -1,0 +1,26 @@
+# Local multi-node qualification
+
+Run `pnpm test:multinode` or `pnpm tck --profile local --suite multinode`. This deploys two pinned celld v0.5.0 containers, with separate local disks and public loopback ports, against one retained MinIO bucket. Durability is explicitly **bucket**. No AWS account is required.
+
+The four stages form one ordered scenario; `--case` is rejected because later stages depend on earlier acknowledged history. The ordinary API corpus and single-node recovery suite remain separate.
+
+| Stage                         | Verification                                                                                                                                                                                                                                                                                                                                                                          |
+| ----------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `multinode.routing`           | Concurrent writes through different ingress nodes converge to identical SQL and KV state.                                                                                                                                                                                                                                                                                             |
+| `multinode.owner-failover`    | Read the actual ownership record, SIGKILL its owner, then verify the survivor retains all acknowledged writes and takes ownership with a strictly newer epoch.                                                                                                                                                                                                                        |
+| `multinode.owner-rejoin`      | Restart the old owner with its disk intact, read newer state through both ingress nodes, and successfully write through the rejoined node.                                                                                                                                                                                                                                            |
+| `multinode.storage-partition` | Disconnect the current owner from the storage network while retaining the peer/public network. Require a lease-watchdog self-fence and exit code 3. A post-fence write must not succeed. The survivor must take ownership with a newer epoch and preserve all acknowledged transactions. Restore connectivity, restart the fenced node, and verify both ingress paths and new writes. |
+
+## Topology and evidence
+
+[infra/multinode.yaml](../infra/multinode.yaml) overlays the single-node Compose file. MinIO, deployment tooling, and storage tooling attach only to the storage network. Both celld nodes attach to storage and peer/public networks. The internal listener has no host port mapping. The partition disconnects only the run-owned node from the run-owned storage network; it does not stop MinIO or disconnect the other node.
+
+`CELLD_NODE` gives the two test nodes stable identities, `celld` and `celld2`, within their unique per-run bucket. The DO exposes its ID; the runner reads the pinned v0.5.0 `cells/Recovery:<ID>/own.json` record and validates its node and epoch. This read-only implementation detail is version-specific and must be reviewed when upgrading celld. The runtime is never assigned an owner by the test.
+
+Evidence includes the Compose overlay, uploaded fixture hash, image identities, both nodes' logs, writes and complete SQL/KV snapshots, ownership records before and after faults, Docker lifecycle/network inspections, the rejected post-fence request, and JSON/JUnit results. Ownership checks prevent faults from targeting an unrelated Compose project. Cleanup removes the entire owned project and both node disks, including after a failed stage.
+
+Every write is issued once with a distinct ID. Readiness and cold activation are bounded; semantic assertions do not retry. The exact-state oracle rejects lost acknowledged writes, partial KV/SQL transactions, duplicate rows, corrupt values, and unexpected IDs. Subsequent stages remain unexecuted infrastructure errors if a stage fails. Known-bug API waivers never apply. Each stage has a 150-second deadline and the suite has an eight-minute deadline.
+
+## Scope
+
+This is bucket-durable failover with retained node disks and a live MinIO store. It verifies stale local state does not overwrite newer state during rejoin. It is not a proof over all concurrent schedules, a paused-owner split-brain simulation, or qualification of arbitrary asymmetric network partitions. The refused request is issued after observed fencing; it does not cover a write already in flight at the partition boundary. Fleet durability and follower-log recovery run separately in [the fleet suite](FLEET.md). Runtime invariants are described in [celld's guarantees](https://celld.dev/docs/guarantees/).

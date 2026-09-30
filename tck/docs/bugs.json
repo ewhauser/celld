@@ -1,0 +1,532 @@
+{
+  "bugs": [
+    {
+      "id": "CELL-001",
+      "title": "Body readers allow repeated consumption and mark null bodies used",
+      "status": "open",
+      "report": "upstream/body-consumption.md",
+      "owner": "celld-tck maintainers",
+      "reviewedAt": "2026-09-26",
+      "upstreamIssue": null
+    },
+    {
+      "id": "CELL-002",
+      "title": "Negative storage list limits throw Error instead of TypeError",
+      "status": "open",
+      "report": "upstream/storage-list-validation.md",
+      "owner": "celld-tck maintainers",
+      "reviewedAt": "2026-09-26",
+      "upstreamIssue": null
+    },
+    {
+      "id": "CELL-003",
+      "title": "Uncloneable storage values throw TypeError instead of DataCloneError",
+      "status": "open",
+      "report": "upstream/storage-clone-errors.md",
+      "owner": "celld-tck maintainers",
+      "reviewedAt": "2026-09-26",
+      "upstreamIssue": null
+    },
+    {
+      "id": "CELL-004",
+      "title": "Static assets do not serve a directory index for a trailing-slash path",
+      "status": "open",
+      "report": "upstream/asset-directory-index.md",
+      "owner": "celld-tck maintainers",
+      "reviewedAt": "2026-09-26",
+      "upstreamIssue": null
+    },
+    {
+      "id": "CELL-005",
+      "title": "EC public key export returns SPKI for the raw format and omits JWK metadata",
+      "status": "open",
+      "report": "upstream/webcrypto-ec-key-export.md",
+      "owner": "celld-tck maintainers",
+      "reviewedAt": "2026-09-26",
+      "upstreamIssue": null
+    },
+    {
+      "id": "CELL-006",
+      "title": "SubtleCrypto does not enforce key usages or key lengths and misclassifies malformed JWK input",
+      "status": "open",
+      "report": "upstream/webcrypto-input-validation.md",
+      "owner": "celld-tck maintainers",
+      "reviewedAt": "2026-09-26",
+      "upstreamIssue": null
+    },
+    {
+      "id": "CELL-007",
+      "title": "node:stream Readable.toWeb and Readable.fromWeb throw TypeError",
+      "status": "open",
+      "report": "upstream/node-stream-web-interop.md",
+      "owner": "celld-tck maintainers",
+      "reviewedAt": "2026-09-26",
+      "upstreamIssue": null
+    },
+    {
+      "id": "CELL-008",
+      "title": "websocket_standard_binary_type is not applied; binaryType stays arraybuffer",
+      "status": "open",
+      "report": "upstream/websocket-standard-binary-type.md",
+      "owner": "celld-tck maintainers",
+      "reviewedAt": "2026-09-26",
+      "upstreamIssue": null
+    },
+    {
+      "id": "CELL-009",
+      "title": "X25519 low-order points reject with Error instead of OperationError",
+      "status": "open",
+      "report": "upstream/x25519-low-order.md",
+      "owner": "celld-tck maintainers",
+      "reviewedAt": "2026-09-26",
+      "upstreamIssue": null
+    },
+    {
+      "id": "CELL-010",
+      "title": "R2 listing omits a readable trailing-slash object",
+      "status": "open",
+      "report": "upstream/r2-trailing-slash-list.md",
+      "owner": "celld-tck maintainers",
+      "reviewedAt": "2026-09-26",
+      "upstreamIssue": null
+    }
+  ],
+  "expectations": [
+    {
+      "caseId": "http.body-consumption",
+      "bugIds": ["CELL-001"],
+      "celldVersion": "0.6.0",
+      "evidenceRun": "tck-3b8dd9ff-6e2d-475c-a43b-46829979609f",
+      "candidate": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json"
+        },
+        "body": {
+          "before": false,
+          "after": true,
+          "text": "\u03bb\ud83c\udf0d",
+          "cloned": "\u03bb\ud83c\udf0d",
+          "twice": "accepted",
+          "lateClone": "TypeError"
+        }
+      },
+      "compatibilityDate": "2026-07-30",
+      "compatibilityFlags": []
+    },
+    {
+      "caseId": "storage.invalid-input",
+      "bugIds": ["CELL-002", "CELL-003"],
+      "celldVersion": "0.6.0",
+      "evidenceRun": "tck-3b8dd9ff-6e2d-475c-a43b-46829979609f",
+      "candidate": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json"
+        },
+        "body": {
+          "limit": "Error",
+          "unserializable": "TypeError"
+        }
+      },
+      "compatibilityDate": "2026-07-30",
+      "compatibilityFlags": []
+    },
+    {
+      "caseId": "repro.body-readers",
+      "bugIds": ["CELL-001"],
+      "celldVersion": "0.6.0",
+      "evidenceRun": "tck-45ae6091-9437-4d15-ba25-99890bbf974f",
+      "candidate": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json"
+        },
+        "body": [
+          {
+            "kind": "Request",
+            "method": "text",
+            "before": false,
+            "after": true,
+            "second": {
+              "outcome": "accepted",
+              "name": null,
+              "domException": false
+            }
+          },
+          {
+            "kind": "Request",
+            "method": "json",
+            "before": false,
+            "after": true,
+            "second": {
+              "outcome": "accepted",
+              "name": null,
+              "domException": false
+            }
+          },
+          {
+            "kind": "Request",
+            "method": "arrayBuffer",
+            "before": false,
+            "after": true,
+            "second": {
+              "outcome": "accepted",
+              "name": null,
+              "domException": false
+            }
+          },
+          {
+            "kind": "Request",
+            "method": "blob",
+            "before": false,
+            "after": true,
+            "second": {
+              "outcome": "accepted",
+              "name": null,
+              "domException": false
+            }
+          },
+          {
+            "kind": "Request",
+            "method": "formData",
+            "before": false,
+            "after": true,
+            "second": {
+              "outcome": "accepted",
+              "name": null,
+              "domException": false
+            }
+          },
+          {
+            "kind": "Request",
+            "method": "null-body-control",
+            "first": "",
+            "second": "",
+            "used": true
+          },
+          {
+            "kind": "Response",
+            "method": "text",
+            "before": false,
+            "after": true,
+            "second": {
+              "outcome": "accepted",
+              "name": null,
+              "domException": false
+            }
+          },
+          {
+            "kind": "Response",
+            "method": "json",
+            "before": false,
+            "after": true,
+            "second": {
+              "outcome": "accepted",
+              "name": null,
+              "domException": false
+            }
+          },
+          {
+            "kind": "Response",
+            "method": "arrayBuffer",
+            "before": false,
+            "after": true,
+            "second": {
+              "outcome": "accepted",
+              "name": null,
+              "domException": false
+            }
+          },
+          {
+            "kind": "Response",
+            "method": "blob",
+            "before": false,
+            "after": true,
+            "second": {
+              "outcome": "accepted",
+              "name": null,
+              "domException": false
+            }
+          },
+          {
+            "kind": "Response",
+            "method": "formData",
+            "before": false,
+            "after": true,
+            "second": {
+              "outcome": "accepted",
+              "name": null,
+              "domException": false
+            }
+          },
+          {
+            "kind": "Response",
+            "method": "null-body-control",
+            "first": "",
+            "second": "",
+            "used": true
+          }
+        ]
+      },
+      "compatibilityDate": "2026-07-30",
+      "compatibilityFlags": []
+    },
+    {
+      "caseId": "repro.storage-errors",
+      "bugIds": ["CELL-002", "CELL-003"],
+      "celldVersion": "0.6.0",
+      "evidenceRun": "tck-45ae6091-9437-4d15-ba25-99890bbf974f",
+      "candidate": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json"
+        },
+        "body": {
+          "asyncLimit": {
+            "outcome": "rejected",
+            "name": "Error",
+            "domException": false
+          },
+          "syncLimit": {
+            "outcome": "rejected",
+            "name": "Error",
+            "domException": false
+          },
+          "asyncPut": {
+            "outcome": "rejected",
+            "name": "TypeError",
+            "domException": false
+          },
+          "syncPut": {
+            "outcome": "rejected",
+            "name": "TypeError",
+            "domException": false
+          },
+          "batchPut": {
+            "outcome": "rejected",
+            "name": "TypeError",
+            "domException": false
+          },
+          "absent": true,
+          "validLimit": []
+        }
+      },
+      "compatibilityDate": "2026-07-30",
+      "compatibilityFlags": []
+    },
+    {
+      "caseId": "assets.html-routing",
+      "bugIds": ["CELL-004"],
+      "celldVersion": "0.6.0",
+      "evidenceRun": "tck-3b8dd9ff-6e2d-475c-a43b-46829979609f",
+      "candidate": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json"
+        },
+        "body": {
+          "page": {
+            "status": 200,
+            "location": null,
+            "page": "html",
+            "contentType": "text/html; charset=utf-8",
+            "body": "<!doctype html>\n<title>tck page</title>"
+          },
+          "pageHtml": {
+            "status": 307,
+            "location": "/page",
+            "page": null,
+            "contentType": null,
+            "body": null
+          },
+          "folder": {
+            "status": 307,
+            "location": "/folder/",
+            "page": null,
+            "contentType": null,
+            "body": null
+          },
+          "folderSlash": {
+            "status": 404,
+            "location": null,
+            "page": null,
+            "contentType": null,
+            "body": null
+          },
+          "missing": {
+            "status": 404,
+            "location": null,
+            "page": null,
+            "contentType": null,
+            "body": null
+          }
+        }
+      },
+      "compatibilityDate": "2026-07-30",
+      "compatibilityFlags": []
+    },
+    {
+      "caseId": "crypto.ecdsa-p256",
+      "bugIds": ["CELL-005"],
+      "celldVersion": "0.6.0",
+      "evidenceRun": "tck-3b8dd9ff-6e2d-475c-a43b-46829979609f",
+      "candidate": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json"
+        },
+        "body": {
+          "signatureBytes": 64,
+          "verified": true,
+          "tampered": false,
+          "jwkVerified": true,
+          "rawVerified": "NotSupportedError",
+          "jwk": {
+            "kty": "EC",
+            "crv": "P-256",
+            "xBytes": 32,
+            "yBytes": 32,
+            "privateOmitted": true
+          },
+          "raw": {
+            "bytes": 91,
+            "uncompressed": false
+          },
+          "usages": {
+            "private": ["sign"],
+            "public": ["verify"]
+          },
+          "algorithm": {
+            "name": "ECDSA",
+            "namedCurve": "P-256"
+          },
+          "types": ["private", "public"]
+        }
+      },
+      "compatibilityDate": "2026-07-30",
+      "compatibilityFlags": []
+    },
+    {
+      "caseId": "crypto.invalid-input",
+      "bugIds": ["CELL-006"],
+      "celldVersion": "0.6.0",
+      "evidenceRun": "tck-3b8dd9ff-6e2d-475c-a43b-46829979609f",
+      "candidate": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json"
+        },
+        "body": {
+          "wrongUsage": "accepted",
+          "unknownAlgorithm": "NotSupportedError",
+          "unknownHash": "NotSupportedError",
+          "badKeyLength": "accepted",
+          "malformedJwk": "Error",
+          "emptyUsages": "accepted",
+          "mismatchedUsage": "accepted",
+          "nonExtractable": "InvalidAccessError",
+          "emptyIv": "OperationError"
+        }
+      },
+      "compatibilityDate": "2026-07-30",
+      "compatibilityFlags": []
+    },
+    {
+      "caseId": "node.stream-timers",
+      "bugIds": ["CELL-007"],
+      "celldVersion": "0.6.0",
+      "evidenceRun": "tck-3b8dd9ff-6e2d-475c-a43b-46829979609f",
+      "candidate": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json"
+        },
+        "body": {
+          "chunks": "TypeError",
+          "chunkType": null,
+          "binary": "TypeError",
+          "fromWeb": "TypeError",
+          "race": "fast",
+          "immediate": "soon",
+          "aborted": "AbortError"
+        }
+      },
+      "compatibilityDate": "2026-07-30",
+      "compatibilityFlags": ["nodejs_compat"]
+    },
+    {
+      "caseId": "flags.enabled-defaults",
+      "bugIds": ["CELL-008"],
+      "celldVersion": "0.6.0",
+      "evidenceRun": "tck-3b8dd9ff-6e2d-475c-a43b-46829979609f",
+      "candidate": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json"
+        },
+        "body": {
+          "binaryType": "arraybuffer",
+          "deleteAll": {
+            "values": [],
+            "alarmPresent": false
+          }
+        }
+      },
+      "compatibilityDate": "2026-07-30",
+      "compatibilityFlags": []
+    },
+    {
+      "caseId": "crypto.x25519",
+      "bugIds": ["CELL-009"],
+      "celldVersion": "0.6.0",
+      "compatibilityDate": "2026-07-30",
+      "compatibilityFlags": [],
+      "evidenceRun": "tck-b0165822-cc98-4b73-a9f5-5ef6cb8d88fe",
+      "candidate": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json"
+        },
+        "body": {
+          "publicKey": "de9edb7d7b7dc1b4d35b61c2ece435373f8343c85b78674dadfc7e146f882b4f",
+          "shared": "4a5d9d5ba4ce2de1728e3bf480350f25e07e21c947d19e3376f09b3c1e161742",
+          "lowOrder": "Error"
+        }
+      }
+    },
+    {
+      "caseId": "r2.key-identity",
+      "bugIds": ["CELL-010"],
+      "celldVersion": "0.6.0",
+      "compatibilityDate": "2026-07-30",
+      "compatibilityFlags": [],
+      "evidenceRun": "tck-b0165822-cc98-4b73-a9f5-5ef6cb8d88fe",
+      "candidate": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json"
+        },
+        "body": {
+          "values": [
+            "value-0",
+            "value-1",
+            "value-2",
+            "value-3",
+            "value-4",
+            "value-5"
+          ],
+          "listed": [
+            "/case/a/b",
+            "case/a/%2F",
+            "case/a//b",
+            "case/a/b",
+            "case/\u03bb/%"
+          ],
+          "deleted": true,
+          "sibling": "value-1"
+        }
+      }
+    }
+  ]
+}

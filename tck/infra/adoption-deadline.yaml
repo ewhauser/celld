@@ -1,0 +1,11 @@
+# Bound the safe-point wait so forced adoption happens inside the scenario.
+services:
+  celld:
+    environment:
+      CELLD_DEPLOY_MAX_AGE_S: "20"
+  celld2:
+    environment:
+      CELLD_DEPLOY_MAX_AGE_S: "20"
+  celld3:
+    environment:
+      CELLD_DEPLOY_MAX_AGE_S: "20"

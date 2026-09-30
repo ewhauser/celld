@@ -1,0 +1,60 @@
+services:
+  tool:
+    environment:
+      S3_ENDPOINT: http://proxy:8082
+  proxy:
+    networks: [default, store]
+  celld:
+    command:
+      [
+        --listen,
+        "0.0.0.0:8080",
+        --internal-listen,
+        "0.0.0.0:8081",
+        --advertise,
+        "peer-celld:8081",
+      ]
+    environment:
+      S3_ENDPOINT: http://proxy:8082
+      CELLD_DURABILITY: ${TCK_DURABILITY:-fleet}
+      CELLD_REBALANCE_INTERVAL_MS: "0"
+    networks:
+      default:
+        aliases: [peer-celld]
+      store:
+  celld2:
+    command:
+      [
+        --listen,
+        "0.0.0.0:8080",
+        --internal-listen,
+        "0.0.0.0:8081",
+        --advertise,
+        "peer-celld2:8081",
+      ]
+    environment:
+      S3_ENDPOINT: http://proxy:8082
+      CELLD_DURABILITY: ${TCK_DURABILITY:-fleet}
+      CELLD_REBALANCE_INTERVAL_MS: "0"
+    networks:
+      default:
+        aliases: [peer-celld2]
+      store:
+  celld3:
+    command:
+      [
+        --listen,
+        "0.0.0.0:8080",
+        --internal-listen,
+        "0.0.0.0:8081",
+        --advertise,
+        "peer-celld3:8081",
+      ]
+    environment:
+      S3_ENDPOINT: http://proxy:8082
+      CELLD_DURABILITY: ${TCK_DURABILITY:-fleet}
+      CELLD_REBALANCE_INTERVAL_MS: "0"
+    networks:
+      default:
+        aliases: [peer-celld3]
+      store:

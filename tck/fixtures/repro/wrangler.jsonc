@@ -1,0 +1,10 @@
+{
+  "name": "celld-tck-core",
+  "main": "worker.ts",
+  "compatibility_date": "2026-07-30",
+  "compatibility_flags": [],
+  "durable_objects": {
+    "bindings": [{ "name": "PROBE", "class_name": "Repro" }],
+  },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["Repro"] }],
+}

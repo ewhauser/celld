@@ -1,0 +1,45 @@
+# OTLP telemetry overlay.
+#
+# celld v0.5.0 selects OTLP/HTTP protobuf when CELLD_OTEL names a collector
+# base URL, and appends /v1/traces and /v1/logs itself. The collector sidecar
+# terminates that export, decodes it, and keeps the payloads, so the driver can
+# assert on recorded spans and log records rather than on celld's own logs.
+#
+# One deliberate asymmetry, documented in docs/CLI-TELEMETRY.md: celld3 runs a
+# zero-ratio sampler while celld and celld2 record every trace, so one fleet
+# observes both sampling decisions with an identical fixture on every node. The
+# sampler is parent-based so the decision is pinned to where a trace *starts*:
+# a root request that arrives on celld3 records nothing, while a Durable Object
+# hop that lands there still joins a trace some other node already sampled.
+# A plain `traceidratio` would instead drop that hop and make the propagation
+# assertions depend on where ownership happened to place the cell.
+x-otel: &otel
+  CELLD_OTEL: http://collector:4318
+  # The default is five minutes; the suite needs a batch within a case.
+  CELLD_OTEL_FLUSH_MS: "2000"
+  OTEL_SERVICE_NAME: tck-telemetry
+  # Bounds how long a withheld collector response can stall the exporter.
+  OTEL_EXPORTER_OTLP_TIMEOUT: "5000"
+
+services:
+  collector:
+    image: node:24-alpine@sha256:ebfe2f90462722a7a4de65e91990e97fe0d401c70e0e762c5b53302f905ec1c1
+    command: [node, /fixture/telemetry-collector.mjs]
+    environment:
+      TCK_COLLECTOR_CHILD: "1"
+    volumes:
+      - type: bind
+        source: ${TCK_FIXTURE_DIR:?}
+        target: /fixture
+        read_only: true
+    # Only the control listener is published; the OTLP listener stays internal.
+    ports: ["127.0.0.1::9092"]
+  celld:
+    environment: *otel
+  celld2:
+    environment: *otel
+  celld3:
+    environment:
+      <<: *otel
+      OTEL_TRACES_SAMPLER: parentbased_traceidratio
+      OTEL_TRACES_SAMPLER_ARG: "0"
