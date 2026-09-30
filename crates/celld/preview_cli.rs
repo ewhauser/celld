@@ -443,6 +443,11 @@ async fn deploy_preview(kube: &Kubernetes, o: &Options) -> anyhow::Result<()> {
                 // An unseeded child may be waiting for its first deployment to
                 // become ready. Deploy as soon as its bound storage is known.
                 let store = open_storage(&storage)?;
+                // The preview's pointers must land where its nodes read them:
+                // the control table, when the preview fleet chose one.
+                store
+                    .resolve_control(crate::control::Role::Operator)
+                    .await?;
                 deploy::write(&store, &built).await?;
                 deployed = true;
                 crate::note!(
