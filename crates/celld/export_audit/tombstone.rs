@@ -79,14 +79,13 @@ impl Tombstone {
 }
 
 /// The bucket scope of a stream: the root cell, or its facet's own LTX
-/// scope under `/facets/`.
+/// scope under it. A record's `facet` is already that scope below the root,
+/// `facets/<hash>[/facets/<hash>...]`, as `export_live::facet_path` gives
+/// it, so it is joined, not hashed again.
 pub fn scope_of(cell: &str, facet: Option<&str>) -> String {
     match facet {
         None => cell.to_string(),
-        Some(path) => {
-            let names: Vec<String> = path.split('/').map(str::to_string).collect();
-            crate::engine_api::facet_cell(cell, &names)
-        }
+        Some(path) => format!("{cell}/{path}"),
     }
 }
 

@@ -406,3 +406,102 @@ fn inspect_lists_bounded_pages_and_decodes_records() {
         assert_eq!(summary.streams.len(), 1);
     });
 }
+
+#[test]
+fn backfill_plans_each_cell_then_its_facets() {
+    crate::asyncrt::test_block_on(async {
+        let dir = tempfile::tempdir().unwrap();
+        let bucket = Bucket::open_dev(&dir.path().join("objects.sqlite3")).unwrap();
+        let names = |path: &[&str]| path.iter().map(|n| n.to_string()).collect::<Vec<_>>();
+        let child = crate::engine_api::facet_cell("Cart:b", &names(&["child"]));
+        let nested = crate::engine_api::facet_cell("Cart:b", &names(&["child", "inner"]));
+        for scope in [
+            "Cart:a",
+            "Cart:b",
+            child.as_str(),
+            nested.as_str(),
+            "Cart:c",
+        ] {
+            bucket
+                .put(&format!("cells/{scope}/ltx/e1/0000.ltx"), vec![1])
+                .await
+                .unwrap();
+        }
+        let options = snapshot_options(
+            Mode::Backfill,
+            args(&["--class", "Cart", "--script", "shop"]),
+        )
+        .unwrap()
+        .unwrap();
+        let jobs = plan(&options, &bucket).await.unwrap();
+        let scopes: Vec<String> = jobs
+            .iter()
+            .map(|j| {
+                crate::export_audit::tombstone::scope_of(&j.stream.cell, j.stream.facet.as_deref())
+            })
+            .collect();
+        assert_eq!(
+            scopes,
+            [
+                "Cart:a",
+                "Cart:b",
+                child.as_str(),
+                nested.as_str(),
+                "Cart:c"
+            ]
+        );
+        assert!(jobs
+            .iter()
+            .all(|j| j.stream.class == "Cart" && !j.pin_incarnation));
+        assert_eq!(
+            jobs[2].stream.facet.as_deref(),
+            crate::export_live::facet_path("Cart:b", &child)
+        );
+
+        // One facet named directly.
+        let options = snapshot_options(
+            Mode::Repair,
+            args(&["--stream", &nested, "--script", "shop"]),
+        )
+        .unwrap()
+        .unwrap();
+        let jobs = plan(&options, &bucket).await.unwrap();
+        assert_eq!(jobs[0].stream.cell, "Cart:b");
+        assert_eq!(
+            jobs[0].stream.facet.as_deref(),
+            crate::export_live::facet_path("Cart:b", &nested)
+        );
+    });
+}
+
+#[test]
+fn a_gaps_row_without_a_script_takes_the_fleets_and_the_images_incarnation() {
+    crate::asyncrt::test_block_on(async {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("gaps.jsonl");
+        std::fs::write(
+            &path,
+            concat!(
+                r#"{"SCRIPT":"","CLASS":"Cart","CELL":"Cart:a","FACET":"facets/cccccccccccccccccccccccccccccccc","INCARNATION":0,"GAP_KIND":"reconciler"}"#,
+                "\n",
+                r#"{"SCRIPT":"shop","CLASS":"Cart","CELL":"Cart:b","FACET":"","INCARNATION":3,"GAP_KIND":"gap","BOUND_EPOCH":2,"BOUND_TXID":5}"#,
+                "\n"
+            ),
+        )
+        .unwrap();
+        let options = snapshot_options(
+            Mode::Backfill,
+            args(&["--gaps", path.to_str().unwrap(), "--script", "app"]),
+        )
+        .unwrap()
+        .unwrap();
+        let jobs = plan(&options, &bucket()).await.unwrap();
+        assert_eq!(jobs.len(), 2);
+        let unknown = jobs.iter().find(|j| j.stream.cell == "Cart:a").unwrap();
+        assert_eq!(unknown.stream.script, "app");
+        assert!(!unknown.pin_incarnation);
+        let known = jobs.iter().find(|j| j.stream.cell == "Cart:b").unwrap();
+        assert_eq!(known.stream.script, "shop");
+        assert!(known.pin_incarnation);
+    });
+}

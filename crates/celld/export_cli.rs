@@ -69,7 +69,10 @@ repair snapshots what it does hold and reports covers_target=false. With
 per line, through the highest position its rows name.
 
 backfill snapshots streams at the bucket's newest cut: every cell of a
-class, or every stream an EXPORT_GAPS unload names.
+class and each of its facets, or every stream an EXPORT_GAPS unload names.
+
+A facet's stream is named by its root and its scope below it, as records
+carry it: --stream Room:1/facets/<hash>.
 
 Both print one JSON report per stream and exit non-zero when any failed.
 
@@ -79,7 +82,8 @@ OPTIONS:
                         bucket sink writes snapshots (or CELLD_EXPORT_BUCKET;
                         default: the fleet bucket)
   --script NAME         The stream's script (default: the fleet's current
-                        deployment). Ignored with --gaps, whose rows name it
+                        deployment). With --gaps, only for rows that name
+                        none, as the reconciler's unknown_stream rows do
   --node NAME           The node recorded on snapshots, and the bucket
                         sink's object prefix (default: {DEFAULT_NODE})
   --concurrency N       Streams restored at once (default: {DEFAULT_CONCURRENCY})
@@ -248,17 +252,13 @@ pub(crate) fn snapshot_options(
     let source = match (stream, gaps, class) {
         (Some(scope), None, None) => {
             ensure!(
-                celld_logic::cell::valid_cell_scope(&scope),
-                "--stream takes a cell scope, not {scope:?}"
+                export_restore::Stream::parse(&scope).is_ok(),
+                "--stream takes a cell scope or a facet's, <root>/facets/<hash>..., not {scope:?}"
             );
             ensure!(
                 !crate::export::is_never_exported(export_repair::class_of(&scope)),
                 "class {} is never exported",
                 export_repair::class_of(&scope)
-            );
-            ensure!(
-                !scope.contains("/facets/"),
-                "facet streams cannot be repaired yet"
             );
             Source::Stream { scope, at }
         }
@@ -425,7 +425,7 @@ async fn plan(options: &SnapshotOptions, bucket: &Bucket) -> anyhow::Result<Vec<
     };
     Ok(match &options.source {
         Source::Stream { scope, at } => vec![Job {
-            stream: export_repair::root_stream(&script().await?, scope)?,
+            stream: export_repair::stream_of(&script().await?, scope)?,
             target: at.map_or(Target::Head, Target::AtOrAfter),
             reasons: ["operator".to_string()].into(),
             pin_incarnation: false,
@@ -437,16 +437,44 @@ async fn plan(options: &SnapshotOptions, bucket: &Bucket) -> anyhow::Result<Vec<
                 .into_iter()
                 .filter(|row| class.as_ref().is_none_or(|c| *c == row.stream.class))
                 .collect();
-            export_repair::jobs_from_gaps(&rows, options.mode == Mode::Backfill)
+            let mut jobs = export_repair::jobs_from_gaps(&rows, options.mode == Mode::Backfill);
+            // A row with no script names a stream the consumer has never
+            // seen (the reconciler's unknown_stream): it takes the fleet's
+            // script, and the image's own incarnation.
+            if jobs.iter().any(|job| job.stream.script.is_empty()) {
+                let script = script().await?;
+                for job in jobs.iter_mut().filter(|job| job.stream.script.is_empty()) {
+                    job.stream.script = script.clone();
+                    job.pin_incarnation = false;
+                }
+            }
+            jobs
         }
         Source::Class { class, after } => {
             let script = script().await?;
-            list_class(bucket, class, after.as_deref())
-                .await?
+            let pace = Pace::per_second(options.rate);
+            let roots = list_class(bucket, class, after.as_deref()).await?;
+            // Each root, then its facets, in key order.
+            let scopes: Vec<Vec<String>> = futures_util::stream::iter(roots)
+                .map(|root| {
+                    let pace = pace.clone();
+                    async move {
+                        let mut scopes = vec![root.clone()];
+                        scopes.extend(list_facets(bucket, &root, pace).await?);
+                        anyhow::Ok(scopes)
+                    }
+                })
+                .buffered(options.concurrency.max(1))
+                .collect::<Vec<_>>()
+                .await
                 .into_iter()
+                .collect::<anyhow::Result<_>>()?;
+            scopes
+                .into_iter()
+                .flatten()
                 .map(|scope| {
                     Ok(Job {
-                        stream: export_repair::root_stream(&script, &scope)?,
+                        stream: export_repair::stream_of(&script, &scope)?,
                         target: Target::Head,
                         reasons: ["backfill".to_string()].into(),
                         pin_incarnation: false,
@@ -455,6 +483,53 @@ async fn plan(options: &SnapshotOptions, bucket: &Bucket) -> anyhow::Result<Vec<
                 .collect::<anyhow::Result<_>>()?
         }
     })
+}
+
+/// Facets nest at most this deep below their root.
+const FACET_DEPTH: usize = 3;
+
+/// Every facet scope under `root` in the bucket, `<root>/facets/<hash>...`,
+/// parents before their children.
+async fn list_facets(
+    bucket: &Bucket,
+    root: &str,
+    pace: Option<Arc<Pace>>,
+) -> anyhow::Result<Vec<String>> {
+    let mut found = Vec::new();
+    let mut level = vec![root.to_string()];
+    for _ in 0..FACET_DEPTH {
+        let mut next = Vec::new();
+        for parent in &level {
+            let prefix = format!("cells/{parent}/facets/");
+            let mut token = None;
+            loop {
+                if let Some(pace) = &pace {
+                    pace.wait().await;
+                }
+                let page = bucket
+                    .common_prefixes_page(&prefix, None, token, 1000)
+                    .await
+                    .with_context(|| format!("list the facets of {parent}"))?;
+                next.extend(page.prefixes.into_iter().filter_map(|p| {
+                    let scope = p.strip_prefix("cells/")?.trim_end_matches('/');
+                    export_restore::Stream::parse(scope)
+                        .ok()
+                        .map(|stream| stream.as_str().to_string())
+                }));
+                match page.page_token {
+                    Some(t) => token = Some(t),
+                    None => break,
+                }
+            }
+        }
+        if next.is_empty() {
+            break;
+        }
+        next.sort();
+        found.extend(next.iter().cloned());
+        level = next;
+    }
+    Ok(found)
 }
 
 /// The script of the fleet's current deployment.

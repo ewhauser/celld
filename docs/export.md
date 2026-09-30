@@ -35,8 +35,6 @@ today:
 
 Still to come:
 
-- **Repairing facet streams.** `repair` and `backfill` skip facet streams;
-  a gap in one is reported but cannot be filled yet.
 - **Loading the bucket sink into Snowflake.** The loader reads blob-stream
   or Kafka only. A fleet on the bucket sink can pipe `celld export inspect` into
   `celld-export-loader ingest` by hand, but nothing loads it continuously.
@@ -718,11 +716,17 @@ celld export repair --stream SCOPE [--at EPOCH:TXID] [OPTIONS]
 celld export repair --gaps FILE [--class CLASS] [OPTIONS]
 ```
 
-Restores a root cell's stream from the bucket at the first position at or
+Restores a stream from the bucket at the first position at or
 after `--at`, or at the bucket's newest position without it, and writes a
 snapshot there. The bucket only restores at the positions it holds cuts
 for, so repair may land above `--at`. With `--gaps` it repairs every stream
 of an `EXPORT_GAPS` unload, optionally of one class.
+
+A facet's stream is named by its bucket scope, the root's scope followed by
+the facet path records carry in `facet`:
+`--stream Cart:one/facets/<hash>[/facets/<hash>...]`. Repair restores the
+facet from its own objects and snapshots it under the incarnation stamped in
+its state.
 
 The bucket's newest position is not necessarily the fleet's: a node may
 hold writes it has not uploaded yet. When the bucket does not reach the
@@ -736,17 +740,20 @@ celld export backfill --class CLASS [--after SCOPE] [OPTIONS]
 celld export backfill --gaps FILE [OPTIONS]
 ```
 
-Snapshots streams at the bucket's newest position: every cell of a class,
-or every stream an `EXPORT_GAPS` unload names. Use it after turning export
+Snapshots streams at the bucket's newest position: every cell of a class
+and every facet below it, or every stream an `EXPORT_GAPS` unload names. Use it after turning export
 on for existing cells, after adding a class to `CELLD_EXPORT_CLASSES`, and
 for the reconciler's `unknown_stream` findings. `--after` resumes a class
-after a scope.
+after a scope. Listing a class's facets costs one bucket listing per cell
+and nesting level, paced by `--rate`. A gaps row without a `script`, as an
+`unknown_stream` finding has, takes `--script` or the fleet's current
+deployment and the incarnation the restored state carries.
 
 Options for `repair` and `backfill`:
 
 | option | default | meaning |
 | --- | --- | --- |
-| `--script NAME` | the fleet's current deployment | The stream's script. Ignored with `--gaps`, whose rows name it. |
+| `--script NAME` | the fleet's current deployment | The stream's script. With `--gaps`, only for rows that do not name one. |
 | `--node NAME` | `export-cli` | The `node` recorded on the snapshots, and their object prefix under `export/changes/`. |
 | `--concurrency N` | `4` | Streams restored at once. |
 | `--rate N` | `100` | Bucket reads per second across all streams; `0` for no limit. |
@@ -754,8 +761,7 @@ Options for `repair` and `backfill`:
 
 Both print one JSON report per stream, with the position its snapshot
 reached, and exit non-zero when any stream failed. Tombstoned streams are
-skipped. Facet streams are skipped: restoring a facet's state is not built
-yet.
+skipped.
 
 #### inspect
 
@@ -863,7 +869,8 @@ celld export verify [--sample N | --cell SCOPE [--facet PATH]] [--json]
 Restores streams read-only at their bucket head, a random sample of
 `--sample` streams (default 10) or the one `--cell` names, and compares
 every exported table, row by row, with the consumer's state at that
-position. A stream the consumer has not certified that far is reported as
+position. `--facet` takes the facet path as records carry it in `facet`,
+`facets/<hash>[/facets/<hash>...]`. A stream the consumer has not certified that far is reported as
 behind. It exits non-zero on drift. The `kv` table and tables a `bulk`
 record left uncertain are skipped. Run it on a schedule to catch what
 nothing else would.
