@@ -406,6 +406,30 @@ impl Drop for SqlCursor {
     }
 }
 
+/// Process-wide SQLite settings. Call before the first connection opens:
+/// SQLite accepts them only until it initializes.
+///
+/// Memory statistics are off. With them on, every SQLite allocation and free
+/// takes one process-wide mutex to update the counters, and a node opening
+/// hundreds of cells a second queued its SQLite threads on it. Nothing in
+/// celld reads the process-wide counters or sets a soft heap limit, which
+/// needs them; `sqlite3session_memory_used` keeps a count of its own.
+pub fn configure_sqlite() -> anyhow::Result<()> {
+    // SAFETY: SQLITE_CONFIG_MEMSTATUS takes one int. Called after SQLite
+    // initialized, sqlite3_config changes nothing and returns SQLITE_MISUSE.
+    let result = unsafe {
+        rusqlite::ffi::sqlite3_config(
+            rusqlite::ffi::SQLITE_CONFIG_MEMSTATUS,
+            0 as std::os::raw::c_int,
+        )
+    };
+    anyhow::ensure!(
+        result == rusqlite::ffi::SQLITE_OK,
+        "configure SQLite before its first connection (SQLite error {result})"
+    );
+    Ok(())
+}
+
 #[doc(hidden)]
 pub fn schema(c: &Connection) -> anyhow::Result<()> {
     // OFF while schema() runs, then NORMAL for the steady state. schema()
@@ -418,6 +442,28 @@ pub fn schema(c: &Connection) -> anyhow::Result<()> {
     // CPU while warm cells ran at 22k (engine/pathological-load.md).
     c.pragma_update(None, "synchronous", "OFF")?;
     c.pragma_update(None, "journal_mode", "WAL")?;
+    // One transaction for the tables. As separate autocommit statements, a
+    // fresh cell's five DDL statements were five WAL commits, each taking the
+    // WAL locks and rewriting page 1 again. IMMEDIATE because the first
+    // statements only read: a deferred transaction that upgrades to a writer
+    // cannot wait for the replicator's connection to the same file.
+    let transaction =
+        rusqlite::Transaction::new_unchecked(c, rusqlite::TransactionBehavior::Immediate)?;
+    schema_tables(&transaction)?;
+    transaction.commit()?;
+    // NORMAL, not the FULL default: with WAL, commits then skip the
+    // per-commit WAL fsync (measured 1.4ms -> 19us per put on cloud
+    // disks; the fsync was the entire single-cell write budget).
+    // Process crashes lose nothing. An OS/power crash may lose the
+    // last commits locally — celld's durability boundary for node
+    // loss is LTX replication either way, and replicated-WAL setups
+    // conventionally run NORMAL.
+    c.pragma_update(None, "synchronous", "NORMAL")?;
+    Ok(())
+}
+
+/// celld's own tables, created or migrated inside `schema()`'s transaction.
+fn schema_tables(c: &Connection) -> anyhow::Result<()> {
     // celld shipped these as `kv`, `alarms` and `cell_metadata` until
     // 2026-08-06 -- names a userland table can collide with, and which a
     // library that drops everything except `_cf_*` will happily delete
@@ -501,14 +547,6 @@ pub fn schema(c: &Connection) -> anyhow::Result<()> {
             [],
         )?;
     }
-    // NORMAL, not the FULL default: with WAL, commits then skip the
-    // per-commit WAL fsync (measured 1.4ms -> 19us per put on cloud
-    // disks; the fsync was the entire single-cell write budget).
-    // Process crashes lose nothing. An OS/power crash may lose the
-    // last commits locally — celld's durability boundary for node
-    // loss is LTX replication either way, and replicated-WAL setups
-    // conventionally run NORMAL.
-    c.pragma_update(None, "synchronous", "NORMAL")?;
     Ok(())
 }
 
@@ -854,6 +892,35 @@ pub(crate) fn open_at_epoch(
     vfs: Option<&str>,
     sqlite_vec: bool,
 ) -> anyhow::Result<()> {
+    let prepared = prepare_at_epoch(scope, path, epoch, replicated_wake, vfs, sqlite_vec)?;
+    install_prepared(scope, prepared)
+}
+
+/// A cell database opened and brought to celld's schema, but not yet
+/// installed in an isolate.
+pub(crate) struct PreparedCell {
+    scope: String,
+    path: String,
+    connection: Connection,
+    epoch: u64,
+    replicated_wake: bool,
+}
+
+/// The file half of `open_at_epoch`: open the database and write its schema
+/// and wake record. It touches no isolate state, so an activation runs it on
+/// a blocking thread before its adoption turn. The cells of one isolate take
+/// their turns one at a time, and fresh cells arrive together in the newest
+/// isolate, so this I/O inside the turn serialized every fresh activation on
+/// the node: 300 a second made each open 20x slower under filesystem
+/// contention and queued adoptions for seconds.
+pub(crate) fn prepare_at_epoch(
+    scope: &str,
+    path: &str,
+    epoch: u64,
+    replicated_wake: bool,
+    vfs: Option<&str>,
+    sqlite_vec: bool,
+) -> anyhow::Result<PreparedCell> {
     anyhow::ensure!(epoch > 0, "a cell activation epoch must be positive");
     let connection = match vfs {
         Some(vfs) => {
@@ -861,14 +928,36 @@ pub(crate) fn open_at_epoch(
         }
         None => Connection::open(path)?,
     };
-    finish_open(
+    prepare_connection(scope, &connection, epoch, replicated_wake, sqlite_vec)?;
+    Ok(PreparedCell {
+        scope: scope.to_string(),
+        path: path.to_string(),
+        connection,
+        epoch,
+        replicated_wake,
+    })
+}
+
+/// The isolate half of `open_at_epoch`, run inside the adoption turn.
+pub(crate) fn install_prepared(scope: &str, prepared: PreparedCell) -> anyhow::Result<()> {
+    let PreparedCell {
+        scope: prepared_for,
+        path,
+        connection,
+        epoch,
+        replicated_wake,
+    } = prepared;
+    anyhow::ensure!(
+        prepared_for == scope,
+        "storage prepared for {prepared_for} cannot open as {scope}"
+    );
+    install_connection(
         scope,
         connection,
         epoch,
         replicated_wake,
-        sqlite_vec,
         StorageBacking::File {
-            path: path.to_string(),
+            path,
             root_scope: scope.to_string(),
             facet_path: Vec::new(),
         },
@@ -899,6 +988,19 @@ fn finish_open(
     sqlite_vec: bool,
     backing: StorageBacking,
 ) -> anyhow::Result<()> {
+    prepare_connection(scope, &c, epoch, replicated_wake, sqlite_vec)?;
+    install_connection(scope, c, epoch, replicated_wake, backing)
+}
+
+/// Configure a fresh connection and write celld's schema: file I/O and
+/// connection state only, nothing of the isolate's.
+fn prepare_connection(
+    scope: &str,
+    c: &Connection,
+    epoch: u64,
+    replicated_wake: bool,
+    sqlite_vec: bool,
+) -> anyhow::Result<()> {
     // SQLite's default lookaside arena reserves 48 KiB for every connection.
     // A worker keeps one connection for every resident cell, so the arenas
     // consume 48 MiB per 1,024 cells even when the application does no SQL.
@@ -921,11 +1023,11 @@ fn finish_open(
         "failed to disable SQLite lookaside"
     );
     if sqlite_vec {
-        register_vec0_extension(&c)?;
+        register_vec0_extension(c)?;
     }
-    schema(&c)?;
+    schema(c)?;
     if replicated_wake {
-        wake_record::initialize(&c, scope, epoch)?;
+        wake_record::initialize(c, scope, epoch)?;
     }
     // Match Workerd's SQLite security budgets. Applying native connection
     // limits once here avoids request-path parsing and keeps rejected queries
@@ -954,6 +1056,17 @@ fn finish_open(
     // rusqlite's default holds 16 statements; the KV texts plus a cell's
     // few hot user statements fit in 64 without evicting each other.
     c.set_prepared_statement_cache_capacity(64);
+    Ok(())
+}
+
+/// Make `c` the connection of `scope` in the current isolate's turn.
+fn install_connection(
+    scope: &str,
+    c: Connection,
+    epoch: u64,
+    replicated_wake: bool,
+    backing: StorageBacking,
+) -> anyhow::Result<()> {
     close_sync_list_cursors(scope);
     close_sql_cursors(scope);
     close_sql_statement_cache(scope);

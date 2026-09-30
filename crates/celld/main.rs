@@ -3524,6 +3524,8 @@ const LOCAL_CACHE_PRUNE_PERIOD: std::time::Duration = std::time::Duration::from_
 const LAG_PROBE_PERIOD: std::time::Duration = std::time::Duration::from_millis(20);
 
 fn main() -> anyhow::Result<()> {
+    // First, while no thread can have opened a database.
+    celld::storage::configure_sqlite()?;
     celld::env_vars::validate()?;
     // Parse the telemetry group once, before any command or runtime work.
     // Its specialized values share the strict scalar parsers in env_vars.
