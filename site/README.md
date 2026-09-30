@@ -27,6 +27,13 @@ a run completes. Locally, `pnpm sync` writes a placeholder; to see real results,
 run `pnpm site:build --output ../site/public/compatibility --docs-url ../` in
 `tck/` (see `tck/docs/DASHBOARD.md` for feeding it reports).
 
+The performance results page at `fork/performance/` is rendered by
+`scripts/perf-results.mjs` from celld-perf result files. The Site workflow downloads
+the `perf-results` artifact from the latest Performance run on `main` that finished
+into `perf-results/`, and redeploys whenever such a run completes. Without results the
+page keeps its caveat and instructions. To render local results, run
+`PERF_RESULTS=../target/perf pnpm dev`.
+
 Maintain release status in the overview and install guide when publishing a new
 fork release. Keep in-progress features clearly separate from released behavior.
 Search includes the generated reference pages. The design document stays on GitHub.

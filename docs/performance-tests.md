@@ -423,6 +423,14 @@ six hours, which is before the soak ends. For a dedicated machine, use
 Linux on bare metal: a fixed CPU frequency, SMT and turbo off if you can,
 local NVMe, and nothing else running.
 
+The docs site publishes the latest finished run on `main` at
+[Performance results](https://ewhauser.github.io/celld/fork/performance/),
+with a note that a shared runner's numbers are not real-world numbers.
+The Site workflow downloads the run's `perf-results` artifact and redeploys
+when a Performance run completes. `site/scripts/perf-results.mjs` renders
+the page, and `PERF_RESULTS=../target/perf pnpm dev` in `site/` shows local
+results on it.
+
 ## Reading the numbers
 
 - **The platform.** macOS coalesces timers and parks idle cores deeply.
