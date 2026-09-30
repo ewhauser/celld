@@ -3364,6 +3364,9 @@ impl Actor {
                 self.route_effect_started(&cell);
                 let interlock = self.node_log.lock().unwrap().clone();
                 let timing_cell = cell.clone();
+                // Recovery decodes each witness's tail and folds the dead
+                // node's frames into bundles between its awaits. The drain
+                // keeps it off the core, which owns the node lease timer.
                 out.spawn_scoped(async move {
                     let started = crate::asyncrt::mono_ms();
                     let result = match interlock {
@@ -3768,6 +3771,12 @@ impl Actor {
                         .and_then(|timing| timing.fresh)
                         .unwrap_or(false);
                     let timing_cell = cell.clone();
+                    // A start opens the cell's SQLite inside its isolate's
+                    // turn: the open, the schema DDL and the first WAL
+                    // writes are synchronous. The drain keeps it off the core,
+                    // which owns the node lease timer. Inline, 300 fresh
+                    // activations a second held the core long enough that
+                    // the lease lapsed and the node fenced.
                     out.spawn_scoped(async move {
                         let started = crate::asyncrt::mono_ms();
                         let placed = runtime
