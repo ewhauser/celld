@@ -522,8 +522,13 @@ fn jobs_run_concurrently_and_report_in_order_and_failures_stay_per_stream() {
     crate::asyncrt::test_block_on(async {
         let source = source().await;
         put(&source, "Cart:two", 1, 1, 1, &state_at_4()).await;
-        let mut facet = job(Target::Head);
-        facet.stream.facet = Some("child".into());
+        // A facet with nothing in the bucket fails on its own.
+        let facet = Job {
+            stream: stream_of(SCRIPT, &facet_scope(&["child"])).unwrap(),
+            target: Target::Head,
+            reasons: ["backfill".into()].into(),
+            pin_incarnation: false,
+        };
         let missing = Job {
             stream: root_stream(SCRIPT, "Cart:nothing").unwrap(),
             target: Target::Head,
@@ -551,7 +556,7 @@ fn jobs_run_concurrently_and_report_in_order_and_failures_stay_per_stream() {
             [
                 ("Cart:one", Status::Written),
                 ("Cart:nothing", Status::Failed),
-                ("Cart:one", Status::Skipped),
+                ("Cart:one", Status::Failed),
                 ("Cart:two", Status::Written),
             ]
         );
@@ -560,6 +565,10 @@ fn jobs_run_concurrently_and_report_in_order_and_failures_stay_per_stream() {
             .as_deref()
             .unwrap()
             .contains("nothing in the bucket"));
+        assert_eq!(
+            reports[2].facet,
+            stream_of(SCRIPT, &facet_scope(&["child"])).unwrap().facet
+        );
         let mut consumer = Consumer::new();
         consumer.ingest_all(records).unwrap();
         let state = consumer.state();
@@ -1047,4 +1056,108 @@ CREATE TABLE _cf_KV(scope TEXT, k TEXT, v, PRIMARY KEY(scope,k)) WITHOUT ROWID; 
         assert!(state.table("kv").is_none());
         assert_eq!(state.table("_cf_SQL_kv").unwrap().rows.len(), 1);
     });
+}
+
+/// A facet of `SCOPE` as the bucket holds it and records name it.
+fn facet_scope(names: &[&str]) -> String {
+    let names: Vec<String> = names.iter().map(|n| n.to_string()).collect();
+    crate::engine_api::facet_cell(SCOPE, &names)
+}
+
+#[test]
+fn a_facet_scope_names_its_root_and_the_path_records_carry() {
+    let nested = facet_scope(&["a", "b"]);
+    let stream = stream_of(SCRIPT, &nested).unwrap();
+    assert_eq!(stream.cell, SCOPE);
+    assert_eq!(stream.class, "Cart");
+    // The part below the root, as the live path's `facet_path` gives it.
+    assert_eq!(
+        stream.facet.as_deref(),
+        crate::export_live::facet_path(SCOPE, &nested)
+    );
+    assert_eq!(
+        crate::export_audit::tombstone::scope_of(&stream.cell, stream.facet.as_deref()),
+        nested
+    );
+    assert_eq!(
+        stream_of(SCRIPT, SCOPE).unwrap(),
+        root_stream(SCRIPT, SCOPE).unwrap()
+    );
+    assert!(stream_of(SCRIPT, "Cart:one/facets/nothex").is_err());
+}
+
+#[test]
+fn a_facet_is_repaired_from_its_own_stream() {
+    crate::asyncrt::test_block_on(async {
+        let v8 = crate::export_kv::encode_for_test("({n: 2})");
+        let hex: String = v8.iter().map(|b| format!("{b:02x}")).collect();
+        // A facet's rows are kept under its last run's scope, whatever it is.
+        let facet_image = format!(
+            "PRAGMA journal_mode=WAL;
+            CREATE TABLE _cf_METADATA (scope TEXT PRIMARY KEY, actor_name TEXT, incarnation INTEGER);
+            CREATE TABLE _cf_KV (scope TEXT NOT NULL, k TEXT NOT NULL, v BLOB, PRIMARY KEY (scope, k));
+            CREATE TABLE notes (body TEXT);
+            INSERT INTO _cf_METADATA VALUES ('run-7', NULL, 42);
+            INSERT INTO _cf_KV VALUES ('run-7', 'count', x'{hex}');
+            INSERT INTO notes VALUES ('in the facet');"
+        );
+        let facet = facet_scope(&["child"]);
+        let source = bucket("fleet");
+        put(&source, SCOPE, 1, 1, 1, &state_at_4()).await;
+        put(&source, &facet, 3, 1, 5, &facet_image).await;
+        let stream = stream_of(SCRIPT, &facet).unwrap();
+        let (reports, records) = snapshot(
+            &source,
+            vec![Job {
+                stream: stream.clone(),
+                target: Target::Head,
+                reasons: ["backfill".into()].into(),
+                pin_incarnation: false,
+            }],
+            &settings(1 << 20),
+        )
+        .await;
+        assert_eq!(reports[0].status, Status::Written, "{:?}", reports[0]);
+        assert_eq!(reports[0].facet, stream.facet);
+        assert_eq!(reports[0].incarnation, 42);
+        assert_eq!(reports[0].reached, Some(Position::new(3, 5, REPAIR_COMMIT)));
+        assert!(records.iter().all(|r| r.stream().cell == SCOPE
+            && r.stream().facet == stream.facet
+            && r.stream().incarnation == 42));
+
+        let mut consumer = Consumer::new();
+        consumer.ingest_all(records).unwrap();
+        let state = consumer
+            .stream(&StreamId {
+                incarnation: 42,
+                ..stream
+            })
+            .unwrap();
+        // Only the facet's own tables: nothing of the root's.
+        assert_eq!(state.table("notes").unwrap().rows.len(), 1);
+        assert!(state.table("items").is_none());
+        let kv = state.table("kv").unwrap();
+        assert_eq!(kv.rows.len(), 1);
+        assert!(kv.rows.contains_key(&vec![text("count")]));
+    });
+}
+
+#[test]
+fn a_facet_image_with_rows_of_two_scopes_is_refused() {
+    let db = Connection::open_in_memory().unwrap();
+    db.execute_batch(
+        "CREATE TABLE _cf_METADATA (scope TEXT PRIMARY KEY, incarnation INTEGER);
+         CREATE TABLE _cf_KV (scope TEXT NOT NULL, k TEXT NOT NULL, v BLOB, PRIMARY KEY (scope, k));
+         INSERT INTO _cf_METADATA VALUES ('run-1', 5);
+         INSERT INTO _cf_KV VALUES ('run-2', 'k', '1');",
+    )
+    .unwrap();
+    let facet = stream_of(SCRIPT, &facet_scope(&["x"])).unwrap();
+    assert!(image_scope(&db, &facet).is_err());
+    db.execute_batch("UPDATE _cf_KV SET scope = 'run-1'")
+        .unwrap();
+    assert_eq!(image_scope(&db, &facet).unwrap(), "run-1");
+    // A root's rows are always its own scope's.
+    let root = root_stream(SCRIPT, SCOPE).unwrap();
+    assert_eq!(image_scope(&db, &root).unwrap(), SCOPE);
 }
