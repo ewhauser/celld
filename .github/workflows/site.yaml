@@ -5,9 +5,10 @@ on:
     branches: [main]
   pull_request:
   workflow_dispatch:
-  # Republish the compatibility results when a TCK run on main finishes.
+  # Republish the compatibility and performance results when a TCK or
+  # Performance run on main finishes.
   workflow_run:
-    workflows: [TCK]
+    workflows: [TCK, Performance]
     types: [completed]
     branches: [main]
 
@@ -22,7 +23,7 @@ jobs:
     name: site-build
     permissions:
       contents: read
-      actions: read # Download the TCK workflow's results dashboard.
+      actions: read # Download the TCK dashboard and the Performance results.
     runs-on: ubuntu-latest
     timeout-minutes: 15
     defaults:
@@ -62,6 +63,31 @@ jobs:
             rm -rf public/compatibility
           done
           echo "::warning::No recent TCK run on main has a results dashboard; publishing a placeholder."
+      # The Performance workflow runs the scenarios nightly on main. Publish
+      # the results of the latest run that finished rather than being
+      # cancelled. Without any, the performance page says so.
+      - name: Fetch the performance results
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          gh api "repos/$GITHUB_REPOSITORY/actions/workflows/perf.yml/runs?branch=main&status=completed&per_page=50" \
+            | jq -c --arg repo "$GITHUB_REPOSITORY" '[.workflow_runs[]
+                | select(.event == "schedule" or .event == "workflow_dispatch")
+                | select(.conclusion == "success" or .conclusion == "failure")
+                | select(.head_repository.full_name == $repo)
+                | {id, url: .html_url, event, conclusion, head_sha, created_at}][:5][]' \
+            > "$RUNNER_TEMP/perf-runs"
+          while read -r run; do
+            id=$(jq -r .id <<<"$run")
+            if gh run download "$id" --repo "$GITHUB_REPOSITORY" --name perf-results --dir perf-results; then
+              jq . <<<"$run" > perf-results/run.json
+              echo "Performance results from run $id"
+              exit 0
+            fi
+            rm -rf perf-results
+          done < "$RUNNER_TEMP/perf-runs"
+          echo "::warning::No recent Performance run on main has results; the page says none are published."
       # Generate only fork references; fail on broken internal links.
       - run: pnpm build
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
