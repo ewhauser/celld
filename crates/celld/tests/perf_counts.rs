@@ -299,11 +299,12 @@ async fn a_bucket_proof_write_is_one_upload_and_one_ownership_read() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn concurrent_writes_to_one_cell_share_uploads() {
+    const WRITES: u64 = 64;
     let node = Arc::new(Node::start().await);
     node.get("/do/write?cell=shared&bytes=10").await;
     tokio::time::sleep(Duration::from_millis(500)).await;
     let before = node.metrics().await;
-    let writes: Vec<_> = (0..64)
+    let writes: Vec<_> = (0..WRITES)
         .map(|_| {
             let node = node.clone();
             tokio::spawn(async move { node.get("/do/write?cell=shared&bytes=100").await })
@@ -313,13 +314,25 @@ async fn concurrent_writes_to_one_cell_share_uploads() {
         write.await.unwrap();
     }
     let after = node.metrics().await;
+    // Every write waited for an upload, so the count below is not met by
+    // writes that skipped the bucket.
+    assert_eq!(
+        after.hist_count("durability.proof_bucket_us")
+            - before.hist_count("durability.proof_bucket_us"),
+        WRITES
+    );
     let puts = after.bucket(&["cell_data"], Some(&["put"]))
         - before.bucket(&["cell_data"], Some(&["put"]));
-    eprintln!("64 concurrent writes: {puts} uploads");
-    // 9 on the machine this was written on; one per write would be 64.
+    eprintln!("{WRITES} concurrent writes: {puts} uploads");
+    // A cell's upload carries every write that committed before it began,
+    // so the count is how many uploads fit in the time the writes take to
+    // commit, and that depends on the machine: 9 on the machine this was
+    // written on, up to 22 on a shared CI runner. Without sharing it is one
+    // per write, so the bound is that an upload carries two writes on
+    // average, not a count one machine happens to reach.
     assert!(
-        puts <= 16,
-        "64 concurrent writes to one cell made {puts} uploads; they should share them"
+        puts * 2 <= WRITES,
+        "{WRITES} concurrent writes to one cell made {puts} uploads; they should share them"
     );
 }
 
