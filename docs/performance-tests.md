@@ -91,7 +91,8 @@ fixture. It sends requests one at a time and asserts what the node counted:
   one output gate;
 - a lone node proves each write with at most one upload and exactly one
   ownership read;
-- 64 concurrent writes to one cell share their uploads;
+- 64 concurrent writes to one cell share their uploads, at least two to an
+  upload;
 - a cell activated into an existing isolate compiles nothing;
 - an evicted cell comes back from its local database: one ownership read
   and one claim, and no listing;
@@ -102,6 +103,11 @@ They run in `cargo test`, so they gate every pull request. A count does not
 depend on the machine, so a test fails when a change adds a request or a
 round trip, not when a runner is slow. When a change makes a count smaller,
 update the bound in the same change.
+
+The shared-upload count is the exception: how many writes an upload carries
+depends on how many commit while the one before it runs, and so on the
+machine. Bound a count like that relative to what the test sent (here, half
+the writes), never at a number one machine reaches.
 
 ## Component benchmarks
 
