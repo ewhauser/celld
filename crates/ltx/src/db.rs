@@ -2394,7 +2394,7 @@ fn write_file_atomic(
         let mut file = host.create(Path::new(tmp_path))?;
         file.write_all(data)?;
         let fsync = crate::host::telemetry_us();
-        file.sync_all()?;
+        file.sync_before_rename()?;
         let fsync_us = crate::host::telemetry_us().saturating_sub(fsync);
         drop(file);
         host.rename(Path::new(tmp_path), Path::new(final_path))?;
