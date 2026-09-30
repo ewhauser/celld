@@ -1,0 +1,11 @@
+# Keep background adoption outside the eight-minute scenario bound.
+services:
+  celld:
+    environment:
+      CELLD_DEPLOY_POLL_S: "3600"
+  celld2:
+    environment:
+      CELLD_DEPLOY_POLL_S: "3600"
+  celld3:
+    environment:
+      CELLD_DEPLOY_POLL_S: "3600"

@@ -1,0 +1,26 @@
+# Security-boundary overlay.
+#
+# Two deliberate deviations from the qualification fleet, both documented in
+# docs/SECURITY-BOUNDARIES.md:
+#
+#   * every node gets a small ingress body limit so the documented 413 can be
+#     reached without streaming a gibibyte;
+#   * only celld3 trusts forwarded headers, so one fleet observes both the
+#     default policy (celld, celld2) and the trusted-proxy policy (celld3)
+#     while running an identical fixture on every node.
+services:
+  # `celld diagnose --peer` is the authorized control for peer authentication:
+  # it signs its probe with the fleet key. The tool otherwise only reaches the
+  # bucket network, so it is joined to the peer network as well.
+  tool:
+    networks: [default, store]
+  celld:
+    environment:
+      CELLD_MAX_REQUEST_BODY_BYTES: "65536"
+  celld2:
+    environment:
+      CELLD_MAX_REQUEST_BODY_BYTES: "65536"
+  celld3:
+    environment:
+      CELLD_MAX_REQUEST_BODY_BYTES: "65536"
+      CELLD_TRUST_FORWARDED_HEADERS: "1"

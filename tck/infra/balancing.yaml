@@ -1,0 +1,24 @@
+# Ownership-balancing overlay, layered after infra/operations.yaml.
+#
+# Two controls are needed before any ownership move can be observed at all:
+#
+#   * CELLD_REBALANCE_INTERVAL_MS is both the shared-sample read interval and
+#     the maximum sample age. infra/qualification.yaml pins it to 0, which
+#     disables balancing outright; one second makes a move observable inside a
+#     case deadline.
+#   * Only a hibernated cell moves. A resident cell has to idle-evict first, so
+#     without CELLD_IDLE_EVICT_S a fleet balances only the cells that hibernate
+#     on their own and an active fixture cell never moves.
+services:
+  celld:
+    environment:
+      CELLD_REBALANCE_INTERVAL_MS: "1000"
+      CELLD_IDLE_EVICT_S: "1"
+  celld2:
+    environment:
+      CELLD_REBALANCE_INTERVAL_MS: "1000"
+      CELLD_IDLE_EVICT_S: "1"
+  celld3:
+    environment:
+      CELLD_REBALANCE_INTERVAL_MS: "1000"
+      CELLD_IDLE_EVICT_S: "1"

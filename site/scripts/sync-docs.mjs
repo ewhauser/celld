@@ -1,5 +1,5 @@
 // Publish only fork documentation. Never copy the upstream documentation tree.
-import { mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -54,3 +54,22 @@ for (const page of pages) {
   writeFileSync(path.join(out, `${page.slug}.md`), `---\n${frontmatter}\n---\n\n${notice}${body.trim()}\n`);
 }
 console.log(`Synced ${pages.length} fork pages.`);
+
+// The TCK workflow builds the compatibility results page and the Site workflow
+// drops it into public/compatibility/. Keep the sidebar link working without it.
+const results = path.join(site, 'public/compatibility');
+if (!existsSync(path.join(results, 'index.html'))) {
+  mkdirSync(results, { recursive: true });
+  writeFileSync(path.join(results, 'index.html'), `<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Compatibility results · celld fork</title>
+<style>body{margin:0;padding:48px 20px;background:#f6f7f2;color:#20382d;font:16px/1.6 Inter,-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif}main{max-width:40rem;margin:auto}a{color:#176b46}code{font-size:.9em}</style>
+</head><body><main>
+<h1>Compatibility results</h1>
+<p>No results are published here yet. The <a href="${repo}/actions/workflows/tck.yml?query=branch%3Amain">TCK workflow</a> builds this page on each push to main, and the docs site publishes the latest one.</p>
+<p>To build it locally, run <code>pnpm site:build --output ../site/public/compatibility --docs-url ../</code> in <code>tck/</code>.</p>
+<p><a href="../">Back to the documentation</a></p>
+</main></body></html>
+`);
+  console.log('Wrote a placeholder compatibility results page.');
+}

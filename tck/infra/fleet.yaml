@@ -1,0 +1,9 @@
+services:
+  celld:
+    environment:
+      CELLD_DURABILITY: fleet
+      RUST_LOG: info,timing=debug
+  celld2:
+    environment:
+      CELLD_DURABILITY: fleet
+      RUST_LOG: info,timing=debug

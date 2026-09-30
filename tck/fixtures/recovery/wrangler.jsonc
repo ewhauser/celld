@@ -1,0 +1,11 @@
+{
+  "name": "celld-tck-core",
+  "main": "worker.ts",
+  "compatibility_date": "2026-07-30",
+  "compatibility_flags": [],
+  "durable_objects": {
+    "bindings": [{ "name": "PROBE", "class_name": "Recovery" }],
+  },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["Recovery"] }],
+  "worker_loaders": [{ "binding": "LOADER" }],
+}

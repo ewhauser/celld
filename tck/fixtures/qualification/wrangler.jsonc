@@ -1,0 +1,41 @@
+{
+  "name": "celld-tck-core",
+  "main": "worker.ts",
+  "compatibility_date": "2026-07-30",
+  "compatibility_flags": [],
+  "durable_objects": {
+    "bindings": [{ "name": "PROBE", "class_name": "Recovery" }],
+  },
+  "kv_namespaces": [{ "binding": "KV", "id": "tck-kv" }],
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "tck-db",
+      "database_id": "00000000-0000-0000-0000-000000000001",
+    },
+  ],
+  "r2_buckets": [{ "binding": "BUCKET", "bucket_name": "tck-r2" }],
+  "services": [
+    {
+      "binding": "SERVICE",
+      "service": "celld-tck-core",
+      "entrypoint": "ServiceProbe",
+    },
+  ],
+  "queues": {
+    "producers": [{ "binding": "QUEUE", "queue": "tck-queue" }],
+    "consumers": [
+      {
+        "queue": "tck-queue",
+        "max_batch_size": 10,
+        "max_batch_timeout": 1,
+        "max_retries": 3,
+        "retry_delay": 0,
+      },
+    ],
+  },
+  "workflows": [
+    { "binding": "FLOW", "name": "tck-flow", "class_name": "RecoveryWorkflow" },
+  ],
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["Recovery"] }],
+}

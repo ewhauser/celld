@@ -1,0 +1,19 @@
+# Bucket telemetry overlay.
+#
+# CELLD_OTEL=1 selects the default sink: celld writes Parquet under the
+# telemetry/ prefix of the fleet bucket, partitioned by node and hour. The
+# flush interval is shortened from its five-minute default so a case can
+# observe a completed file; docs/CLI-TELEMETRY.md records what that trades
+# away.
+x-otel: &otel
+  CELLD_OTEL: "1"
+  CELLD_OTEL_FLUSH_MS: "5000"
+  OTEL_SERVICE_NAME: tck-telemetry-bucket
+
+services:
+  celld:
+    environment: *otel
+  celld2:
+    environment: *otel
+  celld3:
+    environment: *otel

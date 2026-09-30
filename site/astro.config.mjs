@@ -26,6 +26,7 @@ export default defineConfig({
         { label: 'Install and upgrade', slug: 'install' },
         { label: 'Bug fixes', slug: 'fixes' },
         { label: 'Release notes', slug: 'fork/releases' },
+        { label: 'Compatibility results', link: '/compatibility/' },
       ] },
       { label: 'Features', items: [
         { label: 'Application previews', slug: 'fork/previews' },
@@ -35,7 +36,6 @@ export default defineConfig({
       { label: 'Upstream documentation ↗', link: 'https://celld.dev/docs/' },
       { label: 'Related projects', items: [
         { label: 'Kubernetes operator ↗', link: 'https://ewhauser.github.io/celld-operator/' },
-        { label: 'Compatibility results ↗', link: 'https://ewhauser.github.io/celld-tck/' },
         { label: 'Upstream source ↗', link: 'https://github.com/denoland/celld' },
       ] },
       { label: 'Contributing', slug: 'contributing' },
