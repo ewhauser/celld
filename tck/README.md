@@ -4,7 +4,9 @@ An independent compatibility and recovery test suite for [celld](https://celld.d
 
 Run identical fixtures on celld and Cloudflare’s workerd, check API behavior, and test recovery from crashes, storage outages, and node failures.
 
-**[Latest results →](https://ewhauser.github.io/celld-tck/)** · [Known bugs](docs/BUGS.md) · [Test design](docs/DESIGN.md) · [CI runs](https://github.com/ewhauser/celld-tck/actions/workflows/ci.yml?query=branch%3Amain)
+[Known bugs](docs/BUGS.md) · [Test design](docs/DESIGN.md) · [CI runs](https://github.com/ewhauser/celld/actions/workflows/tck.yml?query=branch%3Amain)
+
+The suite lives in the celld repository under `tck/`. It was previously the standalone [ewhauser/celld-tck](https://github.com/ewhauser/celld-tck) repository.
 
 ## What it tests
 
@@ -27,9 +29,10 @@ The [v0.6.0 upgrade assessment](docs/RELEASE-0.6.0.md) records new coverage, rel
 
 Requires Node.js **24.21.0**, pnpm **11.15.0**, and Docker with Compose. No cloud account is needed.
 
+From a celld checkout:
+
 ```sh
-git clone https://github.com/ewhauser/celld-tck.git
-cd celld-tck
+cd tck
 pnpm install --frozen-lockfile
 pnpm test:local
 ```
@@ -50,7 +53,9 @@ MinIO's public container images are unavailable. Compose builds the same pinned 
 
 ## Reading the results
 
-The [live matrix](https://ewhauser.github.io/celld-tck/) updates from CI on `main`, including failing runs. It separates passes, known bugs, accepted divergences, failures, and missing evidence, with individual observations and report downloads.
+The [TCK workflow](../.github/workflows/tck.yml) gates every celld pull request on `pnpm check`, the reference run, and the `local`, `recovery`, `multinode`, and `fleet` suites, run against the pull request's own celld image. Pushes to `main` also run the resilience, qualification, and operations suites. Each job uploads its reports as a `tck-evidence-<suite>` artifact.
+
+The [results dashboard](https://ewhauser.github.io/celld-tck/) was published by the standalone repository's CI and is no longer updated. `pnpm site:build` still renders it from downloaded reports; see [the dashboard guide](docs/DASHBOARD.md).
 
 **Successful CI can include known bugs and accepted divergences.** Inspect those results before relying on a particular behavior. Known bugs are accepted only for the registered runtime version, compatibility settings, and observations. Unexpected failures exit nonzero.
 

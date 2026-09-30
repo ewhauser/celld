@@ -29,6 +29,10 @@ Web Platform Tests. Before a release, we replay storage, SQL, alarm,
 stream, WebSocket, and lifecycle scenarios through the full `celld` binary
 in each deployment mode.
 
+The [TCK](../tck/) runs the same fixtures on workerd and a Docker Compose
+celld fleet on MinIO, and adds recovery, fault, and multi-node suites.
+Every pull request runs it against its own celld image.
+
 ## Specification: exhaustive at small size
 
 The coordination protocol is also specified in TLA+. Heyang Zhou wrote

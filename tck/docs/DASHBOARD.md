@@ -1,5 +1,7 @@
 # Results dashboard
 
+> This page describes the standalone celld-tck repository's Compatibility workflow, which no longer runs. In celld, the TCK workflow uploads `tck-evidence-<suite>` artifacts and does not build or publish the dashboard. The site builder below still works on reports collected by hand.
+
 The Compatibility workflow builds a static, searchable test matrix from each job’s JSON report and CI status. Main-branch runs publish it to GitHub Pages, including runs with failing tests. Pull requests and other branches produce a downloadable `compatibility-site` artifact without deploying. Cancelled or superseded runs do not publish. GitHub must support Pages for the repository’s visibility and account plan. Enable **Settings → Pages → Build and deployment → Source: GitHub Actions** for a fork.
 
 If you rerun a workflow, rerun all jobs: evidence from an earlier attempt is deliberately rejected.
