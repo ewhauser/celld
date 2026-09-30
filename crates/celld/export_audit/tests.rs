@@ -21,6 +21,10 @@ use crate::bucket::StorageBackend;
 
 const HOUR: i64 = 60 * 60 * 1000;
 const CELL: &str = "Cart:one";
+/// A facet as records name it: its LTX scope below the root.
+const CHILD: &str = "facets/cccccccccccccccccccccccccccccccc";
+const NESTED: &str =
+    "facets/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/facets/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
 
 fn bucket() -> Bucket {
     let store = Arc::new(InMemory::new());
@@ -449,7 +453,7 @@ fn the_stream_is_the_newest_incarnation_at_or_below_the_head() {
 
 #[test]
 fn a_facet_missing_from_the_bucket_gets_its_deleted_record() {
-    let facet = stream(CELL, Some("child"));
+    let facet = stream(CELL, Some(CHILD));
     let r = run(
         &heads(vec![head(CELL, &[(1, 1, 3)])]),
         &[],
@@ -461,7 +465,7 @@ fn a_facet_missing_from_the_bucket_gets_its_deleted_record() {
     );
     assert_eq!(
         kinds(&r),
-        vec![(FindingKind::MissingDeleted, scope_of(CELL, Some("child")))]
+        vec![(FindingKind::MissingDeleted, scope_of(CELL, Some(CHILD)))]
     );
     let deleted = &r.records[0];
     assert_eq!(deleted.envelope.stream, root());
@@ -571,8 +575,8 @@ fn a_cell_that_keeps_writing_cannot_defer_an_old_gap() {
 
 #[test]
 fn a_facet_whose_objects_do_not_restore_is_not_read_as_deleted() {
-    let facet = stream(CELL, Some("child"));
-    let facet_scope = scope_of(CELL, Some("child"));
+    let facet = stream(CELL, Some(CHILD));
+    let facet_scope = scope_of(CELL, Some(CHILD));
     let mut inventory = Inventory::new();
     inventory.add(&ltx_key(CELL, 1, 0, 1, 3), 0);
     // The facet's object exists, but without the snapshot to start from.
@@ -701,7 +705,7 @@ fn a_tombstone_without_an_incarnation_erases_every_incarnation() {
     let one = tombstone_for(&s, Some(1));
     assert!(one.matches(&s) && !one.matches(&other));
     // Script, cell and facet must be equal, as in EXPORT_TOMBSTONES.
-    assert!(!all.matches(&stream(CELL, Some("child"))));
+    assert!(!all.matches(&stream(CELL, Some(CHILD))));
     assert!(!all.matches(&StreamId {
         script: "other".into(),
         ..s.clone()
@@ -712,8 +716,8 @@ fn a_tombstone_without_an_incarnation_erases_every_incarnation() {
     };
     assert!(!cleared.matches(&s));
     assert!(all.covers_scope(CELL));
-    let facet = tombstone_for(&stream(CELL, Some("a/b")), None);
-    assert!(facet.covers_scope(&scope_of(CELL, Some("a/b"))));
+    let facet = tombstone_for(&stream(CELL, Some(NESTED)), None);
+    assert!(facet.covers_scope(&scope_of(CELL, Some(NESTED))));
     assert!(!facet.covers_scope(CELL));
 }
 
@@ -737,7 +741,7 @@ fn tombstone_keys_are_one_path_segment_per_part() {
 fn erasing_a_root_erases_every_facet_the_consumer_holds() {
     let held = [
         root(),
-        stream(CELL, Some("child")),
+        stream(CELL, Some(CHILD)),
         StreamId {
             script: "other".into(),
             ..root()
@@ -752,7 +756,7 @@ fn erasing_a_root_erases_every_facet_the_consumer_holds() {
         named,
         vec![
             ("app".into(), None),
-            ("app".into(), Some("child".into())),
+            ("app".into(), Some(CHILD.into())),
             ("other".into(), None),
         ]
     );
@@ -763,7 +767,7 @@ fn erasing_a_root_erases_every_facet_the_consumer_holds() {
         "Cart",
         Selection {
             script: Some("app"),
-            facet: Some("child"),
+            facet: Some(CHILD),
             incarnation: Some(3),
             reason: None,
         },
@@ -1460,7 +1464,7 @@ fn snowflake_consumer(
 }
 
 fn audited_records() -> Vec<Record> {
-    let facet = stream(CELL, Some("room/1"));
+    let facet = stream(CELL, Some(CHILD));
     let mut records = vec![
         rows(&root(), at(1, 1, 1), "items", &[(1, "a"), (2, "b")]),
         rows(&root(), at(1, 2, 1), "items", &[(3, "c")]),
@@ -1481,9 +1485,7 @@ fn the_snowflake_consumer_reads_what_the_bucket_consumer_derives() {
         let consumer = snowflake_consumer(&fake);
         let streams = consumer.streams().await.unwrap();
         assert_eq!(streams, fake.summaries());
-        assert!(streams
-            .iter()
-            .any(|s| s.id.facet.as_deref() == Some("room/1")));
+        assert!(streams.iter().any(|s| s.id.facet.as_deref() == Some(CHILD)));
 
         let bucket = BucketConsumer::from_records(bucket(), audited_records(), &[]).unwrap();
         let head = consumer
