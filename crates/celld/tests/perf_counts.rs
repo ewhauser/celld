@@ -19,6 +19,8 @@
 //! and `wake/`, never a cell's keys, so the per-cell assertions below count
 //! only `cell_owner` and `cell_data`.
 
+mod support;
+
 use serde_json::Value;
 use std::net::TcpListener;
 use std::path::{Path, PathBuf};
@@ -37,10 +39,8 @@ struct Node {
 
 impl Drop for Node {
     fn drop(&mut self) {
-        let _ = self.child.kill();
-        let _ = self.child.wait();
-        // `celld dev` runs its node as a child of its own; it exits when
-        // the supervisor's pipe closes, and the dev store is per test.
+        // The dev store is per test.
+        support::stop_dev(&mut self.child);
     }
 }
 

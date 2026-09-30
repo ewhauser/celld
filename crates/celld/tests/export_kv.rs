@@ -9,6 +9,8 @@
 //! consumer applied to what the bucket sink wrote must hold table `kv` with
 //! each live key and its value decoded to JSON.
 
+mod support;
+
 use celld_export_format::{Consumer, Value};
 use std::collections::BTreeMap;
 use std::net::TcpListener;
@@ -146,7 +148,7 @@ async fn durable_object_values_are_exported_as_json() {
         .is_ok_and(|response| response.status().is_success())
     {
         if child.try_wait().unwrap().is_some() || Instant::now() >= deadline {
-            let _ = child.kill();
+            support::stop_dev(&mut child);
             panic!("celld dev did not start:\n{}", log_text());
         }
         tokio::time::sleep(Duration::from_millis(50)).await;
@@ -174,7 +176,7 @@ async fn durable_object_values_are_exported_as_json() {
             break;
         }
         if Instant::now() >= deadline {
-            let _ = child.kill();
+            support::stop_dev(&mut child);
             panic!(
                 "the export did not converge on the cell's key-value state; kv tables: {tables:#?}\nlog:\n{}",
                 log_text()
@@ -182,6 +184,5 @@ async fn durable_object_values_are_exported_as_json() {
         }
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
-    let _ = child.kill();
-    let _ = child.wait();
+    support::stop_dev(&mut child);
 }

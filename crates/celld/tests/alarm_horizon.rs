@@ -10,6 +10,8 @@
 //! alarm aborted it again at every start. The node must keep serving, fire
 //! near alarms beside the far ones, and restart with the far ones unchanged.
 
+mod support;
+
 use std::net::TcpListener;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
@@ -63,8 +65,7 @@ struct Dev {
 
 impl Drop for Dev {
     fn drop(&mut self) {
-        let _ = self.child.kill();
-        let _ = self.child.wait();
+        support::stop_dev(&mut self.child);
     }
 }
 
