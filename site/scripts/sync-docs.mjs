@@ -2,6 +2,7 @@
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { renderPerformance } from './perf-results.mjs';
 
 const site = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const root = path.resolve(site, '..');
@@ -73,3 +74,8 @@ if (!existsSync(path.join(results, 'index.html'))) {
 `);
   console.log('Wrote a placeholder compatibility results page.');
 }
+
+// The performance results page is built from celld-perf result files, not a doc.
+const performance = { title: 'Performance results', description: 'The latest nightly run of the celld-perf scenarios: single node, fleet, and injected faults.', editUrl: `${repo}/edit/main/site/scripts/perf-results.mjs` };
+writeFileSync(path.join(out, 'performance.md'), `---\n${Object.entries(performance).map(([key, value]) => `${key}: ${JSON.stringify(value)}`).join('\n')}\n---\n\n${renderPerformance({ site, repo })}\n`);
+console.log('Rendered the performance results page.');

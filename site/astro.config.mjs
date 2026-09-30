@@ -27,6 +27,7 @@ export default defineConfig({
         { label: 'Bug fixes', slug: 'fixes' },
         { label: 'Release notes', slug: 'fork/releases' },
         { label: 'Compatibility results', link: '/compatibility/' },
+        { label: 'Performance results', slug: 'fork/performance' },
       ] },
       { label: 'Features', items: [
         { label: 'Application previews', slug: 'fork/previews' },
