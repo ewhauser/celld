@@ -33,6 +33,7 @@ export default defineConfig({
         { label: 'Application previews', slug: 'fork/previews' },
         { label: 'OTLP metrics', slug: 'fork/metrics' },
         { label: 'Change export', slug: 'fork/export', badge: { text: 'In progress', variant: 'caution' } },
+        { label: 'DynamoDB coordination', slug: 'fork/dynamodb', badge: { text: 'In progress', variant: 'caution' } },
       ] },
       { label: 'Upstream documentation ↗', link: 'https://celld.dev/docs/' },
       { label: 'Related projects', items: [
