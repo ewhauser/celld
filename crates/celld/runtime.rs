@@ -1274,7 +1274,7 @@ impl RuntimeManager {
         };
         let placed_in = residency.slot().heap_id();
 
-        // Everything the cell needs that the isolate must do: open its
+        // Everything the cell needs that the isolate must do: install its
         // SQLite — which the isolate owns, not the caller — and restore its
         // persisted id name. A paged restore leaves the file sparse behind
         // the activation's VFS, so the actor's connection must open through
@@ -1295,17 +1295,36 @@ impl RuntimeManager {
             },
             None => None,
         };
-        let adopted = residency
-            .adopt(
-                &cell,
-                CellStorage {
-                    path: path_text(&db_path),
+        // The file work of the open runs here, before the turn: the isolate
+        // takes its cells' turns one at a time, and the newest isolate holds
+        // every fresh cell, so I/O inside the turn serialized activation.
+        let prepared = {
+            let cell = cell.clone();
+            let path = path_text(&db_path).to_string();
+            let replicated_wake = self.wake.is_some();
+            let sqlite_vec = config.sqlite_vec();
+            tokio::task::spawn_blocking(move || {
+                crate::storage::prepare_at_epoch(
+                    &cell,
+                    &path,
                     epoch,
-                    replicated_wake: self.wake.is_some(),
-                    vfs: paged_vfs.as_deref(),
-                },
-            )
-            .await;
+                    replicated_wake,
+                    paged_vfs.as_deref(),
+                    sqlite_vec,
+                )
+            })
+            .await
+            .context("cell storage open panicked")
+            .and_then(|prepared| prepared.context("cell storage open failed"))
+        };
+        let prepared = match prepared {
+            Ok(prepared) => prepared,
+            Err(error) => {
+                startup_timing.emit("error", "storage_open");
+                return Err(error);
+            }
+        };
+        let adopted = residency.adopt(&cell, CellStorage::new(prepared)).await;
         let (residency, alarm) = match adopted {
             Ok(adopted) => adopted,
             Err(error) => {
@@ -2503,6 +2522,14 @@ impl StatelessTiming {
     }
 
     fn emit(&self) {
+        crate::perf_stats::record(
+            crate::perf_stats::Hist::StatelessFetch,
+            self.queued_at.elapsed().as_micros() as u64,
+        );
+        crate::perf_stats::record(
+            crate::perf_stats::Hist::StatelessQueue,
+            self.admitted.duration_since(self.queued_at).as_micros() as u64,
+        );
         if let Some(ids) = self.trace {
             let total_us = self.queued_at.elapsed().as_micros() as i64;
             let mut span = crate::telemetry::Span::new(ids, self.span_name, self.span_kind);
@@ -2754,6 +2781,7 @@ struct CellIsolateStartupTiming {
 impl CellIsolateStartupTiming {
     fn emit(&self, outcome: &str, failure_phase: &str) -> u64 {
         let total_us = self.started.elapsed().as_micros() as u64;
+        crate::perf_stats::record(crate::perf_stats::Hist::IsolateStartup, total_us);
         if let Some(ids) =
             crate::telemetry::start_trace().and_then(crate::telemetry::TraceContext::recording_ids)
         {

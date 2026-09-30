@@ -9,6 +9,10 @@ license = "Apache-2.0"
 [features]
 # Internal fixtures for the export Criterion target; absent from ordinary builds.
 export-bench = []
+# Performance-run faults (an injected slow or throttling bucket, a slow
+# fsync) and the fixtures the `perf` Criterion targets use; absent from
+# ordinary builds.
+perf = []
 # The blob-stream sink for change export. Off by default: it pulls in the
 # bitdrift client crates and a patched protobuf that a default build does not
 # carry. Without it, `CELLD_EXPORT_SINK=blob-stream` refuses to start.
@@ -18,6 +22,13 @@ export-blob-stream = [
     "dep:blob-stream-proto",
     "dep:blob-stream-types",
 ]
+# The Kafka sink for change export. Off by default: it builds librdkafka
+# (C) from source. Without it, `CELLD_EXPORT_SINK=kafka` refuses to start.
+export-kafka = ["dep:rdkafka"]
+# `celld export reconcile | verify | erase --consumer snowflake`: audit the
+# Snowflake tables the loader fills, over Snowflake's SQL API. Off by default
+# like the sinks; without it `--consumer snowflake` refuses.
+export-snowflake = ["celld-export-snowflake/sql-api"]
 
 [lib]
 path = "lib.rs"
@@ -49,6 +60,9 @@ blob-stream-producer = { workspace = true, optional = true }
 blob-stream-proto = { workspace = true, optional = true }
 blob-stream-types = { workspace = true, optional = true }
 celld-export-format.workspace = true
+# The Snowflake side of change export: `celld export reconcile | verify |
+# erase --consumer snowflake` read and write the loader's tables through it.
+celld-export-snowflake.workspace = true
 celld-logic.workspace = true
 celld-ltx = { workspace = true, features = ["s3"] }
 encoding_rs.workspace = true
@@ -80,6 +94,7 @@ crc.workspace = true
 dsa.workspace = true
 x25519-dalek.workspace = true
 rand.workspace = true
+rdkafka = { workspace = true, optional = true }
 regex.workspace = true
 reqwest = { workspace = true, features = ["rustls-tls", "stream", "json"] }
 rusqlite = { workspace = true, features = ["backup", "bundled", "hooks", "serialize", "session"] }
@@ -119,3 +134,8 @@ proptest.workspace = true
 name = "export_pipeline"
 harness = false
 required-features = ["export-bench"]
+
+[[bench]]
+name = "perf_components"
+harness = false
+required-features = ["perf"]

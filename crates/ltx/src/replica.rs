@@ -1044,7 +1044,7 @@ fn write_file_atomic(
     let result = (|| -> Result<()> {
         let mut file = host.create(tmp_path)?;
         file.write_all(data)?;
-        file.sync_all()?;
+        file.sync_before_rename()?;
         drop(file);
         host.rename(tmp_path, final_path)?;
         Ok(())

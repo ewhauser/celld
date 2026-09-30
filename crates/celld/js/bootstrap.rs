@@ -887,26 +887,19 @@ pub(super) fn inject_routing(scope: &mut v8::PinScope, node: &str) -> Result<()>
 
 /// Release a cell's instance and restore its id name.
 ///
-/// The isolate-side half of taking a cell in or giving it back: taking it opens
-/// the cell's storage, giving it back releases what the isolate holds and closes
-/// the database, so state cannot span two epochs.
+/// The isolate-side half of taking a cell in or giving it back: taking it
+/// installs the cell's storage, opened before the turn, and giving it back
+/// releases what the isolate holds and closes the database, so state cannot
+/// span two epochs.
 pub(super) fn adopt_cell(
     tc: &mut v8::PinScope,
     cell: &str,
-    cell_storage: Option<CellStorage<'_>>,
-    compat: Compat,
+    cell_storage: Option<CellStorage>,
 ) -> Result<Option<i64>> {
     let owned = cell_storage.is_some();
     if let Some(cell_storage) = cell_storage {
-        storage::open_at_epoch(
-            cell,
-            cell_storage.path,
-            cell_storage.epoch,
-            cell_storage.replicated_wake,
-            cell_storage.vfs,
-            compat.sqlite_vec,
-        )
-        .context("cell storage open failed")?;
+        storage::install_prepared(cell, cell_storage.into_prepared())
+            .context("cell storage open failed")?;
     }
     finish_cell_adoption(tc, cell, owned)
 }

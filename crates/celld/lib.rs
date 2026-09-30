@@ -348,11 +348,13 @@ pub mod export_audit;
 pub mod export_bench;
 pub mod export_blob_stream;
 pub mod export_cli;
+pub mod export_kafka;
 pub(crate) mod export_kv;
 pub mod export_live;
 pub mod export_repair;
 pub mod export_restore;
 pub mod export_sink;
+pub mod export_topic;
 #[cfg(celld_internal_tests)]
 #[allow(clippy::disallowed_methods)]
 #[doc(hidden)]
@@ -382,6 +384,13 @@ pub mod ownership_store;
 pub mod parquet_batch;
 pub mod peer_auth;
 pub mod peer_probe;
+#[cfg(feature = "perf")]
+#[doc(hidden)]
+pub mod perf_bench;
+#[cfg(feature = "perf")]
+pub mod perf_faults;
+pub mod perf_stats;
+pub mod perf_store;
 pub mod pool;
 pub mod preview_cli;
 pub mod preview_seed;

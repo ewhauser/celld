@@ -45,6 +45,18 @@ jobs:
     name: Lint and test
     runs-on: ubuntu-22.04
     timeout-minutes: 90
+    # A single-node Kafka for the export Kafka sink's tests against a real
+    # broker (CELLD_TEST_KAFKA_BROKERS); without it they skip.
+    services:
+      kafka:
+        image: apache/kafka:3.9.1
+        ports:
+          - 9092:9092
+        options: >-
+          --health-cmd "/opt/kafka/bin/kafka-broker-api-versions.sh --bootstrap-server localhost:9092"
+          --health-interval 5s
+          --health-timeout 10s
+          --health-retries 20
     steps:
       - uses: actions/checkout@v6
 
@@ -92,9 +104,9 @@ jobs:
       - name: Clippy
         run: cargo clippy --all-targets --locked -- -D warnings
 
-      # Optional features (the ltx object-store backends, and later the
-      # export transports) must keep compiling even though the default
-      # build leaves them off.
+      # Optional features (the ltx object-store backends and the export
+      # transports) must keep compiling even though the default build leaves
+      # them off.
       - name: Clippy, all features
         run: cargo clippy --all-targets --all-features --locked -- -D warnings
 
@@ -120,8 +132,34 @@ jobs:
       - name: Test, blob-stream sink
         run: cargo test --locked -p celld --features export-blob-stream --lib export_blob_stream
 
+      # The Kafka sink's own tests, with librdkafka compiled in, against the
+      # job's broker.
+      - name: Test, Kafka sink
+        env:
+          CELLD_TEST_KAFKA_BROKERS: localhost:9092
+        run: cargo test --locked -p celld --features export-kafka --lib export_kafka
+
       # Check fixtures and benchmark paths without timing gates on shared runners.
       - name: Smoke test export benchmarks
         run: |
           cargo test -p celld-export-format --bench export_format --locked -- --test
           cargo test -p celld --features export-bench --bench export_pipeline --locked -- --test
+
+      # The component benchmarks (docs/performance-tests.md), each case once
+      # in Criterion's test mode: fixtures and paths, never timing. The ltx
+      # and core targets build optimized (`cargo bench`): they are small and
+      # need no V8, and their largest fixtures take minutes unoptimized.
+      - name: Smoke test component benchmarks
+        run: |
+          cargo bench -p celld-ltx --bench ltx --locked -- --test
+          cargo bench -p celld-logic --bench core_events --locked -- --test
+          cargo test -p celld --features perf --bench perf_components --locked -- --test
+
+      # The celld-perf harness end to end against the debug node, at low
+      # rates: its count checks and the verification sweep fail the job;
+      # its timings are only reported. `Test` above already ran the count
+      # tests in crates/celld/tests/perf_counts.rs.
+      - name: Smoke test the performance harness
+        run: |
+          cargo build --locked -p celld -p celld-perf
+          target/debug/celld-perf run smoke --celld target/debug/celld --out "$RUNNER_TEMP/perf"
