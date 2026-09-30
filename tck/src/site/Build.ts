@@ -11,6 +11,7 @@ export const buildSite = (options: {
   output: string;
   run: Run;
   generatedAt?: string;
+  docsUrl?: string | undefined;
 }) =>
   Effect.gen(function* () {
     const fs = yield* FileSystem.FileSystem;
@@ -76,7 +77,7 @@ export const buildSite = (options: {
     yield* fs.makeDirectory(`${options.output}/reports`, { recursive: true });
     yield* fs.writeFileString(
       `${options.output}/index.html`,
-      renderSite(model),
+      renderSite(model, { docsUrl: options.docsUrl }),
     );
     yield* fs.writeFileString(
       `${options.output}/results.json`,

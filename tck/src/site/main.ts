@@ -10,6 +10,7 @@ const cli = Command.make(
     input: Flag.String("input").pipe(Flag.withDefault(".cache/site-input")),
     output: Flag.String("output").pipe(Flag.withDefault(".cache/site")),
     context: Flag.String("context").pipe(Flag.withDefault("")),
+    docsUrl: Flag.String("docs-url").pipe(Flag.withDefault("")),
   },
   (options) =>
     Effect.gen(function* () {
@@ -17,7 +18,7 @@ const cli = Command.make(
       const run = options.context
         ? yield* decodeJson(Run, yield* fs.readFileString(options.context))
         : {
-            repository: process.env.GITHUB_REPOSITORY ?? "ewhauser/celld-tck",
+            repository: process.env.GITHUB_REPOSITORY ?? "ewhauser/celld",
             sha: process.env.GITHUB_SHA ?? "local",
             runId: process.env.GITHUB_RUN_ID ?? "local",
             attempt: process.env.GITHUB_RUN_ATTEMPT ?? "1",
@@ -25,7 +26,12 @@ const cli = Command.make(
             branch: process.env.GITHUB_REF_NAME ?? "local preview",
             conclusion: process.env.CI_RESULT ?? "unknown",
           };
-      const model = yield* buildSite({ ...options, run });
+      const model = yield* buildSite({
+        input: options.input,
+        output: options.output,
+        run,
+        docsUrl: options.docsUrl || undefined,
+      });
       yield* Console.log(
         `Built ${options.output}/index.html: ${model.rows.length} cases, ${model.complete ? "complete" : "needs attention"}`,
       );

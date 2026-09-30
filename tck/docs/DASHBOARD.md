@@ -1,8 +1,8 @@
 # Results dashboard
 
-> This page describes the standalone celld-tck repository's Compatibility workflow, which no longer runs. In celld, the TCK workflow uploads `tck-evidence-<suite>` artifacts and does not build or publish the dashboard. The site builder below still works on reports collected by hand.
+The TCK workflow (`.github/workflows/tck.yml` in celld) builds a static, searchable test matrix from each job’s JSON report and CI status. Pushes to `main` and manual runs build it in the `TCK dashboard` job and upload it as the `compatibility-site` artifact, including runs with failing tests. Pull requests skip it, since they run only the core suites.
 
-The Compatibility workflow builds a static, searchable test matrix from each job’s JSON report and CI status. Main-branch runs publish it to GitHub Pages, including runs with failing tests. Pull requests and other branches produce a downloadable `compatibility-site` artifact without deploying. Cancelled or superseded runs do not publish. GitHub must support Pages for the repository’s visibility and account plan. Enable **Settings → Pages → Build and deployment → Source: GitHub Actions** for a fork.
+The docs site publishes it at [ewhauser.github.io/celld/compatibility/](https://ewhauser.github.io/celld/compatibility/). The Site workflow downloads the dashboard from the latest TCK run on `main` that finished, and runs again whenever such a run completes. Cancelled or superseded runs do not publish. The dashboard's Documentation link leads back to the docs site.
 
 If you rerun a workflow, rerun all jobs: evidence from an earlier attempt is deliberately rejected.
 
@@ -12,7 +12,7 @@ To preview a run locally, download all `compatibility-summary-*` artifacts into 
 
 ```json
 {
-  "repository": "ewhauser/celld-tck",
+  "repository": "ewhauser/celld",
   "sha": "FULL_COMMIT_SHA",
   "runId": "GITHUB_RUN_ID",
   "attempt": "1",

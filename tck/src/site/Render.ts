@@ -35,8 +35,8 @@ const groupLabels: Record<string, string> = {
 const head = () =>
   `<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="color-scheme" content="light"><meta name="description" content="celld test results and compatibility matrix."><title>Test matrix · celld-tck</title><link rel="stylesheet" href="./style.css"><script src="./client.js" defer></script></head>`;
 
-const topbar = (repo: string) =>
-  `<header class="topbar"><a href="./" class="brand" aria-label="celld-tck home"><span class="mark" aria-hidden="true"><i></i><i></i><i></i><i></i></span>celld<span class="brand-divider">/</span><span class="muted">tck</span></a><nav aria-label="Main"><a class="source-link" href="${repo}">GitHub <span aria-hidden="true">↗</span></a></nav></header>`;
+const topbar = (repo: string, docsUrl?: string) =>
+  `<header class="topbar"><a href="./" class="brand" aria-label="celld-tck home"><span class="mark" aria-hidden="true"><i></i><i></i><i></i><i></i></span>celld<span class="brand-divider">/</span><span class="muted">tck</span></a><nav aria-label="Main">${docsUrl ? `<a href="${escapeHtml(docsUrl)}">Documentation</a>` : ""}<a class="source-link" href="${repo}">GitHub <span aria-hidden="true">↗</span></a></nav></header>`;
 
 const runHeader = (model: SiteModel, repo: string, runUrl: string) => {
   const { run } = model;
@@ -75,12 +75,15 @@ const matrixSection = (model: SiteModel) =>
   ].join("\n");
 
 const scopeDetails = (model: SiteModel, repo: string) =>
-  `<details id="scope" class="scope-details"><summary>Scope and exclusions</summary><p>${escapeHtml(model.scope)}</p><p>Local validation only. AWS unqualified. <a href="${repo}/blob/main/docs/DESIGN.md">Test design ↗</a></p><div class="boundaries">${model.excluded.map((entry) => `<details><summary>${escapeHtml(entry.family)}</summary><p>${escapeHtml(entry.reason)}</p></details>`).join("")}<details><summary>Diagnostic repros</summary><p>Run separately with the repros suite; excluded from default CI.</p></details></div></details>`;
+  `<details id="scope" class="scope-details"><summary>Scope and exclusions</summary><p>${escapeHtml(model.scope)}</p><p>Local validation only. AWS unqualified. <a href="${repo}/blob/main/tck/docs/DESIGN.md">Test design ↗</a></p><div class="boundaries">${model.excluded.map((entry) => `<details><summary>${escapeHtml(entry.family)}</summary><p>${escapeHtml(entry.reason)}</p></details>`).join("")}<details><summary>Diagnostic repros</summary><p>Run separately with the repros suite; excluded from default CI.</p></details></div></details>`;
 
 const evidenceDialog = () =>
   `<dialog id="evidence" aria-labelledby="evidence-title"><div class="dialog-head"><p class="eyebrow" id="evidence-suite"></p><button id="close" aria-label="Close evidence">×</button></div><h2 id="evidence-title"></h2><p id="evidence-meta"></p><p><a id="evidence-download" download>Download suite report ↓</a></p><div id="evidence-content"></div></dialog>`;
 
-export const renderSite = (model: SiteModel): string => {
+export const renderSite = (
+  model: SiteModel,
+  options: { docsUrl?: string | undefined } = {},
+): string => {
   const { run, counts } = model;
   const repo = `https://github.com/${run.repository.split("/").map(encodeURIComponent).join("/")}`;
   const runUrl = `${repo}/actions/runs/${encodeURIComponent(run.runId)}/attempts/${encodeURIComponent(run.attempt)}`;
@@ -99,7 +102,7 @@ export const renderSite = (model: SiteModel): string => {
     `<!doctype html>`,
     head(),
     `<body><a class="skip" href="#matrix">Skip to test matrix</a>`,
-    topbar(repo),
+    topbar(repo, options.docsUrl),
     runHeader(model, repo, runUrl),
     metrics(model, { total, missing, exceptions, failures }),
     suiteCards(model),

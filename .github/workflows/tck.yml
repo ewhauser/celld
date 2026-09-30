@@ -61,6 +61,29 @@ jobs:
           COMMAND: ${{ matrix.command }}
         run: $COMMAND
 
+      # The per-suite reports the dashboard job below builds from.
+      - name: Collect dashboard evidence
+        if: always()
+        env:
+          SUITE: ${{ matrix.name }}
+          JOB_STATUS: ${{ job.status }}
+        run: |
+          mkdir -p site-input
+          node -e 'const fs = require("node:fs"); const e = process.env; fs.writeFileSync("site-input/job.json", JSON.stringify({suite:e.SUITE, conclusion:e.JOB_STATUS, sha:e.GITHUB_SHA, runId:e.GITHUB_RUN_ID, attempt:e.GITHUB_RUN_ATTEMPT}))'
+          for report in artifacts/*/report.json; do
+            [ -f "$report" ] || continue
+            destination="site-input/$(basename "$(dirname "$report")")"
+            mkdir -p "$destination"
+            cp "$report" "$destination/report.json"
+          done
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: compatibility-summary-${{ matrix.name }}
+          path: tck/site-input/
+          retention-days: 7
+
       - uses: actions/upload-artifact@v4
         if: always()
         with:
@@ -206,6 +229,30 @@ jobs:
           SUITE: ${{ matrix.suite }}
         run: pnpm "test:$SUITE"
 
+      # The per-suite reports the dashboard job below builds from.
+      - name: Collect dashboard evidence
+        if: always()
+        env:
+          SUITE: ${{ matrix.suite }}
+          JOB_STATUS: ${{ job.status }}
+        working-directory: tck
+        run: |
+          mkdir -p site-input
+          node -e 'const fs = require("node:fs"); const e = process.env; fs.writeFileSync("site-input/job.json", JSON.stringify({suite:e.SUITE, conclusion:e.JOB_STATUS, sha:e.GITHUB_SHA, runId:e.GITHUB_RUN_ID, attempt:e.GITHUB_RUN_ATTEMPT}))'
+          for report in artifacts/*/report.json; do
+            [ -f "$report" ] || continue
+            destination="site-input/$(basename "$(dirname "$report")")"
+            mkdir -p "$destination"
+            cp "$report" "$destination/report.json"
+          done
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: compatibility-summary-${{ matrix.suite }}
+          path: tck/site-input/
+          retention-days: 7
+
       - uses: actions/upload-artifact@v4
         if: always()
         with:
@@ -213,6 +260,53 @@ jobs:
           path: tck/artifacts/
           if-no-files-found: ignore
           retention-days: 7
+
+  # The results dashboard, built from this run's reports by the TCK source
+  # at this commit. The docs site (site.yaml) publishes the one from the
+  # latest finished run on main at /compatibility/. Pull requests skip it:
+  # they run only some suites, so most of the matrix would read as missing.
+  dashboard:
+    name: TCK dashboard
+    needs: [checks, suite]
+    if: ${{ !cancelled() && github.event_name != 'pull_request' }}
+    runs-on: ubuntu-22.04
+    timeout-minutes: 10
+    defaults:
+      run:
+        working-directory: tck
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: pnpm/action-setup@v4
+        with:
+          package_json_file: tck/package.json
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version-file: tck/.node-version
+          cache: pnpm
+          cache-dependency-path: tck/pnpm-lock.yaml
+
+      - name: Install
+        run: pnpm install --frozen-lockfile
+
+      - uses: actions/download-artifact@v4
+        continue-on-error: true # Missing evidence must appear on the dashboard.
+        with:
+          pattern: compatibility-summary-*
+          path: tck/.cache/site-input
+
+      - name: Build
+        env:
+          CI_RESULT: ${{ needs.checks.result == 'success' && needs.suite.result == 'success' && 'success' || 'failure' }}
+        run: pnpm site:build --docs-url ../
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: compatibility-site
+          path: tck/.cache/site/
+          include-hidden-files: true
+          retention-days: 90
 
   # One stable check name for branch protection, whatever the matrix holds.
   gate:

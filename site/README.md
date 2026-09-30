@@ -20,6 +20,13 @@ section of `docs/telemetry.md`. The generated `fork/` pages are ignored. Edit li
 lead to their canonical source, and repository links are rewritten for the site.
 Do not glob or mirror the upstream `docs/` tree. Add new fork sources explicitly.
 
+The compatibility results page at `/compatibility/` is not built here. The TCK
+workflow builds it from `tck/` on each push to `main`, and the Site workflow
+downloads the latest one from a run that finished, then redeploys whenever such
+a run completes. Locally, `pnpm sync` writes a placeholder; to see real results,
+run `pnpm site:build --output ../site/public/compatibility --docs-url ../` in
+`tck/` (see `tck/docs/DASHBOARD.md` for feeding it reports).
+
 Maintain release status in the overview and install guide when publishing a new
 fork release. Keep in-progress features clearly separate from released behavior.
 Search includes the generated reference pages. The design document stays on GitHub.

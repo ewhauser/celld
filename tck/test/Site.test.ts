@@ -184,6 +184,10 @@ it.effect("escapes untrusted diagnostics in HTML and embedded JSON", () =>
     expect(html).not.toContain(attack);
     expect(html).not.toContain('href="javascript:');
     expect(html).toContain("&lt;/script&gt;");
+    expect(html).not.toContain(">Documentation</a>");
+    expect(renderSite(result, { docsUrl: '../"><script>' })).toContain(
+      '<a href="../&quot;&gt;&lt;script&gt;">Documentation</a>',
+    );
     const embedded = html.match(
       /<script id="site-data" type="application\/json">(.*?)<\/script>/s,
     )![1]!;
