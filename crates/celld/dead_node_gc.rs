@@ -416,6 +416,12 @@ async fn retire_dead_node(bucket: &Bucket, node: &str, now_ms: u64) -> anyhow::R
     ) {
         return Ok(false);
     }
+    // A dead node's load item only misleads placement; a table fleet drops
+    // it with the lease. A successor that reuses the name publishes a new
+    // one with its next renewal.
+    if let Some(table) = bucket.load_table().await? {
+        table.delete_load(node).await?;
+    }
     // A folded record is never deleted. Two reasons compose. An unsealed log
     // is the fleet's only pointer to an unrecovered tail, so the record must outlive
     // recovery — the dead-leader sweep seals it, and a later pass

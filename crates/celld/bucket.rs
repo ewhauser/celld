@@ -983,6 +983,18 @@ impl Bucket {
             .map(Some)
     }
 
+    /// Does this fleet keep node load in items of its own? A table fleet
+    /// does, so its leases stay small; a bucket fleet keeps load inside the
+    /// lease, where it always was. Answers for a resolved client only.
+    pub(crate) fn splits_load(&self) -> bool {
+        matches!(self.control.resolved(), Some(Some(_)))
+    }
+
+    /// The control table of a fleet that splits load out of its leases.
+    pub(crate) async fn load_table(&self) -> anyhow::Result<Option<&Arc<Table>>> {
+        self.control_table().await
+    }
+
     /// Every node lease with its body, from a read shared by every loop on
     /// this client and no older than `max_age`, on a fleet whose leases live
     /// in a control table. `None` on a bucket fleet, whose callers list and

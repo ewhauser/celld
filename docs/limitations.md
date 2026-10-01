@@ -47,7 +47,6 @@ APIs, and Wrangler configuration.
 - `celld cell list` reads the cell prefixes in the bucket. On a table fleet
   a cell that has an ownership record but has never written data has no
   prefix, so the listing leaves it out. Such a cell holds no data.
-- The shared fleet sample `fleet/capacity-v1.json` stays in the bucket.
 
 ## WebSockets
 

@@ -103,6 +103,9 @@ const DEPLOY_PK: &str = "deploy";
 const PROBE_PK: &str = "probe";
 /// The partition of a cell's ownership record is this and the cell.
 const OWNER_PK_PREFIX: &str = "cell#";
+/// The partition of the node load items: advisory, one per node, written
+/// beside each lease renewal and read as one query.
+const LOAD_PK: &str = "load";
 
 /// The most records one `TransactWriteItems` writes.
 pub(crate) const MAX_TRANSACT_WRITES: usize = 100;
@@ -814,11 +817,13 @@ impl Table {
         after: Option<&str>,
         limit: Option<usize>,
     ) -> anyhow::Result<(Vec<(String, Record)>, Option<String>)> {
+        // Only the advisory load items are read eventually, at half the
+        // price; every authority record is read consistently.
         let mut request = json!({
             "TableName": self.name,
             "KeyConditionExpression": "pk = :pk",
             "ExpressionAttributeValues": { ":pk": { "S": pk } },
-            "ConsistentRead": true,
+            "ConsistentRead": pk != LOAD_PK,
         });
         if let Some(after) = after {
             request["ExclusiveStartKey"] = Self::key_attributes(pk, after);
@@ -1186,6 +1191,30 @@ impl Table {
         }
         leases.sort_by(|a, b| a.key.cmp(&b.key));
         Ok(leases)
+    }
+
+    // ── Node load ──
+
+    /// Publish a node's load item. Unconditional: it grants nothing, so a
+    /// lost or late write only leaves placement a renewal behind.
+    pub(crate) async fn put_load(&self, node: &str, body: &[u8]) -> anyhow::Result<()> {
+        self.put(LOAD_PK, node, body, Condition::None).await?;
+        Ok(())
+    }
+
+    /// A node's load item.
+    pub(crate) async fn get_load(&self, node: &str) -> anyhow::Result<Option<Record>> {
+        self.get(LOAD_PK, node).await
+    }
+
+    /// Every node's load item, by node, in one eventually consistent query.
+    pub(crate) async fn loads(&self) -> anyhow::Result<Vec<(String, Record)>> {
+        self.query(LOAD_PK).await
+    }
+
+    pub(crate) async fn delete_load(&self, node: &str) -> anyhow::Result<()> {
+        self.delete(LOAD_PK, node, None).await?;
+        Ok(())
     }
 
     // ── Administration ──

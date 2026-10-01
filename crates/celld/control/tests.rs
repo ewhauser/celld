@@ -119,16 +119,16 @@ impl Transport for FakeTable {
                 Ok(json!({}))
             }
             "Query" => {
-                assert_eq!(
-                    body["ConsistentRead"],
-                    json!(true),
-                    "every read is consistent"
-                );
                 let pk = body
                     .pointer("/ExpressionAttributeValues/:pk/S")
                     .and_then(Value::as_str)
                     .unwrap()
                     .to_string();
+                assert_eq!(
+                    body["ConsistentRead"],
+                    json!(pk != LOAD_PK),
+                    "every read but the advisory load query is consistent"
+                );
                 let after = body
                     .get("ExclusiveStartKey")
                     .map(|key| string_attribute(key, "sk").unwrap());
@@ -2230,5 +2230,75 @@ fn a_deploy_switch_must_fit_one_transaction_on_a_table() {
         crate::deploy::check_switch_fits(&bucket, 100)
             .await
             .unwrap();
+    });
+}
+
+fn item_doc(fake: &FakeTable, pk: &str, sk: &str) -> Option<Value> {
+    fake.items
+        .lock()
+        .unwrap()
+        .get(&(pk.to_string(), sk.to_string()))
+        .map(|item| serde_json::from_str(item["doc"]["S"].as_str().unwrap()).unwrap())
+}
+
+#[test]
+fn a_table_fleet_keeps_load_out_of_its_leases() {
+    crate::asyncrt::test_block_on(async {
+        let (bucket, fake) = table_fleet().await;
+        let ownership = crate::ownership_store::BucketOwnership::new(
+            bucket.clone(),
+            bucket.clone(),
+            "n1".into(),
+            "probe-key".into(),
+        )
+        .with_lease_ttl_ms(10_000);
+        let record = celld_logic::NodeLeaseRecord {
+            node: "n1".into(),
+            addr: "10.0.0.1:9000".into(),
+            expires_ms: crate::ownership_store::now_ms() + 10_000,
+            peer_protocol: 1,
+            generation: "probe-key".into(),
+            log_state: None,
+            etag: String::new(),
+        };
+        let outcome = ownership
+            .cas_node_lease(celld_logic::CasGuard::Absent, &record, &mut None)
+            .await
+            .unwrap();
+        assert!(matches!(
+            outcome,
+            celld_logic::LeaseCasOutcome::Applied { .. }
+        ));
+        // The load item is published beside the renewal.
+        for _ in 0..200 {
+            if item_doc(&fake, "load", "n1").is_some() {
+                break;
+            }
+            crate::asyncrt::sleep(Duration::from_millis(5)).await;
+        }
+        let lease = item_doc(&fake, NODES_PK, "n1").unwrap();
+        assert!(lease.get("load").is_none(), "{lease}");
+        assert_eq!(lease["addr"], "10.0.0.1:9000");
+        let load = item_doc(&fake, "load", "n1").expect("a load item");
+        assert!(load.get("log").is_none(), "{load}");
+        assert!(load["load"]["sampled_ms"].as_u64().unwrap() > 0);
+        assert_eq!(load["expires_ms"], lease["expires_ms"]);
+
+        // Placement reads the load items directly; no shared sample object.
+        let (_, peers) = ownership.read_shared_capacity_peers(5_000).await.unwrap();
+        assert_eq!(peers.len(), 1);
+        assert_eq!(peers[0].node, "n1");
+        assert!(peers[0].sampled_ms > 0);
+        assert!(bucket
+            .get_bucket_object("fleet/capacity-v1.json")
+            .await
+            .unwrap()
+            .is_none());
+        assert!(fake
+            .items
+            .lock()
+            .unwrap()
+            .keys()
+            .all(|(pk, _)| pk != FLEET_PK));
     });
 }
