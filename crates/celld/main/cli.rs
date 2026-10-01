@@ -289,7 +289,7 @@ USAGE:
   celld dev [PROJECT] [--host IP] [--port PORT] [--logs]
   celld cell list [CLASS] --bucket [s3://|gs://|az://]NAME[/PREFIX] [OPTIONS]
   celld cell gc --dry-run [CLASS] --bucket [s3://|gs://|az://]NAME[/PREFIX] [OPTIONS]
-  celld control init|show|repair-epochs --bucket [s3://|gs://|az://]NAME[/PREFIX] [OPTIONS]
+  celld control init|show|migrate|repair-epochs --bucket [s3://|gs://|az://]NAME[/PREFIX] [OPTIONS]
   celld d1 migrations apply DATABASE [PROJECT] --bucket [s3://|gs://|az://]NAME[/PREFIX]
   celld d1 execute DATABASE --command SQL [PROJECT] --bucket [s3://|gs://|az://]NAME[/PREFIX]
   celld export reconcile|verify|erase --bucket [s3://|gs://|az://]NAME[/PREFIX] [OPTIONS]

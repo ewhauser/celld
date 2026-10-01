@@ -39,6 +39,12 @@ enum Verb {
         lease_shards: Option<u32>,
     },
     Show,
+    Migrate {
+        to: Option<String>,
+        table_region: Option<String>,
+        create: bool,
+        lease_shards: Option<u32>,
+    },
     RepairEpochs {
         dry_run: bool,
     },
@@ -57,6 +63,7 @@ fn help_text() -> String {
 USAGE:
   celld control init --table NAME --bucket s3://NAME[/PREFIX] [OPTIONS]
   celld control show --bucket [s3://|gs://|az://]NAME[/PREFIX] [OPTIONS]
+  celld control migrate --to bucket|dynamodb://NAME --bucket s3://NAME[/PREFIX] [OPTIONS]
   celld control repair-epochs --bucket [s3://|gs://|az://]NAME[/PREFIX] [--dry-run]
 
 `init` creates the DynamoDB table if it is absent (on-demand capacity,
@@ -65,6 +72,14 @@ records the choice in fleet/control.json. Run it before the fleet's first
 node starts; a fleet with live node leases in the bucket is refused.
 
 `show` prints the fleet's choice and, for a table, its health.
+
+`migrate` moves an existing fleet's coordination records to a table, or back
+to the bucket. Stop every node first; it refuses while a node lease is live.
+It moves the node leases, the drain token, the waker role and the deploy
+pointers, and switches fleet/control.json. Start the nodes on the new store
+afterwards: they copy each ownership record the first time they read it, and
+the node holding the waker role copies the rest, then marks the migration
+done. Run it again to finish a run that was interrupted.
 
 `repair-epochs` raises every ownership record whose epoch is behind the
 newest epoch of the cell's data in the bucket, as after restoring the control
@@ -75,6 +90,7 @@ still unrecovered.
 
 OPTIONS:
   --table NAME          The DynamoDB table (or CELLD_CONTROL=dynamodb://NAME)
+  --to BACKEND          migrate: bucket, or dynamodb://NAME
   --table-region REGION The table's region (or CELLD_CONTROL_REGION; default:
                         the bucket's region)
   --no-create           Adopt an existing table instead of creating it
@@ -99,6 +115,12 @@ fn parse(arguments: Vec<String>) -> anyhow::Result<Option<Command>> {
             lease_shards: None,
         },
         Some("show") => Verb::Show,
+        Some("migrate") => Verb::Migrate {
+            to: None,
+            table_region: None,
+            create: true,
+            lease_shards: None,
+        },
         Some("repair-epochs") => Verb::RepairEpochs { dry_run: false },
         Some(other) => bail!("unknown celld control command {other:?}; see celld control --help"),
     };
@@ -129,7 +151,13 @@ fn parse(arguments: Vec<String>) -> anyhow::Result<Option<Command>> {
                 *table_region = Some(value("--table-region")?)
             }
             ("--no-create", Verb::Init { create, .. }) => *create = false,
-            ("--lease-shards", Verb::Init { lease_shards, .. }) => {
+            ("--to", Verb::Migrate { to, .. }) => *to = Some(value("--to")?),
+            ("--table-region", Verb::Migrate { table_region, .. }) => {
+                *table_region = Some(value("--table-region")?)
+            }
+            ("--no-create", Verb::Migrate { create, .. }) => *create = false,
+            ("--lease-shards", Verb::Init { lease_shards, .. })
+            | ("--lease-shards", Verb::Migrate { lease_shards, .. }) => {
                 *lease_shards = Some(crate::control::parse_lease_shards(
                     "--lease-shards",
                     &value("--lease-shards")?,
@@ -192,6 +220,41 @@ pub async fn run(arguments: Vec<String>) -> anyhow::Result<()> {
             )?;
             crate::fleet::validate_bucket(&bucket).await?;
             out.row(&Reply(Value::Object(crate::control::show(&bucket).await?)))?;
+        }
+        Verb::Migrate {
+            to,
+            table_region,
+            create,
+            lease_shards,
+        } => {
+            let to = Backend::parse(
+                to.as_deref()
+                    .context("celld control migrate needs --to bucket or --to dynamodb://NAME")?,
+            )?;
+            let mut settings = Settings::from_env()?;
+            // The command names its own destination; CELLD_CONTROL names
+            // the store the fleet is leaving, if anything.
+            settings.backend = None;
+            if table_region.is_some() {
+                settings.region = table_region;
+            }
+            if lease_shards.is_some() {
+                settings.lease_shards = lease_shards;
+            }
+            let storage = command.fleet.resolve("celld control migrate")?;
+            let bucket = crate::fleet::bucket_client(
+                &storage.bucket,
+                storage.endpoint.as_deref(),
+                &storage.region,
+            )?;
+            crate::fleet::validate_bucket(&bucket).await?;
+            let migrated = crate::control::migrate(&bucket, &settings, to, create).await?;
+            out.row(&Reply(json!({
+                "from": migrated.from.to_string(),
+                "to": migrated.to.to_string(),
+                "moved": migrated.moved,
+                "resumed": migrated.resumed,
+            })))?;
         }
         Verb::RepairEpochs { dry_run } => {
             let storage = command.fleet.resolve("celld control repair-epochs")?;

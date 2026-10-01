@@ -36,12 +36,15 @@ use object_store::ObjectMeta;
 use rand::RngCore;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
-use std::sync::{Arc, OnceLock};
+use std::sync::{Arc, OnceLock, RwLock};
 use std::time::Duration;
 
+mod migrate;
 mod repair;
 #[cfg(test)]
 mod tests;
+
+pub use migrate::{migrate, run_migration, Migrated};
 
 #[cfg(test)]
 use repair::{repair_cell, Outcome};
@@ -98,6 +101,8 @@ fn lease_shard(node: &str, shards: u32) -> u32 {
 const FLEET_PK: &str = "fleet";
 const DEPLOY_PK: &str = "deploy";
 const PROBE_PK: &str = "probe";
+/// The partition of a cell's ownership record is this and the cell.
+const OWNER_PK_PREFIX: &str = "cell#";
 
 /// The DynamoDB JSON protocol version every request names.
 const TARGET_PREFIX: &str = "DynamoDB_20120810";
@@ -279,7 +284,7 @@ impl ControlKey {
     /// The table's partition and sort key for this record.
     fn item_key(&self) -> (String, String) {
         match self {
-            Self::Owner(cell) => (format!("cell#{cell}"), "own".to_string()),
+            Self::Owner(cell) => (format!("{OWNER_PK_PREFIX}{cell}"), "own".to_string()),
             Self::Lease(node) => (NODES_PK.to_string(), node.clone()),
             Self::Drain => (FLEET_PK.to_string(), "drain".to_string()),
             Self::Waker => (FLEET_PK.to_string(), "waker".to_string()),
@@ -797,6 +802,91 @@ impl Table {
             match next {
                 Some(next) => after = Some(next),
                 None => return Ok(records),
+            }
+        }
+    }
+
+    /// One page of the cell ownership items, which live one per partition
+    /// and so can only be found by a scan. Only a migration back to the
+    /// bucket reads them all.
+    pub(crate) async fn owner_page(
+        &self,
+        after: Option<(String, String)>,
+    ) -> anyhow::Result<(Vec<(String, Record)>, Option<(String, String)>)> {
+        let mut request = json!({
+            "TableName": self.name,
+            "FilterExpression": "begins_with(pk, :cell)",
+            "ExpressionAttributeValues": { ":cell": { "S": OWNER_PK_PREFIX } },
+            "ConsistentRead": true,
+        });
+        if let Some((pk, sk)) = &after {
+            request["ExclusiveStartKey"] = Self::key_attributes(pk, sk);
+        }
+        let answer = self
+            .read("Scan", request)
+            .await
+            .with_context(|| format!("scan the owners in dynamodb://{}", self.name))?;
+        let mut owners = Vec::new();
+        for item in answer
+            .get("Items")
+            .and_then(Value::as_array)
+            .map(Vec::as_slice)
+            .unwrap_or_default()
+        {
+            let pk = string_attribute(item, "pk")?;
+            let Some(cell) = pk.strip_prefix(OWNER_PK_PREFIX) else {
+                continue;
+            };
+            owners.push((cell.to_string(), decode_record(item)?));
+        }
+        let next = answer
+            .get("LastEvaluatedKey")
+            .filter(|key| !key.is_null())
+            .map(|key| anyhow::Ok((string_attribute(key, "pk")?, string_attribute(key, "sk")?)))
+            .transpose()?;
+        Ok((owners, next))
+    }
+
+    /// The first record the table holds besides its claim and the records
+    /// `expected` accepts, as a bucket key or `pk/sk`. A scan, for the one
+    /// command that moves a fleet's records in, which needs an empty table.
+    pub(crate) async fn first_record(
+        &self,
+        expected: &dyn Fn(&str) -> bool,
+    ) -> anyhow::Result<Option<String>> {
+        let mut after: Option<Value> = None;
+        loop {
+            let mut request = json!({
+                "TableName": self.name,
+                "ConsistentRead": true,
+            });
+            if let Some(after) = after.take() {
+                request["ExclusiveStartKey"] = after;
+            }
+            let answer = self
+                .read("Scan", request)
+                .await
+                .with_context(|| format!("scan dynamodb://{}", self.name))?;
+            for item in answer
+                .get("Items")
+                .and_then(Value::as_array)
+                .map(Vec::as_slice)
+                .unwrap_or_default()
+            {
+                let pk = string_attribute(item, "pk")?;
+                let sk = string_attribute(item, "sk")?;
+                if pk == META_PK || pk == PROBE_PK {
+                    continue;
+                }
+                match ControlKey::object_key(&pk, &sk) {
+                    Some(key) if expected(&key) => continue,
+                    Some(key) => return Ok(Some(key)),
+                    None => return Ok(Some(format!("{pk}/{sk}"))),
+                }
+            }
+            match answer.get("LastEvaluatedKey").filter(|key| !key.is_null()) {
+                Some(next) => after = Some(next.clone()),
+                None => return Ok(None),
             }
         }
     }
@@ -1340,6 +1430,26 @@ struct Marker {
     region: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     fleet: Option<String>,
+    /// Set while a `celld control migrate` still copies ownership records
+    /// out of the store the fleet left. Releases before migration refuse a
+    /// marker that carries it, which is what keeps them off a moving fleet.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    migrating: Option<Migrating>,
+}
+
+/// The store a fleet's records are moving out of, while ownership records
+/// are still copied from it on first touch.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Migrating {
+    /// `bucket`, or `dynamodb` with the table it named.
+    from: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    table: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    region: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    fleet: Option<String>,
 }
 
 impl Marker {
@@ -1383,6 +1493,10 @@ pub enum Role {
 /// opened bucket.
 pub(crate) struct Route {
     resolved: OnceLock<Option<Arc<Table>>>,
+    /// The store the records are moving out of, while a migration copies
+    /// ownership records on first touch. `None` on every fleet that is not
+    /// migrating, which then takes no migration branch.
+    migration: RwLock<Option<Source>>,
     /// The last read of a table fleet's leases, shared by every loop on
     /// every clone of this client. See [`Route::lease_view`].
     lease_view: tokio::sync::Mutex<Option<Arc<LeaseView>>>,
@@ -1397,6 +1511,7 @@ impl Route {
     pub(crate) fn unresolved() -> Arc<Self> {
         Arc::new(Self {
             resolved: OnceLock::new(),
+            migration: RwLock::new(None),
             lease_view: tokio::sync::Mutex::new(None),
             transport: None,
         })
@@ -1406,6 +1521,7 @@ impl Route {
     pub(crate) fn unresolved_over(transport: Arc<dyn Transport>) -> Arc<Self> {
         Arc::new(Self {
             resolved: OnceLock::new(),
+            migration: RwLock::new(None),
             lease_view: tokio::sync::Mutex::new(None),
             transport: Some(transport),
         })
@@ -1423,6 +1539,16 @@ impl Route {
     /// for a table, and `None` before resolution.
     pub(crate) fn resolved(&self) -> Option<Option<&Arc<Table>>> {
         self.resolved.get().map(Option::as_ref)
+    }
+
+    /// The store ownership records are still being copied from, if any.
+    pub(crate) fn migration(&self) -> Option<Source> {
+        self.migration.read().unwrap().clone()
+    }
+
+    /// Stop consulting the old store, once the migration finished.
+    pub(crate) fn finish_migration(&self) {
+        *self.migration.write().unwrap() = None;
     }
 
     /// Every node lease of the table, read no more than `max_age` ago.
@@ -1478,6 +1604,56 @@ impl Route {
             }
         }
     }
+}
+
+/// The store a migrating fleet's ownership records are leaving.
+#[derive(Clone, Debug)]
+pub(crate) enum Source {
+    Bucket,
+    Table(Arc<Table>),
+}
+
+/// Copy one ownership record into the fleet's store from the store a
+/// migration is leaving, if only the old store holds it, and answer the
+/// fleet's copy.
+///
+/// The old store's copy is frozen: no node of the fleet writes it, because
+/// every node follows the marker to the new store. So every node that copies
+/// a record copies the same bytes, the conditional create lets exactly one
+/// of them land, and the record keeps its node and epoch across the move.
+/// `table` is the fleet's table, `None` when the fleet moved to the bucket.
+pub(crate) async fn copy_owner(
+    bucket: &Bucket,
+    key: &str,
+    record: &ControlKey,
+    table: Option<&Arc<Table>>,
+    source: &Source,
+) -> anyhow::Result<Option<(Bytes, String)>> {
+    let current = || async {
+        match table {
+            Some(table) => table.get_record(record).await,
+            None => bucket.get_bucket_object(key).await,
+        }
+    };
+    if let Some(found) = current().await? {
+        return Ok(Some(found));
+    }
+    let old = match source {
+        Source::Bucket => bucket.get_bucket_object(key).await?,
+        Source::Table(source) => source.get_record(record).await?,
+    };
+    let Some((body, _)) = old else {
+        return Ok(None);
+    };
+    let created = match table {
+        Some(table) => table.cas_record(record, &body, None).await?,
+        None => bucket.put_cas_bucket_object(key, body, None).await?,
+    };
+    if created.is_some() {
+        tracing::debug!(key, "copied an ownership record into the fleet's store");
+    }
+    // Whichever copy landed, the fleet's store holds the record now.
+    current().await
 }
 
 /// One read of every node lease of a table fleet.
@@ -1579,10 +1755,10 @@ fn random_fleet_id() -> String {
 /// The first sign that the bucket already holds a fleet, or `None` for a
 /// bucket (or prefix) a new table fleet can start in.
 ///
-/// Until `celld control migrate` exists, a fleet chooses its store before it
-/// holds any state. A stopped bucket fleet's ownership records, folded logs
-/// and pointers stay in the bucket when the table is selected, so every
-/// existing cell would read as absent and activate at epoch 1 as a new cell,
+/// A fleet that holds state moves with `celld control migrate`, which copies
+/// its records. Selected any other way, a stopped bucket fleet's ownership
+/// records, folded logs and pointers would stay behind in the bucket, so
+/// every existing cell would read as absent and activate at epoch 1 as a new cell,
 /// skipping the data it holds. Expired leases are therefore not enough: any
 /// cell data, node record, log, or coordination record refuses the switch.
 async fn fleet_state_in_bucket(bucket: &Bucket) -> anyhow::Result<Option<String>> {
@@ -1722,7 +1898,16 @@ pub(crate) async fn resolve_with(
             Some(Arc::new(table))
         }
     };
+    let source = match &marker.migrating {
+        None => None,
+        Some(migrating) => {
+            Some(migrate::source(bucket, &backend, migrating, role, settings, &transport).await?)
+        }
+    };
     bucket.control_route().install(table)?;
+    if let Some(source) = source {
+        *bucket.control_route().migration.write().unwrap() = Some(source);
+    }
     Ok(Resolved {
         backend,
         region: marker.region.clone(),
@@ -1752,14 +1937,14 @@ async fn establish(
             table: None,
             region: None,
             fleet: None,
+            migrating: None,
         },
         Backend::DynamoDb { table: name } => {
             if let Some(found) = fleet_state_in_bucket(bucket).await? {
                 bail!(
-                    "this bucket already holds fleet state ({found}); a fleet chooses a \
-                     DynamoDB control table before it holds any, because moving an existing \
-                     fleet's records needs `celld control migrate`, which does not exist yet. \
-                     Start the table fleet in an empty bucket or prefix"
+                    "this bucket already holds fleet state ({found}); a fleet that already \
+                     holds state moves its records to a table with `celld control migrate \
+                     --to dynamodb://{name}` while every node is stopped"
                 );
             }
             let region = table_region(bucket, None, settings)?;
@@ -1785,6 +1970,7 @@ async fn establish(
                 table: Some(name.clone()),
                 region: Some(region),
                 fleet: Some(fleet),
+                migrating: None,
             }
         }
     };

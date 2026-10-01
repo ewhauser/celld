@@ -3780,6 +3780,18 @@ async fn async_main(
                 fleet::validate_bucket(&client).await?;
             }
             resolve_control(&client).await?;
+            if client.control_migrating() {
+                // A `celld control migrate` left ownership records in the old
+                // store; the node holding the waker role walks them over.
+                let tick_ms =
+                    celld::env_vars::positive::<u64>("CELLD_WAKER_TICK_MS")?.unwrap_or(60_000);
+                celld::asyncrt::spawn(celld::control::run_migration(
+                    client.clone(),
+                    node.clone(),
+                    tick_ms,
+                ))
+                .detach();
+            }
             celld::wake_format::ensure_ready(&client).await?;
             // The list above proves the bucket answers; it does not prove the
             // store enforces the conditional writes or ranged reads that a
