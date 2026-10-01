@@ -28,12 +28,14 @@ fleet operation, use the [main celld documentation](https://celld.dev/docs/).
 | Development previews | Deploy isolated previews and seed them from approved persisted object checkpoints. | [Preview workflow](./fork/previews/) |
 | Observability | Export node gauges and cell CPU and heap distributions through OTLP. | [Metrics](./fork/metrics/) |
 | Change export | Stream every cell's SQLite changes to a bucket, blob-stream or Kafka and load them into Snowflake, with repair for anything lost. On main, not yet released. | [User guide](./fork/export/) |
+| Coordination | Keep a fleet's ownership records, node leases and deploy pointers in a DynamoDB table instead of the bucket, for faster lease renewals and activations. On main, not yet released. | [User guide](./fork/dynamodb/) |
 
 ## Releases and compatibility
 
 The documented release baseline is **v0.6.0-ewhauser.2**, based on upstream
 **v0.6.0**. Fork builds are published as prereleases. Development pages can describe
-work on main that is not yet in a release; change export is one such feature.
+work on main that is not yet in a release; change export and DynamoDB coordination
+are two such features.
 Check the [release notes](./fork/releases/) and the
 [published artifacts](https://github.com/ewhauser/celld/releases) before upgrading.
 

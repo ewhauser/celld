@@ -260,7 +260,9 @@ and the queue attachments. The cell data, the deployments, the node-log
 bundles, and everything else stay in the bucket. A lease renewal or an
 ownership write then takes a few milliseconds instead of tens, and costs
 less at scale. The bucket stays the default and the only required store.
-See the [design](design/dynamodb-control-plane.md) for the trade-offs.
+See the [user guide](dynamodb-control.md) for setup, permissions and
+operation, and the [design](design/dynamodb-control-plane.md) for the
+trade-offs.
 
 Create the table and record the choice before the fleet's first node
 starts:
