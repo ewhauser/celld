@@ -1835,3 +1835,118 @@ fn a_migration_into_a_sharded_table_moves_every_lease_and_back() {
         }
     });
 }
+
+#[test]
+fn a_sharded_table_fleet_moves_out_only_when_every_shard_is_stopped() {
+    crate::asyncrt::test_block_on(async {
+        let fleet = SharedFleet::new();
+        let fake = Arc::new(FakeTable::default());
+        let old = fleet.client();
+        let sharded = Settings {
+            lease_shards: Some(4),
+            ..table_settings()
+        };
+        resolve_with(&old, Role::Node, &sharded, Some(fake.clone()))
+            .await
+            .unwrap();
+        // An expired lease whose log a successor must still recover.
+        let open_log = br#"{"node":"n2","expires_ms":1,"log":{"state":"open","epoch":3,"ensemble":["b1"],"tiered":0}}"#;
+        old.put_cas("nodes/n2.json", open_log.to_vec(), None)
+            .await
+            .unwrap()
+            .unwrap();
+        let live = format!(
+            r#"{{"node":"n0","expires_ms":{}}}"#,
+            crate::ownership_store::now_ms() + 60_000
+        );
+        let live_token = old
+            .put_cas("nodes/n0.json", live.into_bytes(), None)
+            .await
+            .unwrap()
+            .unwrap();
+        let shards: BTreeSet<String> = fake
+            .items
+            .lock()
+            .unwrap()
+            .keys()
+            .filter(|(pk, _)| lease_shard_of_pk(pk).is_some())
+            .map(|(pk, _)| pk.clone())
+            .collect();
+        assert!(!shards.contains("nodes"), "{shards:?}");
+
+        // A live lease in any shard stops the move.
+        let error = migrate::migrate_with(
+            &fleet.client(),
+            &follow_marker(),
+            Backend::Bucket,
+            false,
+            Some(fake.clone()),
+        )
+        .await
+        .unwrap_err();
+        assert!(format!("{error:#}").contains("n0"), "{error:#}");
+        assert_eq!(read_marker_of(&old).await.backend, "dynamodb");
+
+        // Once it stops, every lease moves, open log and all.
+        old.put_cas("nodes/n0.json", STOPPED_LEASE.to_vec(), Some(&live_token))
+            .await
+            .unwrap()
+            .unwrap();
+        let command = fleet.client();
+        let migrated = migrate::migrate_with(
+            &command,
+            &follow_marker(),
+            Backend::Bucket,
+            false,
+            Some(fake.clone()),
+        )
+        .await
+        .unwrap();
+        assert_eq!(migrated.moved, 2);
+        let (moved, _) = command
+            .get_bucket_object("nodes/n2.json")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(moved.as_ref(), open_log);
+        assert!(command
+            .get_bucket_object("nodes/n0.json")
+            .await
+            .unwrap()
+            .is_some());
+    });
+}
+
+#[test]
+fn a_table_fleet_cannot_move_to_another_table() {
+    crate::asyncrt::test_block_on(async {
+        let fleet = SharedFleet::new();
+        let fake = Arc::new(FakeTable::default());
+        let old = fleet.client();
+        resolve_with(&old, Role::Node, &table_settings(), Some(fake.clone()))
+            .await
+            .unwrap();
+        old.put_cas("nodes/n1.json", STOPPED_LEASE.to_vec(), None)
+            .await
+            .unwrap()
+            .unwrap();
+        let before = fake.items.lock().unwrap().len();
+        let error = migrate::migrate_with(
+            &fleet.client(),
+            &follow_marker(),
+            Backend::DynamoDb {
+                table: "other".into(),
+            },
+            false,
+            Some(fake.clone()),
+        )
+        .await
+        .unwrap_err();
+        assert!(format!("{error:#}").contains("bucket first"), "{error:#}");
+        let marker = read_marker_of(&old).await;
+        assert_eq!(marker.table.as_deref(), Some("celld-test"));
+        assert_eq!(marker.migrating, None);
+        assert_eq!(fake.items.lock().unwrap().len(), before);
+        assert!(old.get("nodes/n1.json").await.unwrap().is_some());
+    });
+}

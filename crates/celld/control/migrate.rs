@@ -251,6 +251,13 @@ pub(crate) async fn migrate_with(
         });
     }
     ensure!(from != to, "this fleet already keeps its records in {to}");
+    // A node follows a migration from the bucket to a table or back, never
+    // from one table to another, so refuse that before writing anything.
+    ensure!(
+        matches!(from, Backend::Bucket) || matches!(to, Backend::Bucket),
+        "a fleet moves between the bucket and a table, not from {from} to {to}; migrate to the \
+         bucket first"
+    );
 
     // The store the records leave.
     let old_table = match &from {
