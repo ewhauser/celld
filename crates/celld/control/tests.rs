@@ -937,3 +937,171 @@ fn a_live_table_honors_the_contract() {
         assert!(table.delete_record(&key, Some(&next)).await.unwrap());
     });
 }
+
+/// Release qualification against real DynamoDB and S3, for what neither the
+/// fake nor DynamoDB Local can vouch for: AWS signing with real credentials,
+/// the real service's error codes, table creation with point-in-time
+/// recovery and deletion protection, and latency. It runs when
+/// `CELLD_QUALIFY_DYNAMODB_BUCKET=s3://BUCKET[/PREFIX]` is set, with AWS
+/// credentials and `AWS_REGION` in the environment, and is skipped
+/// otherwise. Each run creates its own table and bucket prefix and deletes
+/// both, whatever the outcome.
+#[test]
+fn a_real_table_qualifies() {
+    let Ok(base) = std::env::var("CELLD_QUALIFY_DYNAMODB_BUCKET") else {
+        return;
+    };
+    let region = std::env::var("AWS_REGION")
+        .or_else(|_| std::env::var("AWS_DEFAULT_REGION"))
+        .expect("AWS_REGION names the region of the bucket and the table");
+    crate::asyncrt::test_block_on(async {
+        use futures_util::FutureExt;
+        let run = Table::new_token();
+        let name = format!("celld-qualify-{run}");
+        let open = |fleet: &str| {
+            crate::fleet::bucket_client(
+                &format!("{}/celld-qualify-{run}/{fleet}", base.trim_end_matches('/')),
+                None,
+                &region,
+            )
+            .unwrap()
+        };
+        let bucket = open("a");
+        let other = open("b");
+        let settings = Settings {
+            backend: Some(Backend::DynamoDb {
+                table: name.clone(),
+            }),
+            region: Some(region.clone()),
+            endpoint: None,
+        };
+        let outcome = std::panic::AssertUnwindSafe(qualify(&bucket, &other, &settings))
+            .catch_unwind()
+            .await;
+
+        // Clean up whatever the run left, then report the run.
+        for client in [&bucket, &other] {
+            if let Ok(objects) = client.list("").await {
+                for object in objects {
+                    let _ = client.delete(object.location.as_ref()).await;
+                }
+            }
+        }
+        let table = open_table(&bucket, &name, &region, &settings, None).unwrap();
+        let dropped = table.drop_for_test().await;
+        if let Err(panic) = outcome {
+            std::panic::resume_unwind(panic);
+        }
+        dropped.unwrap();
+    });
+}
+
+async fn qualify(bucket: &Bucket, other: &Bucket, settings: &Settings) {
+    let Some(Backend::DynamoDb { table: name }) = &settings.backend else {
+        unreachable!()
+    };
+    let region = settings.region.clone().unwrap();
+
+    // Setup creates the table, claims it and records the marker.
+    let resolved = init(bucket, settings, true).await.unwrap();
+    let fleet = resolved.fleet.clone().unwrap();
+    let table = open_table(bucket, name, &region, settings, None).unwrap();
+    table.check_shape().await.unwrap();
+    let mut recovery = false;
+    for _ in 0..60 {
+        recovery = table.point_in_time_recovery().await.unwrap();
+        if recovery {
+            break;
+        }
+        crate::asyncrt::sleep(Duration::from_secs(1)).await;
+    }
+    assert!(recovery, "init enables point-in-time recovery");
+    let described = table
+        .read("DescribeTable", json!({ "TableName": name }))
+        .await
+        .unwrap();
+    assert_eq!(
+        described.pointer("/Table/DeletionProtectionEnabled"),
+        Some(&json!(true)),
+        "init enables deletion protection"
+    );
+    // A second run adopts the table and the claim.
+    assert_eq!(
+        init(bucket, settings, true).await.unwrap().fleet.as_deref(),
+        Some(fleet.as_str())
+    );
+
+    // A node and its lease lane resolve to the table.
+    let node = bucket_sharing(bucket);
+    resolve_with(&node, Role::Node, settings, None)
+        .await
+        .unwrap();
+    let lease = bucket_sharing(bucket);
+    resolve_with(&lease, Role::Lease, settings, None)
+        .await
+        .unwrap();
+
+    // Conditional writes, the error classes of the real service, and the
+    // records' home.
+    let key = "nodes/qualify.json";
+    let first = node
+        .put_cas(key, br#"{"node":"qualify","expires_ms":1}"#.to_vec(), None)
+        .await
+        .unwrap()
+        .expect("a create applies");
+    assert!(node
+        .put_cas(key, b"{}".to_vec(), None)
+        .await
+        .unwrap()
+        .is_none());
+    let mut token = first.clone();
+    let mut samples = Vec::new();
+    for n in 0..50u64 {
+        let started = crate::asyncrt::mono_ms();
+        token = lease
+            .put_cas(
+                key,
+                format!(r#"{{"node":"qualify","expires_ms":{n}}}"#).into_bytes(),
+                Some(&token),
+            )
+            .await
+            .unwrap()
+            .expect("a renewal with the current token applies");
+        samples.push(Duration::from_millis(
+            crate::asyncrt::mono_ms().saturating_sub(started),
+        ));
+    }
+    assert!(lease
+        .put_cas(key, b"{}".to_vec(), Some(&first))
+        .await
+        .unwrap()
+        .is_none());
+    assert_eq!(node.head(key).await.unwrap().unwrap().1, token);
+    assert!(node.get_bucket_object(key).await.unwrap().is_none());
+    assert_eq!(
+        node.list("nodes/")
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|meta| meta.location.to_string())
+            .collect::<Vec<_>>(),
+        [key]
+    );
+    assert!(!node.delete_if_token(key, &first).await.unwrap());
+    assert!(node.delete_if_token(key, &token).await.unwrap());
+    samples.sort();
+    let p50 = samples[samples.len() / 2];
+    let p99 = samples[samples.len() * 99 / 100];
+    eprintln!("dynamodb://{name} conditional writes: p50 {p50:?}, p99 {p99:?}");
+    assert!(
+        p99 < Duration::from_secs(1),
+        "a lease renewal must land well inside its TTL; p99 was {p99:?}"
+    );
+
+    // Another fleet cannot take the table, and leaves no marker.
+    let error = resolve_with(other, Role::Node, settings, None)
+        .await
+        .unwrap_err();
+    assert!(format!("{error:#}").contains("serves fleet"), "{error:#}");
+    assert!(read_marker(other).await.unwrap().is_none());
+}

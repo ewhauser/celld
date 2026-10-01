@@ -231,6 +231,35 @@ DynamoDB Local does not support point-in-time recovery, so `init` warns
 that it could not enable it. `celld dev` keeps using its local store and
 does not use a table.
 
+### Qualify against AWS
+
+The `DynamoDB qualification` workflow runs celld against a real table and a
+real S3 bucket: it creates a table with `init`, checks point-in-time
+recovery and deletion protection, resolves a node and its lease lane,
+exercises conditional writes and measures their latency, checks that a
+second fleet is refused, and then deletes the table and the objects it
+wrote. It runs weekly, on changes to the control code on `main`, and by
+hand, once the repository names an AWS account in three variables:
+
+| Variable | Meaning |
+| --- | --- |
+| `DYNAMODB_QUALIFICATION_ROLE` | An IAM role ARN that trusts GitHub's OIDC provider for this repository |
+| `DYNAMODB_QUALIFICATION_BUCKET` | `s3://BUCKET[/PREFIX]` the run may write under |
+| `DYNAMODB_QUALIFICATION_REGION` | The bucket's region, `us-east-1` by default |
+
+The role needs the node and `init` permissions above, plus
+`dynamodb:UpdateTable` and `dynamodb:DeleteTable` for the cleanup, on
+`arn:aws:dynamodb:REGION:ACCOUNT:table/celld-qualify-*`, and
+`s3:GetObject`, `s3:PutObject`, `s3:DeleteObject` and `s3:ListBucket` on
+the bucket. Without the variables the workflow reports that it was skipped.
+
+To run the same test from a shell with AWS credentials:
+
+```sh
+AWS_REGION=us-east-1 CELLD_QUALIFY_DYNAMODB_BUCKET=s3://my-scratch-bucket \
+  cargo test -p celld --lib control::tests::a_real_table_qualifies -- --exact --nocapture
+```
+
 ## Settings
 
 | Variable | Default | Meaning |

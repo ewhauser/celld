@@ -1108,6 +1108,34 @@ impl Table {
             .and_then(Value::as_str)
             == Some("ENABLED"))
     }
+
+    /// Delete the table, lifting the deletion protection `create` set. Only
+    /// the qualification test, which creates a table per run, does this.
+    #[cfg(test)]
+    pub(crate) async fn drop_for_test(&self) -> anyhow::Result<()> {
+        self.transport
+            .call(
+                "UpdateTable",
+                json!({ "TableName": self.name, "DeletionProtectionEnabled": false }),
+            )
+            .await
+            .map_err(|error| anyhow!(error).context("lift the deletion protection"))?;
+        for _ in 0..60 {
+            match self
+                .transport
+                .call("DeleteTable", json!({ "TableName": self.name }))
+                .await
+            {
+                Ok(_) => return Ok(()),
+                // The update leaves the table UPDATING for a moment.
+                Err(error) if error.code.as_deref() == Some("ResourceInUseException") => {
+                    crate::asyncrt::sleep(Duration::from_secs(1)).await;
+                }
+                Err(error) => return Err(anyhow!(error).context("delete the table")),
+            }
+        }
+        bail!("dynamodb://{} stayed in use", self.name)
+    }
 }
 
 #[derive(Serialize, Deserialize)]

@@ -1,0 +1,91 @@
+name: DynamoDB qualification
+
+# The DynamoDB control table against real AWS: SigV4 with real credentials,
+# the real service's error codes, table creation with point-in-time recovery
+# and deletion protection, a node and its lease lane resolving through a
+# real bucket, and conditional-write latency. CI's DynamoDB Local job cannot
+# vouch for any of those. Each run creates its own table and bucket prefix
+# and deletes both.
+#
+# It needs an AWS account, so it runs only where the repository configures
+# one, through GitHub's OIDC provider (no stored keys):
+#
+#   vars.DYNAMODB_QUALIFICATION_ROLE    IAM role ARN the workflow assumes
+#   vars.DYNAMODB_QUALIFICATION_BUCKET  s3://BUCKET[/PREFIX] it may write
+#   vars.DYNAMODB_QUALIFICATION_REGION  the bucket's region (default us-east-1)
+#
+# Without them the job is skipped and the run says so.
+on:
+  schedule:
+    - cron: "41 4 * * 1"
+  push:
+    branches:
+      - main
+    paths:
+      - crates/celld/control.rs
+      - crates/celld/control/**
+      - .github/workflows/dynamodb-qualification.yml
+  workflow_dispatch:
+  workflow_call:
+
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  group: dynamodb-qualification-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  RUST_VERSION: 1.97.1
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+
+jobs:
+  unconfigured:
+    name: DynamoDB qualification (not configured)
+    if: vars.DYNAMODB_QUALIFICATION_ROLE == '' || vars.DYNAMODB_QUALIFICATION_BUCKET == ''
+    runs-on: ubuntu-22.04
+    steps:
+      - run: >-
+          echo "::notice::DynamoDB qualification skipped: set the repository
+          variables DYNAMODB_QUALIFICATION_ROLE and DYNAMODB_QUALIFICATION_BUCKET
+          (see docs/dynamodb-control.md) to run it."
+
+  qualify:
+    name: DynamoDB qualification
+    if: vars.DYNAMODB_QUALIFICATION_ROLE != '' && vars.DYNAMODB_QUALIFICATION_BUCKET != ''
+    runs-on: ubuntu-22.04
+    timeout-minutes: 60
+    env:
+      AWS_REGION: ${{ vars.DYNAMODB_QUALIFICATION_REGION || 'us-east-1' }}
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install toolchain
+        run: |
+          set -euo pipefail
+          rustup toolchain install "$RUST_VERSION" --profile minimal
+          rustup default "$RUST_VERSION"
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: dynamodb-qualification
+
+      # Build before assuming the role, so its short-lived credentials are
+      # spent on the run rather than the compile.
+      - name: Build
+        run: cargo test --locked -p celld --lib --no-run
+
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.DYNAMODB_QUALIFICATION_ROLE }}
+          role-session-name: celld-dynamodb-qualification-${{ github.run_id }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Qualify
+        env:
+          CELLD_QUALIFY_DYNAMODB_BUCKET: ${{ vars.DYNAMODB_QUALIFICATION_BUCKET }}
+        run: >-
+          cargo test --locked -p celld --lib
+          control::tests::a_real_table_qualifies -- --exact --nocapture

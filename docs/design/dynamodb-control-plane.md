@@ -453,6 +453,13 @@ celld control show --bucket s3://NAME [--json]
   shape check, probe, claim, conditional writes, paging and conditional
   deletes against a real endpoint when `CELLD_TEST_DYNAMODB_ENDPOINT` is
   set. CI starts DynamoDB Local and runs it.
+- **Real AWS.** `a_real_table_qualifies` runs `init`, node and lease-lane
+  resolution, conditional writes with their latency, and the second-fleet
+  refusal against a real table and bucket when
+  `CELLD_QUALIFY_DYNAMODB_BUCKET` is set, then deletes both. The
+  `DynamoDB qualification` workflow runs it weekly and on control changes
+  to `main`, with credentials from GitHub's OIDC provider, once the
+  repository names an AWS role and bucket.
 - **The existing suites** run unchanged on bucket fleets, whose routes are
   fixed to the bucket.
 - **End to end**, by hand, with MinIO for the bucket and DynamoDB Local
@@ -482,8 +489,6 @@ These were proposed in revision 1 and are left for later:
 - **Switching the deploy pointers in one transaction.**
 - **The wake index**, which keeps its bucket protocol of immutable entry
   names and retirement watermarks.
-- **Release qualification against real DynamoDB**, beside the R2 release
-  tests.
 
 ## Decisions
 
