@@ -1277,6 +1277,15 @@ impl Bucket {
         }
     }
 
+    /// The most writes one [`Self::swap_all`] can make: a table fleet's
+    /// transaction limit, or `None` on the bucket, which writes in order.
+    pub(crate) async fn swap_all_limit(&self) -> anyhow::Result<Option<usize>> {
+        Ok(self
+            .control_table()
+            .await?
+            .map(|_| crate::control::MAX_TRANSACT_WRITES))
+    }
+
     /// Write several records as one switch. `Ok(None)` applied every write;
     /// `Ok(Some(key))` names the first write whose expectation failed.
     ///

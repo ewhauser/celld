@@ -866,6 +866,8 @@ pub async fn write(bucket: &Bucket, built: &Built) -> anyhow::Result<()> {
     // A competing consumer is a deploy refusal, so it must not leave a new
     // version in the bucket that an operator can mistake for a published one.
     let queue_attachments = prepare_queue_attachments(bucket, &built.manifest).await?;
+    let mut swaps = queue_attachment_swaps(&built.manifest, &built.prefix, queue_attachments)?;
+    check_switch_fits(bucket, swaps.len()).await?;
 
     // Images are fleet-wide and content-addressed like asset bodies, and
     // they are what a node loads before a container class can start.
@@ -904,11 +906,10 @@ pub async fn write(bucket: &Bucket, built: &Built) -> anyhow::Result<()> {
         )
         .await?;
 
-    // An attachment names this exact immutable prefix. Publish it only after
-    // the prefix is complete, so a node can never resolve a consumer to a
+    // An attachment names this exact immutable prefix. Publish it (`swaps`,
+    // built above) only after the prefix is complete, so a node can never resolve a consumer to a
     // half-uploaded deployment. The named and fleet pointers can move later
     // without tearing this queue-to-consumer relationship.
-    let mut swaps = queue_attachment_swaps(&built.manifest, &built.prefix, queue_attachments)?;
 
     let pointer = DeployPointer {
         script_name: Some(built.script_name.clone()),
@@ -948,6 +949,32 @@ pub async fn write(bucket: &Bucket, built: &Built) -> anyhow::Result<()> {
             Err(error.context("Another deploy may have landed first; re-run `celld deploy`."))
         }
     }
+}
+
+/// The pointers every deploy switches beside its queue attachments.
+const POINTER_WRITES: usize = 2;
+
+/// Refuse, before anything is uploaded, a deploy whose switch the fleet
+/// cannot make: a table fleet switches the attachments and both pointers in
+/// one transaction, which has a size limit the bucket's ordered writes do
+/// not. `attachments` counts the attachment writes: every queue the
+/// deployment consumes, and every queue it stops consuming.
+pub(crate) async fn check_switch_fits(bucket: &Bucket, attachments: usize) -> anyhow::Result<()> {
+    let Some(limit) = bucket.swap_all_limit().await? else {
+        return Ok(());
+    };
+    let most = limit - POINTER_WRITES;
+    if attachments > most {
+        bail!(
+            "this deploy changes {attachments} queue consumer attachments, the queues it \
+             consumes plus those it stops consuming; a fleet on a DynamoDB control table \
+             switches them with both deployment pointers in one transaction, so a deploy \
+             can change at most {most}. Deploy in stages: first a version that stops \
+             consuming some of the old queues or consumes fewer of the new ones, then the \
+             rest. Nothing was uploaded."
+        );
+    }
+    Ok(())
 }
 
 pub(crate) struct QueueAttachmentState {

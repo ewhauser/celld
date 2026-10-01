@@ -320,6 +320,15 @@ lost. The managed control-plane client writes the same records the same
 way, unconditionally, as it always has. On a bucket fleet the writes go in
 the old order, attachments, named pointer, fleet pointer, each conditional
 on its own expectation.
+
+A transaction writes at most 100 items, so on a table fleet a deploy can
+change at most 98 queue consumer attachments: every queue the new version
+consumes, which moves to its prefix, plus every queue it stops consuming.
+Both writers count the switch right after reading the attachments and
+refuse a larger one before uploading anything, with the staged deploy that
+fits: first a version that stops consuming some of the old queues or
+consumes fewer of the new ones, then the rest. The bucket writes in order
+and has no such limit.
 `control_plane::deployment_exists` lists `deploy/` to find a pointer; the
 merged listing returns the table's pointers alongside the bucket's
 deployments.

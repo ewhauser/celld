@@ -59,6 +59,10 @@ A deploy is also atomic on the table: `celld deploy` switches the queue
 consumer attachments and both deployment pointers in one DynamoDB
 transaction, so nodes never see a pointer moved without its attachments,
 and a deploy that loses a race to another changes nothing.
+A transaction holds at most 100 writes, so one deploy on a table fleet can
+change at most 98 queue consumer attachments: the queues it consumes plus
+the queues it stops consuming. `celld deploy` refuses a larger change
+before it uploads anything; deploy it in two steps instead.
 
 ## What moves to the table
 

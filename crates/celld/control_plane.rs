@@ -1758,6 +1758,12 @@ pub async fn apply_deployment(
     // leaving a prefix that looks publishable.
     let queue_attachments =
         crate::deploy::prepare_queue_attachments(bucket, &deployment.manifest).await?;
+    let mut swaps = crate::deploy::queue_attachment_swaps(
+        &deployment.manifest,
+        &deployment.pointer.prefix,
+        queue_attachments,
+    )?;
+    crate::deploy::check_switch_fits(bucket, swaps.len()).await?;
 
     let mut asset_files = 0_u32;
     let mut asset_bytes = 0_u64;
@@ -1918,11 +1924,6 @@ pub async fn apply_deployment(
     // and for migrating buckets written by older celld releases; the
     // fleet-wide pointer is the sole application selector, so it moves last.
     // On a table fleet all of them switch in one transaction.
-    let mut swaps = crate::deploy::queue_attachment_swaps(
-        &deployment.manifest,
-        &deployment.pointer.prefix,
-        queue_attachments,
-    )?;
     let pointer = serde_json::to_vec_pretty(&deployment.pointer)?;
     for key in [
         format!("deploy/{}/current.json", deployment.script_name),

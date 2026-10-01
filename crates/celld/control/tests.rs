@@ -2209,3 +2209,26 @@ fn a_table_fleet_cannot_move_to_another_table() {
         assert!(old.get("nodes/n1.json").await.unwrap().is_some());
     });
 }
+
+#[test]
+fn a_deploy_switch_must_fit_one_transaction_on_a_table() {
+    crate::asyncrt::test_block_on(async {
+        // Two pointers ride beside the attachments in the transaction.
+        let (table, _fake) = table_fleet().await;
+        crate::deploy::check_switch_fits(&table, MAX_TRANSACT_WRITES - 2)
+            .await
+            .unwrap();
+        // Fifty queues released and fifty claimed: one hundred attachments.
+        let error = crate::deploy::check_switch_fits(&table, 100)
+            .await
+            .unwrap_err();
+        let message = format!("{error:#}");
+        assert!(message.contains("at most 98"), "{message}");
+        assert!(message.contains("Deploy in stages"), "{message}");
+        // The bucket writes in order and has no such limit.
+        let bucket = bucket_fleet_for_test().await;
+        crate::deploy::check_switch_fits(&bucket, 100)
+            .await
+            .unwrap();
+    });
+}

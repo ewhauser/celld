@@ -104,6 +104,9 @@ const PROBE_PK: &str = "probe";
 /// The partition of a cell's ownership record is this and the cell.
 const OWNER_PK_PREFIX: &str = "cell#";
 
+/// The most records one `TransactWriteItems` writes.
+pub(crate) const MAX_TRANSACT_WRITES: usize = 100;
+
 /// The DynamoDB JSON protocol version every request names.
 const TARGET_PREFIX: &str = "DynamoDB_20120810";
 
@@ -996,8 +999,8 @@ impl Table {
         swaps: &[(ControlKey, &Swap)],
     ) -> anyhow::Result<Option<String>> {
         ensure!(
-            (1..=100).contains(&swaps.len()),
-            "a transaction writes 1 to 100 records, not {}",
+            (1..=MAX_TRANSACT_WRITES).contains(&swaps.len()),
+            "a transaction writes 1 to {MAX_TRANSACT_WRITES} records, not {}",
             swaps.len()
         );
         let now = crate::asyncrt::wall_ms().max(0).to_string();
