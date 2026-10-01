@@ -297,12 +297,12 @@ prints the choice and the table's health.
 
 The table authenticates with the same AWS credential chain as the bucket.
 celld refuses a global table, a secondary index, and time-to-live, because
-each can serve or delete a record that another node already replaced. A
-fleet chooses the table before it holds any state: celld refuses a bucket
-or prefix that already holds cell data, node records, logs, or deploy
-pointers, even when every node has stopped, because `celld control migrate`
-does not exist yet and the fleet's existing records would not be copied.
-Start a table fleet in an empty bucket or prefix. An operator command
+each can serve or delete a record that another node already replaced. `celld
+control init` starts a new fleet on a table, and refuses a bucket or prefix
+that already holds cell data, node records, logs, or deploy pointers. Move
+an existing fleet with `celld control migrate --to dynamodb://NAME` while
+every node is stopped; it moves the fleet records and the nodes copy the
+ownership records in the background. An operator command
 configured for a table also needs `fleet/control.json`, so run `celld
 control init` before the first `celld deploy`.
 

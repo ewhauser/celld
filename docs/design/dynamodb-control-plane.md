@@ -1,7 +1,7 @@
 # DynamoDB control plane: an optional home for fleet coordination
 
 Status: revision 2, 2026-09-29. The table, its selection, the routing of
-every coordination record, and `celld control init|show|repair-epochs`
+every coordination record, and `celld control init|show|migrate|repair-epochs`
 are implemented. [Not built yet](#not-built-yet) lists what revision 1
 proposed and this revision leaves for later; the
 [Decisions](#decisions) section records what changed and why.
@@ -40,6 +40,7 @@ active every day, pays for an ownership write on every cold activation.
 - [Security](#security)
 - [Configuration](#configuration)
 - [Testing](#testing)
+- [Migration](#migration)
 - [Not built yet](#not-built-yet)
 - [Decisions](#decisions)
 - [Open questions](#open-questions)
@@ -504,6 +505,7 @@ bucket does. celld links no AWS SDK.
 | `CELLD_FLEET_VIEW_MS` | 5000 | How old a node's shared lease view may be |
 
 ```
+celld control migrate --to bucket|dynamodb://TABLE [--table-region REGION] [--no-create] [--lease-shards N] --bucket s3://NAME
 celld control init --table NAME [--table-region REGION] [--no-create] [--lease-shards N] --bucket s3://NAME
 celld control show --bucket s3://NAME [--json]
 celld control repair-epochs --bucket s3://NAME [--dry-run]
@@ -531,13 +533,68 @@ celld control repair-epochs --bucket s3://NAME [--dry-run]
   increment. The bucket held only the marker and data; the table held the
   owner, lease, meta and pointer items.
 
+## Migration
+
+`celld control migrate --to dynamodb://TABLE` moves a fleet from the
+bucket to a table, and `--to bucket` moves it back, in one short stop and a
+lazy copy of the ownership records. Copying ten million ownership records
+up front would take hours of listing; the lazy copy needs no downtime for
+them. The code is `control/migrate.rs`.
+
+1. Stop every node. The command refuses while any lease is unexpired.
+2. The command prepares the destination as `init` does: a table is created
+   if absent, shape-checked, claimed and probed. The destination must hold
+   no coordination records, except the ones an interrupted run of the same
+   command copied, which are copied again.
+3. It copies, verbatim: every node lease (expired ones and tombstones too,
+   because recovery reads their folded logs), the drain token, the waker
+   role, the deploy pointers and the queue attachments.
+4. It rewrites the marker with a conditional write: the new backend, and
+   `migrating` naming the store the fleet left (`{"from":"bucket"}`, or
+   `{"from":"dynamodb","table":…,"region":…,"fleet":…}`). Then it deletes
+   the old copies of the records it moved, which no node reads any more.
+5. Nodes start on the new store. While the marker says `migrating`, the
+   routed read of an ownership record that the new store lacks reads the
+   old store and, if the record is there, creates it in the new store under
+   `attribute_not_exists` (or `If-None-Match`), then reads the new store
+   again. A conditional create runs the same copy first, so a create of a
+   record the old store still holds loses to it. The old copy is frozen,
+   because every node follows the marker, so every copier writes the same
+   bytes and one wins; the record keeps its node and epoch across the move,
+   and the epoch fence is unchanged.
+6. A background task on every node runs while the marker says
+   `migrating`. The node that holds the waker role walks the old store's
+   ownership records: `cells/` a page at a time in the bucket, or a scan of
+   the `cell#` items in a table. Each one is copied as above and then the
+   old copy is deleted, a table item conditioned on the token the scan
+   read. When the walk completes, the node clears `migrating` with a
+   conditional write on the marker, and every node stops consulting the old
+   store when it next looks.
+
+A second walker, after the waker role moves, repeats work and is harmless:
+every copy is a conditional create of the same bytes, and a delete only
+follows a confirmed copy. A node whose client still believes the fleet is
+migrating finds nothing left in the old store and reads the new store as
+it would anyway.
+
+Running the command again after an interruption is safe. Before the
+marker switched, the old store still holds every record and the fleet is
+still stopped, so the run starts over. After it switched, the run only
+deletes the old copies of the fleet records, because nodes may already be
+writing the new ones. A run that names the other store while a migration
+is in progress is refused until the walk finishes.
+
+The `migrating` field is unknown to releases before migration, and the
+marker refuses unknown fields, so an older node refuses to start on a
+migrating fleet rather than reading a store that is being emptied.
+
+A move back to the bucket scans the table, so the nodes need
+`dynamodb:Scan` for its duration.
+
 ## Not built yet
 
 These were proposed in revision 1 and are left for later:
 
-- **Migration.** `celld control migrate`, with a lazy copy of owner
-  records, in either direction. Today a fleet chooses its store when it
-  starts, and a bucket fleet with live leases cannot switch.
 - **Splitting load telemetry out of the lease** into its own small item,
   which would cut the cost of every consistent lease scan by about two
   thirds.

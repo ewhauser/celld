@@ -23,12 +23,13 @@ works today:
   the fleet keeps them, with no new flag.
 - Startup checks that refuse a table that could break the guarantees, a
   table claimed by another fleet, and a node configured for the other store.
+- Moving an existing fleet to a table, or back to the bucket, with `celld
+  control migrate` (see [Move an existing fleet](#move-an-existing-fleet)).
+- Repairing the ownership records after a table is restored from a backup,
+  with `celld control repair-epochs` (see [Recovery](#recovery)).
 
 Still to come:
 
-- **Moving an existing fleet.** There is no `celld control migrate`. A fleet
-  chooses its store before it holds any state, so start a table fleet in an
-  empty bucket or prefix.
 
 ## When to use it
 
@@ -128,15 +129,53 @@ Then run `celld control init --table NAME --no-create`. On-demand capacity
 suits most fleets; with provisioned capacity, leave headroom for the lease
 renewals, because a throttled renewal that cannot land in time stops a node.
 
+## Move an existing fleet
+
+`celld control migrate` moves a fleet that already holds state to a table,
+or a table fleet back to the bucket. It needs one short stop of the whole
+fleet:
+
+1. Stop every node. The command refuses while any node lease is unexpired,
+   and names the nodes.
+2. Run the migration:
+
+   ```sh
+   celld control migrate --to dynamodb://celld-prod --bucket "$CELLD_BUCKET"
+   ```
+
+   It creates and checks the table as `init` does, moves the node leases,
+   the drain token, the waker role, the deployment pointers and the queue
+   consumer attachments, and switches `fleet/control.json` to the table.
+   `--to bucket` moves a table fleet back the same way.
+3. Start the nodes with the new `CELLD_CONTROL`, or without it.
+
+The ownership records, one per cell, are not copied while the fleet is
+stopped, because a fleet with millions of cells would stay down for hours.
+`fleet/control.json` records that the fleet is migrating instead. Each node
+copies a cell's ownership record from the old store the first time it reads
+it, and the node that holds the waker role copies the rest in the
+background, deleting each old copy, and then marks the migration done.
+`celld control show` prints `migrating` until then.
+
+The table must hold no records but its own claim, and the bucket must hold
+no coordination records, apart from those an interrupted run of the same
+command copied. If the command stops partway, run it again: before it
+switches `fleet/control.json` it starts over, and after that it only
+deletes the old copies it left. A different migration waits until the
+current one is done. Releases before this one cannot read a migrating
+`fleet/control.json`, so they refuse to start rather than reading the wrong
+store.
+
 ## What celld refuses
 
 These checks run when a node starts, and `celld control init` runs them
 too. Each one fails with a message that names the cause.
 
-- **A bucket that already holds a fleet.** Any object under `cells/`,
-  `nodes/` or `log/`, or any coordination record in the bucket, refuses a
-  table, even when every node has stopped. Its existing records would not
-  move, so its cells would come back empty.
+- **A bucket that already holds a fleet, without a migration.** Any object
+  under `cells/`, `nodes/` or `log/`, or any coordination record in the
+  bucket, refuses `init` and a node configured for a table, even when every
+  node has stopped. Its existing records would not move, so its cells would
+  come back empty. Use `celld control migrate` instead.
 - **A table another fleet claimed.** The table records the fleet and bucket
   that claimed it. A second fleet pointed at the same table is refused, and
   no marker is written, so correcting `CELLD_CONTROL` recovers.
@@ -166,7 +205,10 @@ dynamodb:DescribeTimeToLive
 ```
 
 `celld control repair-epochs` needs `dynamodb:GetItem`, `dynamodb:PutItem`
-and `dynamodb:Query`. `celld control init` also needs `dynamodb:CreateTable`,
+and `dynamodb:Query`. `celld control migrate` needs the same permissions as
+`init`, and `dynamodb:Scan` to find the table's records. While a fleet
+migrates back to the bucket, the nodes also need `dynamodb:Scan` to walk the
+ownership records. `celld control init` also needs `dynamodb:CreateTable`,
 `dynamodb:UpdateContinuousBackups` and `dynamodb:DescribeContinuousBackups`,
 and `celld control show` needs `dynamodb:DescribeContinuousBackups`.
 
@@ -301,6 +343,7 @@ does not use a table.
 ```text
 celld control init --table NAME [--table-region REGION] [--no-create] [--lease-shards N] --bucket s3://NAME[/PREFIX]
 celld control show --bucket s3://NAME[/PREFIX] [--json]
+celld control migrate --to bucket|dynamodb://NAME [--table-region REGION] [--no-create] [--lease-shards N] --bucket s3://NAME[/PREFIX]
 celld control repair-epochs --bucket s3://NAME[/PREFIX] [--dry-run] [--json]
 ```
 
@@ -308,7 +351,8 @@ celld control repair-epochs --bucket s3://NAME[/PREFIX] [--dry-run] [--json]
 
 - The table needs an `s3://` fleet bucket, because it signs with the
   bucket's AWS credentials.
-- A fleet cannot move between the bucket and a table in either direction.
+- Moving between the bucket and a table needs every node stopped for the
+  length of the `celld control migrate` command.
 - `celld cell list` reads the cell prefixes in the bucket. A cell that has
   an ownership record but has never written data has no prefix, so the
   listing leaves it out. Such a cell holds no data.

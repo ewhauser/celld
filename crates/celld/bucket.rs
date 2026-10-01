@@ -908,6 +908,13 @@ impl Bucket {
         }
     }
 
+    /// Is this fleet still copying ownership records out of the store it
+    /// migrated from? A serving node then runs
+    /// [`crate::control::run_migration`].
+    pub fn control_migrating(&self) -> bool {
+        self.control.migration().is_some()
+    }
+
     /// The dialect this bucket speaks, for choosing the matching
     /// replication store.
     #[doc(hidden)]
@@ -956,6 +963,24 @@ impl Bucket {
             return Ok(None);
         };
         Ok(self.control_table().await?.map(|table| (table, record)))
+    }
+
+    /// While a migration still copies ownership records, make sure the
+    /// fleet's store holds the record `key` names whenever the store it is
+    /// leaving does, and answer the fleet's copy. `None` for every other key,
+    /// and for every key of a fleet that is not migrating, which then reads
+    /// and writes as it always does.
+    async fn migrated_owner(&self, key: &str) -> anyhow::Result<Option<Option<(Bytes, String)>>> {
+        let Some(record @ ControlKey::Owner(_)) = ControlKey::parse(key) else {
+            return Ok(None);
+        };
+        let table = self.control_table().await?.cloned();
+        let Some(source) = self.control.migration() else {
+            return Ok(None);
+        };
+        crate::control::copy_owner(self, key, &record, table.as_ref(), &source)
+            .await
+            .map(Some)
     }
 
     /// Every node lease with its body, from a read shared by every loop on
@@ -1043,6 +1068,9 @@ impl Bucket {
 
     /// Body and CAS token, or `None` when the key does not exist.
     pub async fn get(&self, key: &str) -> anyhow::Result<Option<(Bytes, String)>> {
+        if let Some(found) = self.migrated_owner(key).await? {
+            return Ok(found);
+        }
         if let Some((table, record)) = self.routed(key).await? {
             return table.get_record(&record).await;
         }
@@ -1076,6 +1104,9 @@ impl Bucket {
 
     /// Size and CAS token, or `None` when the key does not exist.
     pub async fn head(&self, key: &str) -> anyhow::Result<Option<(u64, String)>> {
+        if let Some(found) = self.migrated_owner(key).await? {
+            return Ok(found.map(|(body, token)| (body.len() as u64, token)));
+        }
         if let Some((table, record)) = self.routed(key).await? {
             return table.head_record(&record).await;
         }
@@ -1100,6 +1131,15 @@ impl Bucket {
             let body = Bytes::from(body.into());
             return table.put_record(&record, &body).await;
         }
+        self.put_bucket_object(key, body).await
+    }
+
+    /// [`Self::put`] to the bucket itself, never routed to a control table.
+    pub(crate) async fn put_bucket_object(
+        &self,
+        key: &str,
+        body: impl Into<PutPayload>,
+    ) -> anyhow::Result<()> {
         let key = self.key(key);
         self.store
             .put(&Path::from(key.as_str()), body.into())
@@ -1179,10 +1219,25 @@ impl Bucket {
         body: impl Into<PutPayload>,
         token: Option<&str>,
     ) -> anyhow::Result<Option<String>> {
+        if token.is_none() {
+            // A create must lose to a record the old store still holds.
+            self.migrated_owner(key).await?;
+        }
         if let Some((table, record)) = self.routed(key).await? {
             let body = Bytes::from(body.into());
             return table.cas_record(&record, &body, token).await;
         }
+        self.put_cas_bucket_object(key, body, token).await
+    }
+
+    /// [`Self::put_cas`] to the bucket itself, never routed to a control
+    /// table.
+    pub(crate) async fn put_cas_bucket_object(
+        &self,
+        key: &str,
+        body: impl Into<PutPayload>,
+        token: Option<&str>,
+    ) -> anyhow::Result<Option<String>> {
         let key = self.key(key);
         let mode = match token {
             None => PutMode::Create,
@@ -1224,10 +1279,30 @@ impl Bucket {
 
     /// Idempotent: deleting an absent key succeeds, as S3's DELETE does.
     pub async fn delete(&self, key: &str) -> anyhow::Result<()> {
+        if let Some(record @ ControlKey::Owner(_)) = ControlKey::parse(key) {
+            // A deleted record must not come back from the store a
+            // migration is leaving.
+            let table = self.control_table().await?.cloned();
+            match (self.control.migration(), table) {
+                (Some(crate::control::Source::Bucket), Some(_)) => {
+                    self.delete_bucket_object(key).await?
+                }
+                (Some(crate::control::Source::Table(source)), None) => {
+                    source.delete_record(&record, None).await?;
+                }
+                _ => {}
+            }
+        }
         if let Some((table, record)) = self.routed(key).await? {
             table.delete_record(&record, None).await?;
             return Ok(());
         }
+        self.delete_bucket_object(key).await
+    }
+
+    /// [`Self::delete`] from the bucket itself, never routed to a control
+    /// table.
+    pub(crate) async fn delete_bucket_object(&self, key: &str) -> anyhow::Result<()> {
         let key = self.key(key);
         match self.store.delete(&Path::from(key.as_str())).await {
             Ok(()) | Err(Error::NotFound { .. }) => Ok(()),
