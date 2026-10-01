@@ -415,5 +415,28 @@ mod client {
         for result in created {
             result.unwrap();
         }
+        // The controller acknowledges the create before every broker serves
+        // the topic, and the sink's connect refuses a topic it cannot see.
+        let deadline = std::time::Instant::now() + Duration::from_secs(30);
+        loop {
+            let metadata = admin
+                .inner()
+                .fetch_metadata(Some(topic), Duration::from_secs(5))
+                .unwrap();
+            let ready = metadata.topics().iter().any(|t| {
+                t.name() == topic
+                    && t.error().is_none()
+                    && !t.partitions().is_empty()
+                    && t.partitions().iter().all(|p| p.leader() >= 0)
+            });
+            if ready {
+                return;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "topic {topic} never became visible"
+            );
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
     }
 }
