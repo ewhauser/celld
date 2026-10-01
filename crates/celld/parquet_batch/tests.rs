@@ -196,16 +196,7 @@ fn expired_reads_only_its_own_layout() {
 /// would leave later tests on a dropped one, so every dev-store test runs
 /// on this process-lifetime runtime.
 fn run(future: impl std::future::Future<Output = ()>) {
-    static RUNTIME: std::sync::OnceLock<tokio::runtime::Runtime> = std::sync::OnceLock::new();
-    let runtime = RUNTIME.get_or_init(|| {
-        tokio::runtime::Builder::new_multi_thread()
-            .worker_threads(2)
-            .enable_all()
-            .build()
-            .unwrap()
-    });
-    crate::asyncrt::set_host_handle(runtime.handle().clone());
-    runtime.block_on(future);
+    crate::asyncrt::test_block_on(future);
 }
 
 fn dev_bucket() -> (tempfile::TempDir, Bucket) {

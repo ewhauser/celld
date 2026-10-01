@@ -1,7 +1,7 @@
 # Fork builds
 
 The operator still requires this fork for process identity, recovery safeguards,
-idle-follower failure handling, and preview support. Stock celld v0.6.0 does not
+idle-follower failure handling, and preview support. Stock celld v0.6.1 does not
 provide all of these behaviors.
 
 ## Retired operator APIs (removed in 0.6.0-ewhauser.2)
@@ -279,3 +279,33 @@ the heap average.
 Rollout: no record or storage format changes. Follower append responses no
 longer carry `quiesced`, which only strict disk removal set; older nodes read
 its absence as false. Nodes can roll from 0.6.0-ewhauser.1.
+
+## 0.6.1-ewhauser.1
+
+Based on upstream v0.6.1. It keeps every fork change through
+0.6.0-ewhauser.2. Upstream's v0.6.1 release notes list the new behavior:
+Python Workers, epoch GC (`CELLD_LTX_RETENTION_SECS`), `celld cell gc
+--dry-run`, configurable asset and Dynamic Worker size limits, log severity,
+and the WebSocket ordering fixes.
+
+### How the fork changes sit on upstream v0.6.1
+
+- Upstream now runs ordinary Actor effects on the host runtime, off the core
+  thread that owns the node lease timer. The fork already did this for
+  node-log recovery and isolate startup; those effects now use upstream's
+  path.
+- Actor timers keep the fork's deadline-ordered queue instead of tokio-util's
+  `DelayQueue`, so a Durable Object alarm years ahead still cannot panic the
+  core.
+- Epoch GC reads the cell's ownership record before it deletes. On a fleet
+  with a DynamoDB control table that read goes to the table, with a strongly
+  consistent read, so the fence is unchanged.
+- The log Parquet files gain upstream's `severity_number` and
+  `severity_text` columns.
+
+Rollout: upstream's rule for v0.6.0 to v0.6.1 applies. Nodes can roll from
+0.6.0-ewhauser.2. Set `CELLD_LTX_RETENTION_SECS`, deploy a Python Worker, or
+raise `CELLD_MAX_ASSET_FILE_BYTES` above 25 MiB only after every node runs
+this build. With epoch GC on, change export repair and backfill can no longer
+restore positions in a deleted epoch; they restore at the chain's base
+instead.

@@ -613,7 +613,7 @@ pub(crate) fn decode_durable_object_id(value: &str) -> Option<[u8; 32]> {
         return None;
     }
     let mut output = [0_u8; 32];
-    for (index, pair) in value.as_bytes().chunks_exact(2).enumerate() {
+    for (index, pair) in value.as_bytes().as_chunks::<2>().0.iter().enumerate() {
         let nibble = |byte| match byte {
             b'0'..=b'9' => Some(byte - b'0'),
             b'a'..=b'f' => Some(byte - b'a' + 10),
@@ -829,6 +829,12 @@ pub(crate) fn injected_swap_release_failure() -> Option<anyhow::Error> {
     });
     (remaining.fetch_sub(1, Ordering::Relaxed) > 0)
         .then(|| anyhow::anyhow!("injected generation swap release failure"))
+}
+
+/// Is `cell` a facet's stream? Only [`facet_cell`] builds a name with this
+/// segment; a root cell's scope cannot contain `/`.
+pub(crate) fn is_facet_cell(cell: &str) -> bool {
+    cell.contains("/facets/")
 }
 
 /// The replication stream of a facet: nested under its root's own

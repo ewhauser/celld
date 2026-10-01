@@ -28,7 +28,7 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  RUST_VERSION: 1.97.1
+  RUST_VERSION: 1.98.1
   IMAGE: ghcr.io/${{ github.repository }}
 
 jobs:

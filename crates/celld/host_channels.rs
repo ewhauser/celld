@@ -292,3 +292,80 @@ pub(crate) static R2_STORE: OnceLock<Bucket> = OnceLock::new();
 pub fn set_r2_store(bucket: Bucket) {
     let _ = R2_STORE.set(bucket);
 }
+
+/// Why the output gate did not release a ticket.
+pub(crate) enum GateRefusal {
+    /// The process installed no gate channel. A write must still fail closed
+    /// here: an acknowledgement nobody can prove is the loss this gate exists
+    /// to prevent.
+    NoChannel,
+    /// The core answered, and the answer is that the write is not durable.
+    Unproven(celld_logic::RequestError),
+    /// The shell dropped the ticket before the core answered.
+    Dropped,
+    /// A facet's write never reached a database a proof can cover.
+    Unpersisted(String),
+}
+
+impl std::fmt::Display for GateRefusal {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            GateRefusal::NoChannel => f.write_str("no output-gate channel"),
+            GateRefusal::Unproven(error @ celld_logic::RequestError::DurabilityUnproven) => {
+                write!(
+                    f,
+                    "the write this request follows is not durable ({error:?})"
+                )
+            }
+            GateRefusal::Unproven(error) => {
+                write!(f, "the output gate refused the ticket ({error:?})")
+            }
+            GateRefusal::Dropped => f.write_str("output gate dropped"),
+            GateRefusal::Unpersisted(error) => {
+                write!(f, "the facet's write did not reach its database ({error})")
+            }
+        }
+    }
+}
+
+/// Ask the host to prove the caller's sampled position before an effect leaves.
+pub(crate) async fn request_gate(
+    channel: Option<&tokio::sync::mpsc::UnboundedSender<GateReq>>,
+    scope: String,
+    ticket: crate::actor::GateTicket,
+) -> std::result::Result<(), GateRefusal> {
+    let (tx, receive) = tokio::sync::oneshot::channel();
+    let sent = channel
+        .map(|gate| {
+            gate.send(GateReq {
+                scope,
+                ticket,
+                reply: tx,
+            })
+            .is_ok()
+        })
+        .unwrap_or(false);
+    if !sent {
+        return Err(GateRefusal::NoChannel);
+    }
+    match receive.await {
+        Ok(Ok(())) => Ok(()),
+        Ok(Err(error)) => Err(GateRefusal::Unproven(error)),
+        Err(_) => Err(GateRefusal::Dropped),
+    }
+}
+
+/// Submit only after the caller's durability future releases the effect.
+/// Taking the sender after the await preserves host-channel installation order.
+pub(crate) async fn send_after_gate<'a, T: 'a>(
+    gate: impl std::future::Future<Output = std::result::Result<(), String>>,
+    channel: impl FnOnce() -> Option<&'a tokio::sync::mpsc::UnboundedSender<T>>,
+    request: T,
+    missing: &'static str,
+) -> std::result::Result<(), String> {
+    gate.await?;
+    match channel() {
+        Some(tx) if tx.send(request).is_ok() => Ok(()),
+        _ => Err(missing.to_string()),
+    }
+}

@@ -9,7 +9,7 @@
 use crate::ownership_store::LiveLoad;
 use std::sync::{Arc, Mutex, OnceLock};
 
-/// One resource observation used by the pressure path.
+/// One resource observation shared by pressure decisions and node leases.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct HostMetricsSample {
     pub cpu_percent_x100: u64,
@@ -17,6 +17,8 @@ pub struct HostMetricsSample {
     pub in_use_bytes: u64,
     pub cgroup_working_set_bytes: Option<u64>,
     pub cgroup_current_bytes: Option<u64>,
+    pub open_fds: u64,
+    pub fd_limit: u64,
 }
 
 enum MetricsBackend {
@@ -136,17 +138,43 @@ impl HostServices {
         self.http_streams.close();
     }
 
+    /// Collect off the core so filesystem reads cannot delay a lease.
+    #[allow(clippy::disallowed_methods)] // `/proc` is host telemetry, not node storage.
     pub fn sample_metrics(&self) -> HostMetricsSample {
         match &self.metrics {
             MetricsBackend::Production(sampler) => {
                 let mut sampler = sampler.lock().unwrap();
                 let memory = crate::memory::sample();
+                #[cfg(target_os = "linux")]
+                let open_fds = std::fs::read_dir("/proc/self/fd")
+                    .map(|entries| entries.count() as u64)
+                    .unwrap_or_default();
+                #[cfg(not(target_os = "linux"))]
+                let open_fds = 0;
+
+                #[cfg(unix)]
+                let fd_limit = {
+                    let mut limit = libc::rlimit {
+                        rlim_cur: 0,
+                        rlim_max: 0,
+                    };
+                    if unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, &mut limit) } == 0 {
+                        limit.rlim_cur
+                    } else {
+                        0
+                    }
+                };
+                #[cfg(not(unix))]
+                let fd_limit = 0;
+
                 HostMetricsSample {
                     cpu_percent_x100: sampler.sample_cpu_percent_x100(),
                     rss_bytes: memory.rss_bytes,
                     in_use_bytes: memory.in_use_bytes,
                     cgroup_working_set_bytes: memory.cgroup_working_set_bytes,
                     cgroup_current_bytes: memory.cgroup_current_bytes,
+                    open_fds,
+                    fd_limit,
                 }
             }
             #[cfg(celld_internal_tests)]

@@ -7,16 +7,7 @@ use super::*;
 use celld_logic::log_evict::PROBE_FAILURES_TO_DEGRADE;
 
 fn run(future: impl std::future::Future<Output = ()>) {
-    static RUNTIME: std::sync::OnceLock<tokio::runtime::Runtime> = std::sync::OnceLock::new();
-    let runtime = RUNTIME.get_or_init(|| {
-        tokio::runtime::Builder::new_multi_thread()
-            .worker_threads(2)
-            .enable_all()
-            .build()
-            .unwrap()
-    });
-    crate::asyncrt::set_host_handle(runtime.handle().clone());
-    runtime.block_on(future);
+    crate::asyncrt::test_block_on(future);
 }
 
 /// `live` answers every append; `gone` refuses the connection, the way a

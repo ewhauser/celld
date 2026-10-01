@@ -41,6 +41,9 @@ const MAX_ALARM_COMPLETIONS: usize = 65_536;
 /// How often the isolate pool gives back what it no longer needs.
 const REAP_INTERVAL: Duration = Duration::from_secs(30);
 
+/// How long a reclaim waits before it retries when admission holds the pool.
+const RECLAIM_RETRY: Duration = Duration::from_millis(10);
+
 /// How often a suspended request re-reads its cancellation flag. Matches the
 /// blocking run loop's own cap, which exists for the same reason: a client
 /// disconnect is raised on another thread and has nothing to wake this one.
@@ -1191,6 +1194,7 @@ impl RuntimeManager {
             })
             .await
             .with_context(|| format!("release {cell} from its isolate for a generation swap"))?;
+            crate::js::release_root_facets(cell, epoch, crate::js::RootRelease::Swap).await;
             tracing::info!(
                 event = "generation_swap_out",
                 scope = %cell,
@@ -1458,6 +1462,10 @@ impl RuntimeManager {
             // the isolate once no cell is left in it.
             drop(handle);
         }
+        // After the give-back, so the root cannot start another facet call,
+        // and before the facet streams stop, so no write reaches a file that
+        // the facet's eviction unlinked.
+        crate::js::release_root_facets(cell, epoch, crate::js::RootRelease::Stop).await;
         let Some(replication) = &self.replication else {
             self.facets.forget(cell, epoch);
             return Ok(());
@@ -1819,12 +1827,14 @@ impl RuntimeManager {
         cell: String,
         ws_id: u64,
         data: js::WsIn,
+        started: tokio::sync::oneshot::Sender<()>,
     ) -> anyhow::Result<js::WsDispatch> {
         let (reply, receive) = tokio::sync::oneshot::channel();
         let job = CellJob::WsMessage {
             scope: cell.clone(),
             ws_id,
             data,
+            started: Some(started),
             reply,
         };
         self.cell_event(
@@ -2612,6 +2622,7 @@ impl StatelessRuntime {
             // Weak, so this loop cannot keep a superseded generation's pool
             // alive: it ends when the pool is dropped.
             let reaping = Arc::downgrade(&isolates);
+            let reclaim = isolates.reclaim_bell();
             handle.spawn(async move {
                 // `interval` fires its first tick immediately, which
                 // reaped the isolate `warm` had just built and handed the
@@ -2622,11 +2633,29 @@ impl StatelessRuntime {
                 );
                 tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
                 loop {
-                    tick.tick().await;
-                    let Some(pool) = reaping.upgrade() else {
+                    let reap = crate::asyncrt::select_biased! {
+                        "the paced reap also frees, so it wins a tie with the reclaim bell";
+                        _ = tick.tick() => true,
+                        _ = reclaim.notified() => false,
+                    };
+                    let Some(mut pool) = reaping.upgrade() else {
                         return;
                     };
-                    pool.reap();
+                    if reap {
+                        pool.reap();
+                        continue;
+                    }
+                    // A condemned isolate is freed as soon as it drains, not
+                    // at the next tick. Admission holds the guard only while
+                    // it places one request, so a short retry gets it.
+                    while !pool.free_drained() {
+                        drop(pool);
+                        crate::asyncrt::sleep(RECLAIM_RETRY).await;
+                        let Some(again) = reaping.upgrade() else {
+                            return;
+                        };
+                        pool = again;
+                    }
                 }
             });
         }
@@ -3224,6 +3253,10 @@ async fn drive_cell_inner(
     // ticket cannot be missed by a release landing between the two. Only the
     // waiting happens out here, because a turn may not await.
     let mut pending = Some(job);
+    let started_event = match pending.as_mut() {
+        Some(CellJob::WsMessage { started, .. }) => started.take(),
+        _ => None,
+    };
     let (begun, started, moves) = loop {
         let mut waiting = None;
         let taken = slot
@@ -3262,6 +3295,12 @@ async fn drive_cell_inner(
         }
     };
     // Delivered. Whatever the caller sent next may go.
+    // A socket waits for this turn, including the input gate, rather than
+    // handler completion. Acknowledging a queued task instead can reorder
+    // messages; awaiting completion prevents a later message cancelling it.
+    if let Some(started) = started_event {
+        let _ = started.send(());
+    }
     if let Some(order) = order.as_mut() {
         order.delivered();
     }

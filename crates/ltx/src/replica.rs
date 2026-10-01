@@ -527,6 +527,17 @@ fn ensure_restore_output_absent(host: &crate::LtxHost, output_path: &Path) -> Re
     Ok(())
 }
 
+/// Maps a download failure during restore. A planned object that is gone
+/// becomes [`Error::LTXMissing`], so a caller that owns the listing can build
+/// a fresh plan: epoch GC can delete an object between plan selection and its
+/// download. Every other failure stays opaque and aborts the restore.
+fn classify_restore_open_error(e: Error) -> Error {
+    match &e {
+        Error::Io(io) if io.kind() == std::io::ErrorKind::NotFound => Error::LTXMissing,
+        _ => Error::Other(format!("open ltx file: {e}").into()),
+    }
+}
+
 async fn restore_from_plan_inner<C: ReplicaClient>(
     client: &C,
     output_path: &Path,
@@ -577,7 +588,7 @@ async fn restore_from_plan_inner<C: ReplicaClient>(
                 client
                     .open_ltx_file(info.level, info.min_txid, info.max_txid)
                     .await
-                    .map_err(|e| Error::Other(format!("open ltx file: {e}").into()))
+                    .map_err(classify_restore_open_error)
             }
         })
         .buffered(RESTORE_DOWNLOAD_CONCURRENCY)

@@ -181,6 +181,10 @@ impl ModuleRegistry {
 /// rejects, and a static import from a user module fails to link.
 const INTERNALS_SPECIFIER: &str = "celld:internals";
 
+/// The host module of the Python Worker bundle that `celld deploy` builds.
+/// Its one export condemns the calling isolate; see `op_isolate_condemn`.
+const PYTHON_HOST_SPECIFIER: &str = "celld:python";
+
 /// One synthetic module per isolate whose default export is the internals
 /// object, built the first time a stub links.
 fn internals_module<'s>(scope: &mut v8::PinScope<'s, '_>) -> v8::Local<'s, v8::Module> {
@@ -230,11 +234,12 @@ fn modreg(scope: &mut v8::PinScope) -> Arc<ModuleRegistry> {
         .expect("isolate has no module registry")
 }
 
-/// Is `spec` an external builtin (`node:*`, `cloudflare:*`, or a bare node
-/// builtin)? esbuild bundles every npm dep inline and leaves only builtins
-/// external, so a remaining bare specifier is a node builtin.
+/// Is `spec` an external builtin (`node:*`, `cloudflare:*`, `celld:python`,
+/// or a bare node builtin)? esbuild bundles every npm dep inline and leaves
+/// only builtins external, so a remaining bare specifier is a node builtin.
 fn is_external(spec: &str) -> bool {
-    if spec.starts_with("node:") || spec.starts_with("cloudflare:") {
+    if spec.starts_with("node:") || spec.starts_with("cloudflare:") || spec == PYTHON_HOST_SPECIFIER
+    {
         return true;
     }
     // bare builtin, or a builtin submodule like `stream/promises`
@@ -567,6 +572,7 @@ fn stub_source(spec: &str, names: &std::collections::BTreeSet<String>) -> String
     // subclass would make `throw new NonRetryableError(...)` throw a value
     // the retry policy cannot recognize — the step would retry, silently.
     let cf_workflows = spec == "cloudflare:workflows";
+    let python_host = spec == PYTHON_HOST_SPECIFIER;
     let lazy = LAZY_MODULES.iter().find(|m| m.specs.contains(&spec));
     let eager = eager_module_global(spec);
     let base = if cf {
@@ -575,6 +581,8 @@ fn stub_source(spec: &str, names: &std::collections::BTreeSet<String>) -> String
         "__celld.__cfSockets".to_string()
     } else if cf_workflows {
         "__celld.__cfWorkflows".to_string()
+    } else if python_host {
+        "__celld.__pythonHost".to_string()
     } else if let Some(m) = lazy {
         format!("__celld.{}", m.global)
     } else if let Some(global) = eager {
@@ -913,6 +921,9 @@ fn builtin_source(scope: &mut v8::PinScope, spec: &str) -> Option<String> {
     if spec == "cloudflare:workflows" {
         return Some("__celld.__cfWorkflows".into());
     }
+    if spec == PYTHON_HOST_SPECIFIER {
+        return Some("__celld.__pythonHost".into());
+    }
     if let Some(module) = install_lazy_module(scope, spec) {
         return Some(format!("__celld.{}", module.global));
     }
@@ -968,7 +979,7 @@ pub(super) fn op_builtin_module(
     mut rv: v8::ReturnValue<v8::Value>,
 ) {
     let spec = args.get(0).to_rust_string_lossy(scope);
-    if spec.starts_with("cloudflare:") {
+    if spec.starts_with("cloudflare:") || spec == PYTHON_HOST_SPECIFIER {
         return; // not a node builtin
     }
     let Some(expr) = builtin_source(scope, &spec) else {

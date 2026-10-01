@@ -186,6 +186,10 @@ pub struct Slot {
     /// The pool's admission bell, cloned into every slot so an
     /// `Affiliation` drop can ring it without holding the pool.
     freed: Arc<tokio::sync::Notify>,
+    /// The pool's reclaim bell, rung when a retiring isolate may have
+    /// drained. `None` for a standalone slot: nothing frees or replaces it,
+    /// so [`Slot::condemn`] cannot apply to it.
+    reclaim: Option<Arc<tokio::sync::Notify>>,
     /// Cells whose realm lives in this isolate. Not a count of live work: a
     /// cell stays until it is evicted or handed to another node, which is
     /// why `retire` refuses an isolate holding any.
@@ -317,6 +321,7 @@ impl Slot {
             turns: AtomicUsize::new(0),
             requests: AtomicUsize::new(0),
             freed: Arc::new(tokio::sync::Notify::new()),
+            reclaim: None,
             cells: AtomicUsize::new(0),
             adopted_cells: AtomicUsize::new(0),
             retiring: AtomicBool::new(false),
@@ -342,6 +347,7 @@ impl Slot {
             turns: AtomicUsize::new(0),
             requests: AtomicUsize::new(0),
             freed: Arc::new(tokio::sync::Notify::new()),
+            reclaim: None,
             cells: AtomicUsize::new(0),
             adopted_cells: AtomicUsize::new(0),
             retiring: AtomicBool::new(false),
@@ -389,6 +395,37 @@ impl Slot {
         self.retiring.load(Ordering::Relaxed)
     }
 
+    /// Retire this isolate because its guest can no longer run in it, and
+    /// ask the pool to free it once it drains. Returns whether the slot
+    /// belongs to a pool that can do both.
+    ///
+    /// Placement already skips a retiring slot, so the next request grows a
+    /// fresh isolate instead. Leaving the dead isolate to placement is the
+    /// failure this prevents: it fails each request in about a millisecond,
+    /// so it carries the fewest turns and `place` hands it nearly every
+    /// request. [`reap`](Self::reap) does not know it is dead, and on a
+    /// four-isolate node it retired the three healthy isolates first, one
+    /// per 30 s pass, so one fatal Python error failed that node's traffic
+    /// for 94 s.
+    ///
+    /// The bell, not the 30 s reap, frees the heap: a guest that fails on
+    /// every start would otherwise hold one dead heap per failure until the
+    /// next tick, and a Python heap is tens of megabytes.
+    ///
+    /// A cell pool has no task on the bell. A condemned cell isolate still
+    /// takes no new cell, and frees when its cells leave, as retirement
+    /// always has; Python Workers cannot declare cells.
+    pub(crate) fn condemn(&self, reason: &str) -> bool {
+        let Some(reclaim) = &self.reclaim else {
+            return false;
+        };
+        if !self.retiring.swap(true, Ordering::Relaxed) {
+            tracing::warn!(isolate = %self.heap_id, slot = self.id, reason, "isolate condemned");
+        }
+        reclaim.notify_one();
+        true
+    }
+
     /// The node-wide identity of this slot's currently installed V8 heap.
     pub fn heap_id(&self) -> HeapId {
         self.heap_id
@@ -419,6 +456,14 @@ impl Drop for Affiliation {
         // the capacity to a single parked request, where waking them all
         // would stampede `admit` on every release.
         self.0.freed.notify_one();
+        // The last request out of a retiring isolate is what lets it free.
+        // Freeing here would drop a V8 isolate inside whatever turn dropped
+        // this affiliation, so the pool's maintenance task does it.
+        if self.0.is_retiring() {
+            if let Some(reclaim) = &self.0.reclaim {
+                reclaim.notify_one();
+            }
+        }
     }
 }
 
@@ -483,6 +528,9 @@ pub struct Pool {
     limits: PoolLimits,
     build: Build,
     freed: Arc<tokio::sync::Notify>,
+    /// Rung by a condemnation and by the last request out of a retiring
+    /// isolate. See [`Pool::reclaim_bell`].
+    reclaim: Arc<tokio::sync::Notify>,
     admission_wait: std::time::Duration,
     /// The whole pool belongs to a superseded generation. An isolate grown
     /// after this is set starts out retiring: a placement that snapshotted
@@ -502,6 +550,7 @@ impl Pool {
             limits,
             build,
             freed: Arc::new(tokio::sync::Notify::new()),
+            reclaim: Arc::new(tokio::sync::Notify::new()),
             admission_wait,
             retired: AtomicBool::new(false),
             maintenance: RwLock::new(()),
@@ -567,6 +616,7 @@ impl Pool {
             turns: AtomicUsize::new(0),
             requests: AtomicUsize::new(0),
             freed: self.freed.clone(),
+            reclaim: Some(self.reclaim.clone()),
             cells: AtomicUsize::new(0),
             adopted_cells: AtomicUsize::new(0),
             retiring: AtomicBool::new(self.retired.load(Ordering::Relaxed)),
@@ -698,6 +748,28 @@ impl Pool {
         };
         self.retire_one();
         self.free_retired();
+    }
+
+    /// The bell a maintenance task awaits to call
+    /// [`free_drained`](Self::free_drained) between reap ticks.
+    pub(crate) fn reclaim_bell(&self) -> Arc<tokio::sync::Notify> {
+        self.reclaim.clone()
+    }
+
+    /// Free every retiring isolate that has drained, and retire nothing.
+    /// Returns `false` when admission or cell placement holds the pool, so
+    /// the caller retries rather than let the heap wait for the next reap.
+    ///
+    /// The guard is the one `reap` takes, for the same race: an admission
+    /// that snapshotted this slot before it began retiring can still
+    /// affiliate to it, and `may_free` only sees that request once the
+    /// admission has released the guard.
+    pub(crate) fn free_drained(&self) -> bool {
+        let Ok(_maintenance) = self.maintenance.try_write() else {
+            return false;
+        };
+        self.free_retired();
+        true
     }
 
     /// Retire every empty isolate. Cell pools use this after eviction because

@@ -1,6 +1,6 @@
 # syntax=docker/dockerfile:1.7
 
-ARG RUST_VERSION=1.97.1
+ARG RUST_VERSION=1.98.1
 ARG CELLD_COMMIT=unknown
 # The stage the image takes its binary from. `test` gates the image on the
 # workspace tests and clippy; a caller whose own CI already runs them (TCK)

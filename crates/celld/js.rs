@@ -614,6 +614,9 @@ pub enum CellJob {
         scope: String,
         ws_id: u64,
         data: WsIn,
+        /// Released after the first turn, so the socket can deliver the next
+        /// message in order without waiting for this handler's async work.
+        started: Option<tokio::sync::oneshot::Sender<()>>,
         reply: tokio::sync::oneshot::Sender<Result<WsDispatch>>,
     },
     WsClosed {
@@ -746,6 +749,7 @@ fn fetch_request_error(error: &reqwest::Error) -> String {
 
 #[doc(hidden)]
 pub mod websocket;
+use crate::host_channels::GateRefusal;
 pub(crate) use websocket::WebSocketService;
 pub use websocket::*;
 use websocket::{
@@ -947,41 +951,6 @@ async fn prove_facet(stream: String, epoch: u64) -> std::result::Result<(), Gate
     }
 }
 
-/// Why the output gate did not release a ticket.
-enum GateRefusal {
-    /// The process installed no gate channel. A write must still fail closed
-    /// here: an acknowledgement nobody can prove is the loss this gate exists
-    /// to prevent.
-    NoChannel,
-    /// The core answered, and the answer is that the write is not durable.
-    Unproven(celld_logic::RequestError),
-    /// The shell dropped the ticket before the core answered.
-    Dropped,
-    /// A facet's write never reached a database a proof can cover.
-    Unpersisted(String),
-}
-
-impl std::fmt::Display for GateRefusal {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            GateRefusal::NoChannel => f.write_str("no output-gate channel"),
-            GateRefusal::Unproven(error @ celld_logic::RequestError::DurabilityUnproven) => {
-                write!(
-                    f,
-                    "the write this request follows is not durable ({error:?})"
-                )
-            }
-            GateRefusal::Unproven(error) => {
-                write!(f, "the output gate refused the ticket ({error:?})")
-            }
-            GateRefusal::Dropped => f.write_str("output gate dropped"),
-            GateRefusal::Unpersisted(error) => {
-                write!(f, "the facet's write did not reach its database ({error})")
-            }
-        }
-    }
-}
-
 /// Take one ticket on the output gate and wait for the core's verdict.
 ///
 /// This is the output gate applied to an in-handler effect rather than to the
@@ -1010,31 +979,17 @@ async fn egress_gate_verdict(gate: EgressGate) -> std::result::Result<(), GateRe
             (cell, channel, None, observed, epoch)
         }
     };
-    let (tx, receive) = tokio::sync::oneshot::channel();
-    let sent = GATE_TX
-        .get()
-        .map(|gate| {
-            gate.send(GateReq {
-                scope: cell,
-                ticket: crate::actor::GateTicket {
-                    channel,
-                    position,
-                    observed,
-                    epoch,
-                },
-                reply: tx,
-            })
-            .is_ok()
-        })
-        .unwrap_or(false);
-    if !sent {
-        return Err(GateRefusal::NoChannel);
-    }
-    match receive.await {
-        Ok(Ok(())) => Ok(()),
-        Ok(Err(error)) => Err(GateRefusal::Unproven(error)),
-        Err(_) => Err(GateRefusal::Dropped),
-    }
+    crate::host_channels::request_gate(
+        GATE_TX.get(),
+        cell,
+        crate::actor::GateTicket {
+            channel,
+            position,
+            observed,
+            epoch,
+        },
+    )
+    .await
 }
 
 /// Wait for the writes an outbound effect can reveal to be proven durable
@@ -1063,11 +1018,13 @@ async fn gated_channel_send<T>(
     request: T,
     missing: &'static str,
 ) -> std::result::Result<(), String> {
-    await_egress_gate(gate).await?;
-    match channel.get() {
-        Some(tx) if tx.send(request).is_ok() => Ok(()),
-        _ => Err(missing.to_string()),
-    }
+    crate::host_channels::send_after_gate(
+        await_egress_gate(gate),
+        || channel.get(),
+        request,
+        missing,
+    )
+    .await
 }
 
 /// One `celld_logic::gate::InputGate` per cell.
@@ -3459,13 +3416,24 @@ impl InFlight {
                 send_and_end(tc, &self.context, reply, outcome)
             }
             Answer::WsMessage(reply) => {
-                let dispatch = self
-                    .gate_positions()
-                    .map(|(write_position, observed_position)| WsDispatch {
-                        frames: ws_capture_take(),
+                // Taken before the sample, because the capture reserved each
+                // frame's place in its socket's queue when the script sent it.
+                // A failed sample authorizes no output, so its frames are
+                // discarded as a rejected handler's are. Left on the context,
+                // the reservation holds every later frame on the socket until
+                // the context drops, and then closes the socket with 1011.
+                let frames = ws_capture_take();
+                let dispatch = match self.gate_positions() {
+                    Ok((write_position, observed_position)) => Ok(WsDispatch {
+                        frames,
                         write_position,
                         observed_position,
-                    });
+                    }),
+                    Err(error) => {
+                        frames.discard();
+                        Err(error)
+                    }
+                };
                 send_and_end(tc, &self.context, reply, dispatch)
             }
             Answer::Ack(reply) => send_and_end(tc, &self.context, reply, self.write_delta()),
@@ -4439,6 +4407,13 @@ fn finish_turn(tc: &mut v8::PinScope, entry: &mut InFlight) -> Vec<Op> {
         let _cpu_watchdog = cpu_watchdog_for_context(tc, &entry.context);
         settle(tc, entry);
         tc.perform_microtask_checkpoint();
+        // V8 schedules FinalizationRegistry cleanup as a foreground task,
+        // not a microtask. Without driving that queue, collected loader
+        // lifetimes never release their host registry entries. Run one task
+        // per turn under the same CPU watchdog, so cleanup cannot monopolize
+        // the isolate by continually scheduling more foreground work.
+        v8::Platform::pump_message_loop(&v8::V8::get_current_platform(), tc, false);
+        tc.perform_microtask_checkpoint();
     }
     if let Err(error) = finish_cpu_turn(tc, entry) {
         let error = take_execution_termination_in_context(tc, Some(&entry.context))
@@ -5362,6 +5337,7 @@ fn begin_cell(tc: &mut v8::PinScope, job: CellJob, event_time: i64) -> Begun {
             ws_id,
             data,
             reply,
+            ..
         } => start_cell_event(
             tc,
             &scope,
@@ -6166,7 +6142,7 @@ impl Worker {
         cell: &str,
         parent: &storage::StorageIdentity,
         name: &str,
-        id: &str,
+        id_sc: Vec<u8>,
         props_sc: Vec<u8>,
         file: crate::host_channels::FacetFile,
     ) -> Result<Option<i64>> {
@@ -6191,7 +6167,7 @@ impl Worker {
             parent,
             name,
             EmbeddedStartup {
-                id,
+                id_sc,
                 props_sc,
                 path: file.path,
                 restored: file.restored,
@@ -6817,6 +6793,7 @@ ops! { OP_NAMES, install_op_functions,
         "__response_stream_closed" => op_response_stream_closed,
         "__response_stream_close" => op_response_stream_close,
         "__op_timer" => op_timer,
+        "__isolate_condemn" => op_isolate_condemn,
         "__timer_alloc" => op_timer_alloc,
         "__io_context_id" => op_io_context_id,
         "__with_input_gate_context" => op_with_input_gate_context,
@@ -7204,10 +7181,22 @@ fn op_svc_call_impl(
 // and invokes it. The loaded isolate uses the same turn driver as every
 // stateless Worker, so an awaited operation holds no thread or isolate.
 
-// Mirror the workerd dynamic-worker limits (worker-loader.c++): 64 MiB total
-// module bytes, 1 MiB env. Messages match so the conformance cases pass.
-const MAX_DYNAMIC_WORKER_CODE_SIZE: usize = 64 * 1024 * 1024;
+// Default to workerd's module-byte ceiling. A fleet operator may admit larger
+// compiled runtimes; loaded guest code cannot change this host policy.
+const DEFAULT_MAX_DYNAMIC_WORKER_CODE_SIZE: usize = 64 * 1024 * 1024;
 const MAX_DYNAMIC_WORKER_ENV_SIZE: usize = 1024 * 1024;
+
+fn dynamic_worker_code_limit() -> usize {
+    static LIMIT: OnceLock<usize> = OnceLock::new();
+    *LIMIT.get_or_init(|| {
+        crate::env_vars::positive_or(
+            "CELLD_MAX_DYNAMIC_WORKER_CODE_BYTES",
+            DEFAULT_MAX_DYNAMIC_WORKER_CODE_SIZE,
+        )
+        .expect("validated CELLD_MAX_DYNAMIC_WORKER_CODE_BYTES")
+    })
+}
+
 /// The largest `props` value one loaded entrypoint or Durable Object class can
 /// carry, as structured-clone bytes. Workerd does not impose this bound, but
 /// celld holds the value on a host job for the whole call. The harness shares
@@ -7475,12 +7464,13 @@ fn op_loader_load(
                 ModuleSource::Wasm(bytes) => bytes.len(),
             })
             .sum::<usize>();
-    if code_size > MAX_DYNAMIC_WORKER_CODE_SIZE {
+    let max_code_bytes = dynamic_worker_code_limit();
+    if code_size > max_code_bytes {
         return loader_throw(
             scope,
             &format!(
                 "Dynamic Worker code size ({code_size} bytes) exceeds the \
-                 maximum allowed size of {MAX_DYNAMIC_WORKER_CODE_SIZE} bytes."
+                 maximum allowed size of {max_code_bytes} bytes."
             ),
         );
     }
@@ -7908,7 +7898,7 @@ struct FacetStart {
     parent_scope: String,
     owner: String,
     name: String,
-    id: String,
+    id_sc: Vec<u8>,
     props_sc: Vec<u8>,
     parent: storage::StorageIdentity,
 }
@@ -7968,7 +7958,162 @@ impl FacetHost {
     }
 }
 
+/// The facets that each root runs in loaded Workers' isolates, by the root's
+/// cell and epoch.
+///
+/// A loaded Worker can outlive a root through another stub or until garbage
+/// collection. Neither lifetime tells the loaded isolate when a root stops,
+/// so connection closure cannot depend on collection. The root's own
+/// `facets._release()` invalidates its stubs synchronously: the give-back
+/// turn cannot drive an asynchronous abort. Previously, each reactivation
+/// left a connection open on an unlinked file, with the facet's JavaScript
+/// state. The adoption turn records each facet here, and the root's
+/// give-back closes them.
+///
+/// A facet of the root's own class is not recorded: `finish_cell_adoption`
+/// closes it in the root's give-back turn, and its slot can be freed while a
+/// reference is held, so a later turn on it would panic.
+static ROOT_FACETS: OnceLock<Mutex<HashMap<(String, u64), RootFacets>>> = OnceLock::new();
+
+fn root_facets() -> std::sync::MutexGuard<'static, HashMap<(String, u64), RootFacets>> {
+    ROOT_FACETS
+        .get_or_init(Mutex::default)
+        .lock()
+        .expect("root facets poisoned")
+}
+
+#[derive(Default)]
+struct RootFacets {
+    /// Facet calls between their start and their adoption turn. The entry
+    /// lives while one runs, so a call that adopts after the root stopped
+    /// finds `stopped` rather than a fresh entry.
+    pending: usize,
+    /// The root gave its residency back and does not run again at this
+    /// epoch, so no facet of it can be adopted.
+    stopped: bool,
+    /// Each slot keeps its loaded isolate alive until the release closes
+    /// the facet in it.
+    open: Vec<(Arc<crate::pool::Slot>, String)>,
+}
+
+/// One facet call of a root, from its start until its adoption turn.
+struct PendingFacet {
+    key: (String, u64),
+}
+
+impl PendingFacet {
+    fn begin(root: &str, epoch: u64) -> Result<Self, String> {
+        let key = (root.to_string(), epoch);
+        let mut roots = root_facets();
+        let entry = roots.entry(key.clone()).or_default();
+        if entry.stopped {
+            return Err(format!("{root} epoch {epoch} stopped"));
+        }
+        entry.pending += 1;
+        Ok(Self { key })
+    }
+
+    /// Record the facet before its adoption. Call inside the adoption turn:
+    /// a release that takes the record queues its close behind this turn on
+    /// the same slot, and a release that came first makes this refuse.
+    fn record(&self, slot: &Arc<crate::pool::Slot>, scope: &str) -> Result<(), String> {
+        let mut roots = root_facets();
+        let entry = roots
+            .get_mut(&self.key)
+            .expect("a pending facet keeps its entry");
+        if entry.stopped {
+            return Err(format!("{} epoch {} stopped", self.key.0, self.key.1));
+        }
+        if !entry
+            .open
+            .iter()
+            .any(|(open, name)| Arc::ptr_eq(open, slot) && name == scope)
+        {
+            entry.open.push((slot.clone(), scope.to_string()));
+        }
+        Ok(())
+    }
+}
+
+impl Drop for PendingFacet {
+    fn drop(&mut self) {
+        let mut roots = root_facets();
+        if let Some(entry) = roots.get_mut(&self.key) {
+            entry.pending -= 1;
+            if entry.pending == 0 && entry.open.is_empty() {
+                roots.remove(&self.key);
+            }
+        }
+    }
+}
+
+/// How a root leaves the isolate that runs it.
+#[derive(Clone, Copy)]
+pub(crate) enum RootRelease {
+    /// The root stops at this epoch: its facets close, and none opens again.
+    Stop,
+    /// The root restarts at the same epoch on another generation. It builds
+    /// a new facet manager there, so the facets of this one close, but the
+    /// new instance can open its own.
+    ///
+    /// A call of the old instance can still adopt after this release, and
+    /// that is bounded. The facet ops read the root's storage identity
+    /// synchronously, and the give-back closed that storage, so only a call
+    /// that started before the swap turn gets here. It records under the
+    /// same root and epoch, so the root's next release closes it. Marking
+    /// the epoch stopped instead would refuse the new instance's facets.
+    Swap,
+}
+
+/// Close each facet that `root` runs in a loaded Worker's isolate. The
+/// caller gives the root back first, so the root cannot start a facet call
+/// after the facets are taken.
+pub(crate) async fn release_root_facets(root: &str, epoch: u64, release: RootRelease) {
+    let key = (root.to_string(), epoch);
+    let open = {
+        let mut roots = root_facets();
+        let Some(entry) = roots.get_mut(&key) else {
+            return;
+        };
+        if matches!(release, RootRelease::Stop) {
+            entry.stopped = true;
+        }
+        let open = std::mem::take(&mut entry.open);
+        if entry.pending == 0 {
+            roots.remove(&key);
+        }
+        open
+    };
+    // A nested facet records after its parent, so it closes first.
+    for (slot, scope) in open.into_iter().rev() {
+        if let Err(error) = slot.turn(|worker| worker.own_cell(&scope, None)).await {
+            tracing::warn!(root, epoch, facet = %scope, %error, "a facet did not close with its root");
+        }
+    }
+}
+
+/// Drop an aborted facet's record, which its abort closed already.
+fn forget_root_facet(root: &str, epoch: u64, slot: &Arc<crate::pool::Slot>, scope: &str) {
+    let key = (root.to_string(), epoch);
+    let mut roots = root_facets();
+    if let Some(entry) = roots.get_mut(&key) {
+        entry
+            .open
+            .retain(|(open, name)| !(Arc::ptr_eq(open, slot) && name == scope));
+        if entry.pending == 0 && entry.open.is_empty() {
+            roots.remove(&key);
+        }
+    }
+}
+
 async fn prepare_facet(host: FacetHost, start: FacetStart) -> Result<LoadedFacet, String> {
+    let pending = match host {
+        FacetHost::Loaded(_) => Some(PendingFacet::begin(
+            &start.parent.root_scope,
+            start.parent.epoch,
+        )?),
+        FacetHost::Own(_) => None,
+    };
     let slot = host.slot().await?;
     let file = open_facet_file(&start.parent, &start.name).await?;
     let mut names = start.parent.facet_path.clone();
@@ -7982,14 +8127,19 @@ async fn prepare_facet(host: FacetHost, start: FacetStart) -> Result<LoadedFacet
         &start.name,
     );
     slot.turn(|worker| {
-        worker.own_embedded_cell(
-            &scope,
-            &start.parent,
-            &start.name,
-            &start.id,
-            start.props_sc,
-            file,
-        )
+        if let Some(pending) = &pending {
+            pending.record(&slot, &scope)?;
+        }
+        worker
+            .own_embedded_cell(
+                &scope,
+                &start.parent,
+                &start.name,
+                start.id_sc,
+                start.props_sc,
+                file,
+            )
+            .map_err(|error| format!("{error}"))
     })
     .await
     .map_err(|error| format!("worker loader facet: {error}"))?;
@@ -8011,7 +8161,9 @@ fn op_facet_rpc(
     let parent_scope = args.get(2).to_rust_string_lossy(scope);
     let owner = args.get(3).to_rust_string_lossy(scope);
     let name = args.get(4).to_rust_string_lossy(scope);
-    let facet_id = args.get(5).to_rust_string_lossy(scope);
+    let Some(id_sc) = view_bytes(args.get(5)) else {
+        return loader_throw(scope, "facet identity is not a typed array");
+    };
     let props_sc = match loader_props_bytes(args.get(6)) {
         Ok(props) => props,
         Err(error) => return loader_throw(scope, &error),
@@ -8038,7 +8190,7 @@ fn op_facet_rpc(
                 parent_scope,
                 owner,
                 name,
-                id: facet_id,
+                id_sc,
                 props_sc,
                 parent,
             },
@@ -8091,7 +8243,9 @@ fn op_facet_fetch(
     let parent_scope = args.get(2).to_rust_string_lossy(scope);
     let owner = args.get(3).to_rust_string_lossy(scope);
     let name = args.get(4).to_rust_string_lossy(scope);
-    let facet_id = args.get(5).to_rust_string_lossy(scope);
+    let Some(id_sc) = view_bytes(args.get(5)) else {
+        return loader_throw(scope, "facet identity is not a typed array");
+    };
     let props_sc = match loader_props_bytes(args.get(6)) {
         Ok(props) => props,
         Err(error) => return loader_throw(scope, &error),
@@ -8140,7 +8294,7 @@ fn op_facet_fetch(
                 parent_scope,
                 owner,
                 name,
-                id: facet_id,
+                id_sc,
                 props_sc,
                 parent,
             },
@@ -8196,11 +8350,22 @@ fn op_facet_abort(
     let name = args.get(4).to_rust_string_lossy(scope);
     let host = FacetHost::of(loader);
     let facet_scope = facet_scope(&class_name, &parent_scope, &owner, &name);
+    // The root that recorded the facet. A parent without storage has no
+    // record to drop.
+    let root = storage::storage_identity(&parent_scope)
+        .ok()
+        .flatten()
+        .map(|parent| (parent.root_scope, parent.epoch));
     let async_id = asyncrt::enqueue(async move {
-        let slot = host?.slot().await?;
+        let host = host?;
+        let loaded = matches!(host, FacetHost::Loaded(_));
+        let slot = host.slot().await?;
         slot.turn(|worker| worker.own_cell(&facet_scope, None))
             .await
             .map_err(|error| format!("abort facet: {error}"))?;
+        if let (true, Some((root, epoch))) = (loaded, root) {
+            forget_root_facet(&root, epoch, &slot, &facet_scope);
+        }
         Ok(Vec::new())
     });
     rv.set(promise_for(scope, async_id));
@@ -8257,9 +8422,9 @@ fn op_facet_delete(
     rv.set(promise_for(scope, async_id));
 }
 
-/// `__loader_drop(id)` — evict a loaded worker. Called from a
-/// FinalizationRegistry when its stub is GC'd. Removing the registry entry
-/// drops the isolate after any calls that already cloned its load state end.
+/// `__loader_drop(id)` — release the loader's ownership on explicit disposal
+/// or collection of the shared JavaScript load lifetime. In-flight calls and
+/// root facet records retain their own references until they finish.
 fn op_loader_drop(
     scope: &mut v8::PinScope,
     args: v8::FunctionCallbackArguments,
@@ -9633,14 +9798,11 @@ fn op_log(
     if let Some(context) = current_reaction_or_untracked_io_context(scope) {
         context.record_tail_log(&level, &body);
     }
-    let displayed = match level.as_str() {
-        "error" => format!("ERROR {body}"),
-        "warn" => format!("WARN {body}"),
-        _ => body,
-    };
     // Correlated by CPED, so a continuation logging after an await — or
     // another entry's continuation running in this turn's checkpoint —
     // lands on the trace that owns it, not on whoever holds the isolate.
+    // The record carries the level as its severity, so its body omits the
+    // prefix that the console line needs.
     if crate::telemetry::active() {
         if let Some(ids) =
             current_trace_context(scope).and_then(crate::telemetry::TraceContext::recording_ids)
@@ -9649,12 +9811,41 @@ fn op_log(
                 trace_id: Some(ids.trace_id),
                 span_id: Some(ids.span_id),
                 time_unix_us: crate::telemetry::now_unix_us(),
-                body: displayed.clone(),
+                severity: crate::telemetry::Severity::from_console_level(&level),
+                body: body.clone(),
             });
         }
     }
+    let displayed = match level.as_str() {
+        "error" => format!("ERROR {body}"),
+        "warn" => format!("WARN {body}"),
+        _ => body,
+    };
     tracing::info!(target: "cell_console", "{}", displayed);
 }
+/// `__isolate_condemn(reason)` -> whether this isolate will be replaced.
+///
+/// The guest's own verdict that it cannot run here again: the Python bundle
+/// calls it from Pyodide's fatal hook, where Cloudflare aborts the isolate.
+/// It condemns only the isolate running the call, so a guest can cost itself
+/// a cold start and nothing else. `false` for a Dynamic Worker, whose slot
+/// has no pool to replace it.
+fn op_isolate_condemn(
+    scope: &mut v8::PinScope,
+    args: v8::FunctionCallbackArguments,
+    mut rv: v8::ReturnValue<v8::Value>,
+) {
+    let mut reason = args.get(0).to_rust_string_lossy(scope);
+    // The reason is guest text bound for the node log.
+    if let Some((cut, _)) = reason.char_indices().nth(MAX_CONDEMN_REASON_CHARS) {
+        reason.truncate(cut);
+    }
+    let condemned = crate::pool::current_slot().is_some_and(|slot| slot.condemn(&reason));
+    rv.set(v8::Boolean::new(scope, condemned).into());
+}
+
+const MAX_CONDEMN_REASON_CHARS: usize = 256;
+
 fn op_heap_limit_excessively_exceeded(
     scope: &mut v8::PinScope,
     _args: v8::FunctionCallbackArguments,

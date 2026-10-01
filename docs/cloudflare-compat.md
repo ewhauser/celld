@@ -39,7 +39,7 @@ from Cloudflare.
 | Hyperdrive | **No** |
 | Browser Rendering | **No** |
 | Email Workers | **No** |
-| Python Workers | **No** |
+| [Python Workers](services/workers.md#python-workers) | **Partial** — `fetch` handlers on the Pyodide 0.28 runtime line |
 
 ## Runtime APIs
 

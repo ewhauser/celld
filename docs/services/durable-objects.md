@@ -68,8 +68,9 @@ the cell writes only into a superseded prefix. The
 
 A Worker holds its stub on whichever node served the request. celld resolves
 the owner of the cell and forwards the call to that node, so the object code
-runs on the owner and nowhere else. Inside the cell, one event runs at a time:
-a `fetch`, an RPC method, an `alarm()`, or a WebSocket message. celld also
+runs on the owner and nowhere else. Inside the cell, one synchronous turn runs
+at a time. An event that awaits can overlap another event unless
+`blockConcurrencyWhile()` closes the input gate. celld also
 holds a response until a durability proof covers every write that the response
 can reveal, which is the behavior Cloudflare calls the
 [output gate](https://developers.cloudflare.com/durable-objects/best-practices/rules-of-durable-objects/).
@@ -79,6 +80,11 @@ holds a WebSocket frame, and it holds each frame only for its own proof.
 Therefore a `webSocketMessage()` handler that sends a frame and then awaits
 delivers that frame while it still runs, and an application can stream an
 answer through one handler.
+On one socket, celld starts the message handlers in arrival order, but it does
+not wait for a handler to finish before starting the next handler. Therefore
+an incoming message can cancel work that an earlier handler awaits.
+A hibernatable socket delivers the frames in send order across WebSocket
+handlers and RPC methods, even when the output gate delays an earlier frame.
 
 ![Two Workers on different nodes address the name room-7, the owner record in the fleet bucket names one owner node, celld forwards both calls to that node, and the cell replicates through a follower node into an epoch-fenced bucket prefix](durable-objects-flow.svg)
 
@@ -108,6 +114,13 @@ its own writes, therefore the enclosing transaction can continue and commit.
 Read the
 [storage documentation](https://developers.cloudflare.com/durable-objects/best-practices/access-durable-objects-storage/)
 for the method signatures.
+
+The synchronous `ctx.storage.kv.list()` iterator reads one entry per step and
+releases its read statement before the step returns. An unfinished iterator
+therefore does not block later writes after a replication checkpoint. Each
+step resumes after the last returned key in the selected direction. A later
+step can observe a change to an entry that the iterator has not returned.
+A new call to `kv.list()` invalidates the previous iterator for that object.
 
 The durability of that database comes from the fleet, not from a managed
 service. celld captures each write as an LTX segment and replicates the segment

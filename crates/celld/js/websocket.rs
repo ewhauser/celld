@@ -12,7 +12,7 @@ pub use crate::ws_registry::*;
 
 #[derive(Default)]
 pub(super) struct WsCapture {
-    frames: Vec<(u64, WsOut)>,
+    frames: WsBatch,
     /// The handler whose outcome authorizes an incremental flush. This is
     /// installed after the synchronous dispatch returns its promise; until
     /// then no turn-end flush can run.
@@ -93,7 +93,7 @@ pub(super) fn ws_capture_set_promise(context: &IoContext, promise: v8::Global<v8
         .promise = Some(promise);
 }
 
-pub(super) fn ws_capture_take() -> Vec<(u64, WsOut)> {
+pub(super) fn ws_capture_take() -> WsBatch {
     current_context()
         .ws_capture
         .lock()
@@ -104,7 +104,9 @@ pub(super) fn ws_capture_take() -> Vec<(u64, WsOut)> {
 }
 
 pub(super) fn ws_capture_discard(context: &IoContext) {
-    context.ws_capture.lock().unwrap().pop();
+    if let Some(capture) = context.ws_capture.lock().unwrap().pop() {
+        capture.frames.discard();
+    }
 }
 
 /// Release what a running `webSocketMessage` handler has sent so far.
@@ -144,7 +146,7 @@ fn ws_capture_flush(tc: &mut v8::PinScope, context: &IoContext) {
             // `settle`. Drop its frames now instead of publishing output
             // from a failed dispatch.
             v8::PromiseState::Rejected => {
-                capture.last_mut().unwrap().frames.clear();
+                std::mem::take(&mut capture.last_mut().unwrap().frames).discard();
                 return;
             }
         }
@@ -157,17 +159,12 @@ fn ws_capture_flush(tc: &mut v8::PinScope, context: &IoContext) {
     // Every captured frame belongs to a hibernatable socket, because that is
     // what `ws_emit` captures, so one channel names the whole batch.
     let gate = egress_gate_request(context, celld_logic::Channel::WsHibernatable);
-    let flush = ws_flush_state();
-    let registry = ws_registry();
-    let Some(flushing) = flush.emit_or_defer(&registry, frames, gate.is_gated()) else {
-        return;
-    };
     // On the HOST runtime, for the reason `ws_emit` spawns there: this flush
     // must outlive the turn that produced the frames, and the ticket it waits
     // for resolves with no isolate involvement.
     asyncrt::op_handle().spawn(async move {
         let held = await_egress_gate(gate).await;
-        flushing.release(&registry, held);
+        frames.release(held);
     });
 }
 
@@ -190,7 +187,7 @@ pub(super) fn ws_capture_flush_touched(tc: &mut v8::PinScope, runtime_state: &Ac
 fn ws_emit(context: &Arc<IoContext>, id: u64, out: WsOut) {
     let mut capture = context.ws_capture.lock().unwrap();
     if !capture.is_empty() && ws_channel(id) == celld_logic::Channel::WsHibernatable {
-        capture.last_mut().unwrap().frames.push((id, out));
+        capture.last_mut().unwrap().frames.capture(id, out);
         let runtime_state = context
             .continuation
             .as_ref()

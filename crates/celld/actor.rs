@@ -3,7 +3,7 @@
 //! The serial lifecycle executor and its shell-side request drivers.
 
 use crate::cell_host::CellHost;
-use crate::js::{HttpResponse, WsOut};
+use crate::js::{HttpResponse, WsBatch};
 use crate::machine::{
     ownership_on_evict_from_environment, pressure_config_from_environment,
     random_process_generation, DEFAULT_MAX_OUTBOUND_WEBSOCKETS,
@@ -27,9 +27,12 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use tokio::sync::{mpsc, oneshot, watch, Mutex};
 
+mod effects;
 mod local_request;
 mod production;
 pub use celld_logic::{EvictCancellation, EvictError, EvictFailure, EvictRefusal, EvictSuccess};
+pub use effects::StepOutput;
+pub(crate) use effects::{drain_step_output, LeaseRequest, Timers};
 pub use local_request::{LocalRequest, LocalRequestCompletion, LocalRequestFailure};
 
 type EvictionReply = oneshot::Sender<Result<EvictSuccess, EvictError>>;
@@ -392,7 +395,7 @@ pub enum Message {
     ExportTicket(crate::export_live::TicketAsk),
     /// A periodic resource sample. The measuring is the shell's job; every
     /// decision that follows belongs to the core.
-    SampleLoad,
+    SampleLoad(crate::host_services::HostMetricsSample),
     /// The log tier changed the folded log object the next lease write
     /// must carry (lease-fold): renew now so the change becomes durable.
     NudgeNodeLease,
@@ -477,7 +480,7 @@ pub enum Message {
     WsOutput {
         request: u64,
         scope: String,
-        frames: Vec<(u64, WsOut)>,
+        frames: WsBatch,
         write_position: Option<u64>,
         observed: Option<u64>,
         reply: oneshot::Sender<()>,
@@ -1216,60 +1219,6 @@ pub enum ActorInput {
     TimerFired(Timer),
 }
 
-/// Futures and timer arms emitted by one Actor transition.
-#[derive(Default)]
-pub struct StepOutput {
-    pub effects: Vec<EffectFuture>,
-    pub timers: Vec<TimerArm>,
-}
-
-/// Every armed arm in deadline order. A Durable Object may arm an alarm years
-/// ahead, past the horizon of tokio-util's `DelayQueue`, which then panics.
-#[derive(Default)]
-struct Timers {
-    slots: TimerSlots<(u64, u64)>,
-    by_deadline: BTreeMap<(u64, u64), TimerArm>,
-}
-
-impl Timers {
-    fn install(&mut self, arm: TimerArm) {
-        let key = (arm.at_mono_ms, arm.ordinal);
-        if let Some(displaced) = self.slots.install(&arm, key) {
-            self.by_deadline.remove(&displaced);
-        }
-        self.by_deadline.insert(key, arm);
-    }
-
-    fn next_deadline_ms(&self) -> Option<u64> {
-        self.by_deadline
-            .keys()
-            .next()
-            .map(|(at_mono_ms, _)| *at_mono_ms)
-    }
-
-    fn pop_due(&mut self, now_mono_ms: u64) -> Option<Timer> {
-        let due = self
-            .by_deadline
-            .first_entry()
-            .filter(|entry| entry.key().0 <= now_mono_ms)?;
-        let arm = due.remove();
-        self.slots.fire(&arm.slot, arm.ordinal).map(|_| arm.timer)
-    }
-}
-
-fn drain_step_output(
-    out: &mut StepOutput,
-    effects: &mut FuturesUnordered<EffectFuture>,
-    timers: &mut Timers,
-) {
-    for effect in out.effects.drain(..) {
-        effects.push(effect);
-    }
-    for arm in out.timers.drain(..) {
-        timers.install(arm);
-    }
-}
-
 /// The largest request body that a node accepts unless the operator lowers
 /// the limit. The value keeps the large git-pack ingress use case supported.
 pub const DEFAULT_MAX_REQUEST_BODY_BYTES: usize = 1 << 30;
@@ -1543,6 +1492,13 @@ impl AppHandle {
         result
     }
 
+    pub(crate) fn execution_host(&self) -> Option<CellHost> {
+        let host = self.runtime.clone().map(CellHost::Engine);
+        #[cfg(all(test, celld_internal_tests))]
+        let host = host.or_else(|| self.scripted_activity_host.clone().map(CellHost::Scripted));
+        host
+    }
+
     pub fn activity(&self, request: u64, cell: String) -> ActivityGuard {
         self.activity_for(request, cell, None, "local")
     }
@@ -1555,9 +1511,7 @@ impl AppHandle {
         origin: &'static str,
     ) -> ActivityGuard {
         let cancellation = self.drain_pins.begin(request, request_id, origin);
-        let host = self.runtime.clone().map(CellHost::Engine);
-        #[cfg(all(test, celld_internal_tests))]
-        let host = host.or_else(|| self.scripted_activity_host.clone().map(CellHost::Scripted));
+        let host = self.execution_host();
         ActivityGuard {
             tx: self.tx.clone(),
             request,
@@ -1655,7 +1609,7 @@ impl AppHandle {
         &self,
         request: u64,
         scope: String,
-        frames: Vec<(u64, WsOut)>,
+        frames: impl Into<WsBatch>,
         write_position: Option<u64>,
         observed: Option<u64>,
     ) -> Result<(), ActorStopped> {
@@ -1664,7 +1618,7 @@ impl AppHandle {
             .send(Message::WsOutput {
                 request,
                 scope,
-                frames,
+                frames: frames.into(),
                 write_position,
                 observed,
                 reply,
@@ -1871,7 +1825,7 @@ struct WsGate {
 struct WsBarrier {
     request: u64,
     settled: Option<bool>,
-    frames: Vec<(u64, WsOut)>,
+    frames: WsBatch,
 }
 
 /// The actor stopped before it answered: its channel is closed, and nothing
@@ -2004,9 +1958,8 @@ pub struct Actor {
     /// Debug builds keep it. Release builds rely on the deterministic model,
     /// because this full-table scan is too expensive for production traffic.
     validate_invariants: bool,
-    /// The counters peers rank this node by, when there is a bucket to
-    /// publish them to.
-    live_load: Option<Arc<crate::ownership_store::LiveLoad>>,
+    /// Keep a sample for `/state` even without a bucket to publish it to.
+    live_load: Arc<crate::ownership_store::LiveLoad>,
     /// The shed reason last reported to the log, so a latch that holds for
     /// minutes is reported once rather than on every sample.
     logged_shed_reason: Option<&'static str>,
@@ -2076,7 +2029,31 @@ async fn handoff_candidates(
         directory.sampled_at_mono_ms = Some(now_mono_ms);
     }
     let peers = directory.peers.clone();
-    let mut ranked = rank_handoff_candidates(peers, source, cell, now_ms());
+    let current_ms = now_ms();
+    let mut ranked = rank_handoff_candidates(peers, source, cell, current_ms);
+    // Several cells share this directory between refreshes. Emit one peer
+    // list per scan, so a blocked drain does not repeat it for every cell.
+    if stale && ranked.is_empty() && tracing::enabled!(tracing::Level::DEBUG) {
+        tracing::debug!(
+            event = "handoff_no_candidate",
+            %source,
+            %cell,
+            excluded_peers = %serde_json::Value::Array(directory.peers.iter().map(|peer| {
+                serde_json::json!({
+                    "node": peer.node,
+                    "excluded_by": handoff_exclusions(peer, source, current_ms).collect::<Vec<_>>(),
+                    "pressured": peer.pressured,
+                    "memory_headroom": peer.memory_headroom,
+                    "sampled_ms": peer.sampled_ms,
+                    "addr": peer.addr,
+                    "protocol": peer.peer_protocol,
+                    "paced_handoff": peer.paced_handoff,
+                    "expires_ms": peer.expires_ms,
+                })
+            }).collect()),
+            "no peer can adopt a released cell"
+        );
+    }
     if rebalance {
         // A drain takes any peer with room. A balancing move takes only a
         // peer below its ownership target, least dense first; a fuller peer
@@ -2104,6 +2081,33 @@ async fn handoff_candidates(
     Ok(ranked)
 }
 
+/// Names every reason a peer cannot adopt a handoff. Candidate selection and
+/// the no-candidate diagnostic both use it, so a logged reason cannot drift
+/// from the rule that actually excluded the peer.
+fn handoff_exclusions(
+    peer: &CapacityPeer,
+    source: &str,
+    current_ms: u64,
+) -> impl Iterator<Item = &'static str> {
+    [
+        (peer.node == source, "source"),
+        (peer.expires_ms <= current_ms, "expiry"),
+        (peer.addr.is_empty(), "addr"),
+        (
+            peer.peer_protocol != peer_auth::PROTOCOL_VERSION,
+            "protocol",
+        ),
+        (peer.sampled_ms == 0, "sampled_ms"),
+        (
+            !peer.reports_adoption_capacity(),
+            "reports_adoption_capacity",
+        ),
+        (!peer.paced_handoff, "paced_handoff"),
+    ]
+    .into_iter()
+    .filter_map(|(excluded, reason)| excluded.then_some(reason))
+}
+
 fn rank_handoff_candidates(
     peers: Vec<CapacityPeer>,
     source: &str,
@@ -2113,13 +2117,9 @@ fn rank_handoff_candidates(
     let mut peers: Vec<_> = peers
         .into_iter()
         .filter(|peer| {
-            peer.node != source
-                && peer.expires_ms > current_ms
-                && !peer.addr.is_empty()
-                && peer.peer_protocol == peer_auth::PROTOCOL_VERSION
-                && peer.sampled_ms != 0
-                && peer.reports_adoption_capacity()
-                && peer.paced_handoff
+            handoff_exclusions(peer, source, current_ms)
+                .next()
+                .is_none()
         })
         .collect();
     peers.sort_by_key(|peer| {
@@ -2427,13 +2427,14 @@ impl Actor {
             })))
         };
         let live_load = match &ownership {
-            Ownership::Bucket(bucket) => Some(bucket.live()),
-            Ownership::Memory(_) => None,
+            Ownership::Bucket(bucket) => bucket.live(),
+            Ownership::Memory(_) => Arc::new(crate::ownership_store::LiveLoad::default()),
         };
-        if let Some(live) = &live_load {
-            live.placement_weight
-                .store(limits.placement_weight.max(1), Ordering::Relaxed);
-            crate::ownership_store::set_node_load(live.clone());
+        live_load
+            .placement_weight
+            .store(limits.placement_weight.max(1), Ordering::Relaxed);
+        if matches!(&ownership, Ownership::Bucket(_)) {
+            crate::ownership_store::set_node_load(live_load.clone());
         }
         let process_generation = match &ownership {
             Ownership::Bucket(bucket) => bucket
@@ -2533,10 +2534,26 @@ impl Actor {
         })
     }
 
+    /// Stores a host sample for `/state` and the node lease.
+    pub fn store_load_sample(&self, sample: crate::host_services::HostMetricsSample) {
+        // Bucket mode shares this Arc with bucket.live(), so this also seeds the lease.
+        self.live_load.store_sample(sample);
+    }
+
     /// Emits the exactly-once pre-loop node-lease transition.
     pub fn start(&mut self, out: &mut StepOutput) {
         assert!(!self.started, "Actor::start was called more than once");
         self.started = true;
+        // A later sample does not rewrite the lease. Fold a sample before the
+        // first CAS can publish defaults, which otherwise reject healthy
+        // handoff targets or hide pressure until a renewal. Production seeds
+        // one off the core before the core thread starts; the fallback serves
+        // deterministic worlds, whose scripted services read no host files.
+        let metrics = self
+            .live_load
+            .stored_sample()
+            .unwrap_or_else(|| crate::asyncrt::services().sample_metrics());
+        self.sample_load(metrics, out);
         self.drive(
             Event::StartNodeLease {
                 now_ms: now_ms(),
@@ -2545,6 +2562,89 @@ impl Actor {
             },
             out,
         );
+    }
+
+    /// Folds one load sample into the core and publishes it to the lease
+    /// adapter. `start` calls it before the first lease; the periodic sampler
+    /// message calls it afterwards. The caller supplies the sample, so the
+    /// core itself reads no host files.
+    fn sample_load(
+        &mut self,
+        metrics: crate::host_services::HostMetricsSample,
+        out: &mut StepOutput,
+    ) {
+        // Counted once: it is a walk of every cell, and the latch and
+        // the number peers rank this node by must agree anyway.
+        let occupied = self.state.occupied();
+        let load = celld_logic::pressure::Load {
+            resident_cells: occupied,
+            rss_bytes: metrics.rss_bytes,
+            in_use_bytes: metrics.in_use_bytes,
+            cgroup_working_set_bytes: metrics.cgroup_working_set_bytes,
+            cgroup_current_bytes: metrics.cgroup_current_bytes,
+            // Containers run in sibling cgroups, so the sample above
+            // omits their memory; add what they reserve on this node.
+            container_reserved_bytes: crate::container::reserved_memory_bytes(),
+        };
+        let now_mono_ms = crate::asyncrt::mono_ms();
+        self.drive(Event::LoadSampled { load, now_mono_ms }, out);
+        // Report a change of shed reason once. `rss-hard` retains its
+        // established name, but in a Linux cgroup it says
+        // `memory.current` crossed the absolute cap.
+        let reason = self.state.shed_reason();
+        if reason != self.logged_shed_reason {
+            self.logged_shed_reason = reason;
+            // How many V8 heaps the resident cells hold open. Most of
+            // what a cell costs is its heap, and a heap comes back
+            // only when its last cell goes, so cells alone do not say
+            // how much a walk down can still return.
+            let heaps = self
+                .state
+                .resident_isolates()
+                .into_iter()
+                .collect::<BTreeSet<_>>()
+                .len();
+            match reason {
+                Some(celld_logic::pressure::SHED_RSS_HARD) => tracing::warn!(
+                    rss_bytes = load.rss_bytes,
+                    in_use_bytes = load.in_use_bytes,
+                    cgroup_working_set_bytes = load.cgroup_working_set_bytes,
+                    cgroup_current_bytes = load.cgroup_current_bytes,
+                    heaps,
+                    "shedding on the absolute memory cap"
+                ),
+                Some(reason) => tracing::info!(
+                    reason,
+                    rss_bytes = load.rss_bytes,
+                    in_use_bytes = load.in_use_bytes,
+                    cgroup_working_set_bytes = load.cgroup_working_set_bytes,
+                    cgroup_current_bytes = load.cgroup_current_bytes,
+                    heaps,
+                    "shedding"
+                ),
+                None => tracing::info!("no longer shedding"),
+            }
+        }
+        // Republish what peers rank this node by. The same numbers the
+        // latch just saw: a node that reports last tick's residency
+        // attracts work it has already refused.
+        let live = &self.live_load;
+        live.owned_cells
+            .store(self.state.owned_cells(), Ordering::Relaxed);
+        live.ownership_confirmed
+            .store(self.state.ownership_confirmed(), Ordering::Relaxed);
+        live.resident_cells.store(occupied, Ordering::Relaxed);
+        live.host_websockets
+            .store(self.state.host_websockets(), Ordering::Relaxed);
+        live.pressured
+            .store(self.state.shedding(), Ordering::Relaxed);
+        live.memory_headroom
+            .store(self.state.memory_headroom(), Ordering::Relaxed);
+        live.restoring
+            .store(self.state.activation_backlog() as u64, Ordering::Relaxed);
+        live.draining
+            .store(self.state.draining(), Ordering::Relaxed);
+        live.store_sample(metrics);
     }
 
     /// Handles exactly one ready mailbox item, completion, or timer.
@@ -2700,84 +2800,8 @@ impl Actor {
                 };
                 let _ = reply.send(epoch);
             }
-            Message::SampleLoad if self.preserving => {}
-            Message::SampleLoad => {
-                // Counted once: it is a walk of every cell, and the latch and
-                // the number peers rank this node by must agree anyway.
-                let occupied = self.state.occupied();
-                let metrics = crate::asyncrt::services().sample_metrics();
-                let cpu = metrics.cpu_percent_x100;
-                let load = celld_logic::pressure::Load {
-                    resident_cells: occupied,
-                    rss_bytes: metrics.rss_bytes,
-                    in_use_bytes: metrics.in_use_bytes,
-                    cgroup_working_set_bytes: metrics.cgroup_working_set_bytes,
-                    cgroup_current_bytes: metrics.cgroup_current_bytes,
-                    // Containers run in sibling cgroups, so the sample above
-                    // omits their memory; add what they reserve on this node.
-                    container_reserved_bytes: crate::container::reserved_memory_bytes(),
-                };
-                let now_mono_ms = crate::asyncrt::mono_ms();
-                self.drive(Event::LoadSampled { load, now_mono_ms }, out);
-                // Report a change of shed reason once. `rss-hard` retains its
-                // established name, but in a Linux cgroup it says
-                // `memory.current` crossed the absolute cap.
-                let reason = self.state.shed_reason();
-                if reason != self.logged_shed_reason {
-                    self.logged_shed_reason = reason;
-                    // How many V8 heaps the resident cells hold open. Most of
-                    // what a cell costs is its heap, and a heap comes back
-                    // only when its last cell goes, so cells alone do not say
-                    // how much a walk down can still return.
-                    let heaps = self
-                        .state
-                        .resident_isolates()
-                        .into_iter()
-                        .collect::<BTreeSet<_>>()
-                        .len();
-                    match reason {
-                        Some(celld_logic::pressure::SHED_RSS_HARD) => tracing::warn!(
-                            rss_bytes = load.rss_bytes,
-                            in_use_bytes = load.in_use_bytes,
-                            cgroup_working_set_bytes = load.cgroup_working_set_bytes,
-                            cgroup_current_bytes = load.cgroup_current_bytes,
-                            heaps,
-                            "shedding on the absolute memory cap"
-                        ),
-                        Some(reason) => tracing::info!(
-                            reason,
-                            rss_bytes = load.rss_bytes,
-                            in_use_bytes = load.in_use_bytes,
-                            cgroup_working_set_bytes = load.cgroup_working_set_bytes,
-                            cgroup_current_bytes = load.cgroup_current_bytes,
-                            heaps,
-                            "shedding"
-                        ),
-                        None => tracing::info!("no longer shedding"),
-                    }
-                }
-                // Republish what peers rank this node by. The same numbers the
-                // latch just saw: a node that reports last tick's residency
-                // attracts work it has already refused.
-                if let Some(live) = &self.live_load {
-                    live.owned_cells
-                        .store(self.state.owned_cells(), Ordering::Relaxed);
-                    live.ownership_confirmed
-                        .store(self.state.ownership_confirmed(), Ordering::Relaxed);
-                    live.resident_cells.store(occupied, Ordering::Relaxed);
-                    live.host_websockets
-                        .store(self.state.host_websockets(), Ordering::Relaxed);
-                    live.pressured
-                        .store(self.state.shedding(), Ordering::Relaxed);
-                    live.memory_headroom
-                        .store(self.state.memory_headroom(), Ordering::Relaxed);
-                    live.cpu_percent_x100.store(cpu, Ordering::Relaxed);
-                    live.restoring
-                        .store(self.state.activation_backlog() as u64, Ordering::Relaxed);
-                    live.draining
-                        .store(self.state.draining(), Ordering::Relaxed);
-                }
-            }
+            Message::SampleLoad(metrics) if self.preserving => self.live_load.store_sample(metrics),
+            Message::SampleLoad(metrics) => self.sample_load(metrics, out),
             Message::Output {
                 request,
                 ticket,
@@ -3043,9 +3067,14 @@ impl Actor {
             }
         };
         if broke {
-            self.ws_gates.remove(&scope);
+            // Close before the barriers drop. A captured batch that drops
+            // unreleased closes its sockets with its own reason, and a socket
+            // writer stops after the first close, so dropping the gate first
+            // would replace this reason on every socket that had a frame held.
+            let gate = self.ws_gates.remove(&scope);
             self.ws_gated.retain(|_, s| *s != scope);
             crate::js::ws_close_scope(&scope, 1011, "durability unproven");
+            drop(gate);
             return;
         }
         for frames in flush {
@@ -3170,17 +3199,13 @@ impl Actor {
                 out.timers.push(arm);
             }
             Effect::ReadSelfNodeLease { op } => {
-                let ownership = self.ownership.clone();
-                let node = self.state.node().to_string();
-                out.effects.push(Box::pin(async move {
-                    let result = ownership.read_self_node_lease(&node).await;
-                    CompletedEffect::plain(Event::SelfNodeLeaseRead {
+                out.lease(
+                    LeaseRequest::ReadSelf {
                         op,
-                        now_ms: now_ms(),
-                        now_mono_ms: crate::asyncrt::mono_ms(),
-                        result,
-                    })
-                }));
+                        node: self.state.node().to_string(),
+                    },
+                    &self.ownership,
+                );
             }
             Effect::CasNodeLease {
                 op,
@@ -3188,115 +3213,19 @@ impl Actor {
                 record,
                 authority_expires_ms,
             } => {
-                let ownership = self.ownership.clone();
-                out.effects.push(Box::pin(async move {
-                    let attempt_started_mono_ms = crate::asyncrt::mono_ms();
-                    let node = record.node.clone();
-                    let candidate_expires_ms = record.expires_ms;
-                    // Logged before the CAS: with only the completion line, a
-                    // renewal hung on a storage tail is indistinguishable from
-                    // a timer that never fired (the n6 fence, 2026-08-11).
-                    tracing::info!(
-                        event = "node_lease_attempt_started",
-                        %node,
-                        attempt = if authority_expires_ms.is_some() {
-                            "renew"
-                        } else {
-                            "acquire"
-                        },
-                        prior_authority_headroom_ms = authority_expires_ms
-                            .map(|expires_ms| expires_ms.saturating_sub(now_ms()))
-                            .unwrap_or(0),
-                        "node lease attempt started"
-                    );
-                    // A renewal must return while proven authority remains,
-                    // because only a returned attempt lets the ambiguity
-                    // read-back run before the watchdog. The 10:15Z R2
-                    // brownout fenced 9 nodes whose sole hung attempt was
-                    // still inside the transport's 15 s timeout when the
-                    // 10 s TTL expired. Bound the attempt to half the
-                    // remaining authority (capped, floored) and map timeout
-                    // to Ambiguous — the same conservative outcome a lost
-                    // response already produces, so safety is unchanged.
-                    // The stamp survives a timed-out attempt: the backend
-                    // writes it through the out-parameter synchronously at
-                    // serialization, before the transport await, so even a
-                    // dropped future has reported what the possibly-landed
-                    // body carried.
-                    let mut stamped_log_state = None;
-                    let result = match authority_expires_ms {
-                        Some(expires_ms) => {
-                            let remaining = expires_ms.saturating_sub(now_ms());
-                            let bound =
-                                std::time::Duration::from_millis((remaining / 2).clamp(250, 2_500));
-                            match crate::asyncrt::timeout(
-                                bound,
-                                ownership.cas_node_lease(guard, record, &mut stamped_log_state),
-                            )
-                            .await
-                            {
-                                Ok(result) => result,
-                                Err(_) => Err(Failure::Ambiguous),
-                            }
-                        }
-                        None => {
-                            ownership
-                                .cas_node_lease(guard, record, &mut stamped_log_state)
-                                .await
-                        }
-                    };
-                    let completed_ms = now_ms();
-                    let elapsed_ms =
-                        crate::asyncrt::mono_ms().saturating_sub(attempt_started_mono_ms);
-                    let prior_authority_headroom_ms = authority_expires_ms
-                        .map(|expires_ms| expires_ms.saturating_sub(completed_ms))
-                        .unwrap_or(0);
-                    let candidate_headroom_ms = candidate_expires_ms.saturating_sub(completed_ms);
-                    let attempt = if authority_expires_ms.is_some() {
-                        "renew"
-                    } else {
-                        "acquire"
-                    };
-                    let outcome = match &result {
-                        Ok(LeaseCasOutcome::Applied { .. }) => "applied",
-                        Ok(LeaseCasOutcome::Rejected) => "rejected",
-                        Err(Failure::Ambiguous) => "ambiguous",
-                        Err(Failure::Definite) => "definite_failure",
-                    };
-                    if matches!(&result, Ok(LeaseCasOutcome::Applied { .. })) {
-                        tracing::info!(
-                            event = "node_lease_attempt",
-                            %node,
-                            attempt,
-                            outcome,
-                            elapsed_ms,
-                            prior_authority_headroom_ms,
-                            candidate_headroom_ms,
-                            "node lease attempt completed"
-                        );
-                    } else {
-                        tracing::warn!(
-                            event = "node_lease_attempt",
-                            %node,
-                            attempt,
-                            outcome,
-                            elapsed_ms,
-                            prior_authority_headroom_ms,
-                            candidate_headroom_ms,
-                            "node lease attempt did not apply"
-                        );
-                    }
-                    CompletedEffect::plain(Event::NodeLeaseCasCompleted {
+                out.lease(
+                    LeaseRequest::Cas {
                         op,
-                        now_mono_ms: crate::asyncrt::mono_ms(),
-                        result,
-                        stamped_log_state,
-                    })
-                }));
+                        guard,
+                        record,
+                        authority_expires_ms,
+                    },
+                    &self.ownership,
+                );
             }
             Effect::ReadLocalCells => {
                 let runtime = self.host.clone();
-                out.effects.push(Box::pin(async move {
+                out.spawn_scoped(async move {
                     let result = match runtime {
                         // The host runtime's blocking pool, not a second
                         // pool on the core's current-thread runtime.
@@ -3311,13 +3240,13 @@ impl Actor {
                         None => Err(Failure::Definite),
                     };
                     CompletedEffect::plain(Event::LocalCellsRead { result })
-                }));
+                });
             }
             Effect::ReadOwner { op, cell } => {
                 self.route_effect_started(&cell);
                 let ownership = self.ownership.clone();
                 let timing_cell = cell.clone();
-                out.effects.push(Box::pin(async move {
+                out.spawn_scoped(async move {
                     let started = crate::asyncrt::mono_ms();
                     let result = ownership.read_owner(&cell).await;
                     CompletedEffect::timed(
@@ -3330,13 +3259,13 @@ impl Actor {
                         RouteStage::OwnershipRead,
                         started,
                     )
-                }));
+                });
             }
             Effect::ReadNodeLease { op, cell, owner } => {
                 self.route_effect_started(&cell);
                 let ownership = self.ownership.clone();
                 let timing_cell = cell;
-                out.effects.push(Box::pin(async move {
+                out.spawn_scoped(async move {
                     let started = crate::asyncrt::mono_ms();
                     let result = ownership.read_node_lease(&owner).await;
                     CompletedEffect::timed(
@@ -3349,17 +3278,16 @@ impl Actor {
                         RouteStage::NodeLeaseLookup,
                         started,
                     )
-                }));
+                });
             }
             Effect::RecoverNodeLog { op, cell, owner } => {
                 self.route_effect_started(&cell);
                 let interlock = self.node_log.lock().unwrap().clone();
                 let timing_cell = cell.clone();
                 // Recovery decodes each witness's tail and folds the dead
-                // node's frames into bundles between its awaits. It runs on
-                // the host runtime for the same reason a restore does: the
-                // core thread polls `out` and owns the node lease timer.
-                let task = crate::asyncrt::spawn(async move {
+                // node's frames into bundles between its awaits. The drain
+                // keeps it off the core, which owns the node lease timer.
+                out.spawn_scoped(async move {
                     let started = crate::asyncrt::mono_ms();
                     let result = match interlock {
                         // No log tier on this node (no bucket): nothing to
@@ -3382,15 +3310,12 @@ impl Actor {
                         started,
                     )
                 });
-                out.effects.push(Box::pin(async move {
-                    task.await.expect("node-log recovery task panicked")
-                }));
             }
             Effect::ReadCapacityPeers { op, cell } => {
                 self.route_effect_started(&cell);
                 let ownership = self.ownership.clone();
                 let timing_cell = cell;
-                out.effects.push(Box::pin(async move {
+                out.spawn_scoped(async move {
                     let started = crate::asyncrt::mono_ms();
                     // The shared sample, judged at the instant it was taken:
                     // its leases are copies that age while the nodes renew.
@@ -3404,7 +3329,7 @@ impl Actor {
                         RouteStage::CapacityLookup,
                         started,
                     )
-                }));
+                });
             }
             Effect::CasOwner {
                 op,
@@ -3421,7 +3346,7 @@ impl Actor {
                 }
                 let ownership = self.ownership.clone();
                 let timing_cell = cell.clone();
-                out.effects.push(Box::pin(async move {
+                out.spawn_scoped(async move {
                     let started = crate::asyncrt::mono_ms();
                     let result = ownership.cas_owner(&cell, guard, epoch).await;
                     CompletedEffect::timed(
@@ -3430,7 +3355,7 @@ impl Actor {
                         RouteStage::OwnershipAcquire,
                         started,
                     )
-                }));
+                });
             }
             Effect::ReconcileWakeEntry { cell, alarm } => {
                 self.schedule_wake_maintenance(cell, alarm);
@@ -3447,10 +3372,10 @@ impl Actor {
                     );
                 }
                 let ownership = self.ownership.clone();
-                out.effects.push(Box::pin(async move {
+                out.spawn_scoped(async move {
                     let result = ownership.release_owner(&cell, epoch).await;
                     CompletedEffect::plain(Event::OwnerReleased { op, result })
-                }));
+                });
             }
             Effect::AdoptReleased {
                 op,
@@ -3484,7 +3409,7 @@ impl Actor {
                 // next request to claim.
                 let deadline =
                     rebalance.then(|| std::time::Duration::from_millis(self.operation_deadline_ms));
-                out.effects.push(Box::pin(async move {
+                out.spawn_scoped(async move {
                     let started_mono_ms = crate::asyncrt::mono_ms();
                     let request = HandoffRequest {
                         cell: cell.clone(),
@@ -3536,9 +3461,43 @@ impl Actor {
                                     Ok(HandoffAttempt::CurrentOwner(owner)) => {
                                         target = owner;
                                     }
-                                    Ok(HandoffAttempt::Accepted(_))
-                                    | Ok(HandoffAttempt::Refused)
-                                    | Err(_) => break,
+                                    Ok(HandoffAttempt::Accepted(adopted)) => {
+                                        tracing::debug!(
+                                            event = "cell_handoff_stale_epoch",
+                                            %cell,
+                                            released_epoch,
+                                            successor = %adopted.node,
+                                            successor_epoch = adopted.epoch,
+                                            attempts,
+                                            "successor acknowledged an obsolete ownership epoch"
+                                        );
+                                        break;
+                                    }
+                                    Ok(HandoffAttempt::Refused) => {
+                                        tracing::debug!(
+                                            event = "cell_handoff_refused",
+                                            %cell,
+                                            released_epoch,
+                                            successor = %target.node,
+                                            successor_addr = %target.addr,
+                                            attempts,
+                                            "successor refused a released cell"
+                                        );
+                                        break;
+                                    }
+                                    Err(error) => {
+                                        tracing::debug!(
+                                            event = "cell_handoff_failed",
+                                            %cell,
+                                            released_epoch,
+                                            successor = %target.node,
+                                            successor_addr = %target.addr,
+                                            attempts,
+                                            %error,
+                                            "successor handoff request failed"
+                                        );
+                                        break;
+                                    }
                                 }
                             }
                         }
@@ -3567,7 +3526,7 @@ impl Actor {
                             }),
                         None => adoption.await,
                     }
-                }));
+                });
             }
             Effect::CancelCellActivity {
                 cell,
@@ -3627,7 +3586,7 @@ impl Actor {
                     match runtime.alarm_observation(&cell) {
                         Some((mut alarm, false)) if alarm.at_ms().is_some() => {
                             let at_ms = alarm.at_ms().unwrap();
-                            out.effects.push(Box::pin(async move {
+                            out.spawn_scoped(async move {
                                 let started = crate::asyncrt::mono_ms();
                                 // One refresh is not enough for an object
                                 // that re-arms its alarm continuously (the
@@ -3674,7 +3633,7 @@ impl Actor {
                                     now_ms: now_ms(),
                                     now_mono_ms: crate::asyncrt::mono_ms(),
                                 })
-                            }));
+                            });
                         }
                         Some((alarm, covered)) => immediate.push_back(Event::AlarmObserved {
                             cell,
@@ -3691,11 +3650,11 @@ impl Actor {
                 self.route_effect_started(&cell);
                 if let Some(runtime) = self.host.clone() {
                     let timing_cell = cell.clone();
-                    // A restore downloads, merges, and fsyncs a whole
-                    // database. Poll it on the host runtime: this future
-                    // lives in `out`, which the core thread drives,
-                    // and the core owns the node lease timer.
-                    let task = crate::asyncrt::spawn(async move {
+                    // A restore downloads, merges, and fsyncs a whole database.
+                    // The drain runs it off the core, which owns the node lease timer.
+                    // Choosing `spawn_detached` over `spawn_scoped` only keeps this
+                    // arm's seeded DST schedule stable (see `StepOutput::spawn_detached`).
+                    out.spawn_detached(async move {
                         let started = crate::asyncrt::mono_ms();
                         let result = runtime.restore_cell(&cell, &spec).await.map_err(|error| {
                             eprintln!("celld restore failed for {cell}: {error:#}");
@@ -3708,9 +3667,6 @@ impl Actor {
                             started,
                         )
                     });
-                    out.effects.push(Box::pin(async move {
-                        task.await.expect("restore task panicked")
-                    }));
                 } else {
                     self.record_effect_timing(EffectTiming {
                         cell,
@@ -3737,12 +3693,11 @@ impl Actor {
                     let timing_cell = cell.clone();
                     // A start opens the cell's SQLite inside its isolate's
                     // turn: the open, the schema DDL and the first WAL
-                    // writes are synchronous. Poll it on the host runtime:
-                    // this future lives in `out`, which the core thread
-                    // drives, and the core owns the node lease timer. Inline,
-                    // 300 fresh activations a second held the core long
-                    // enough that the lease lapsed and the node fenced.
-                    let task = crate::asyncrt::spawn(async move {
+                    // writes are synchronous. The drain keeps it off the core,
+                    // which owns the node lease timer. Inline, 300 fresh
+                    // activations a second held the core long enough that
+                    // the lease lapsed and the node fenced.
+                    out.spawn_scoped(async move {
                         let started = crate::asyncrt::mono_ms();
                         let placed = runtime
                             .start_cell(cell.clone(), epoch, fresh)
@@ -3768,9 +3723,6 @@ impl Actor {
                             started,
                         )
                     });
-                    out.effects.push(Box::pin(async move {
-                        task.await.expect("runtime start task panicked")
-                    }));
                 } else {
                     self.record_effect_timing(EffectTiming {
                         cell,
@@ -3850,13 +3802,11 @@ impl Actor {
                     );
                 }
                 if let Some(runtime) = self.host.clone() {
-                    // A hot cell can merge thousands of staged LTX rows while
-                    // this future is between awaits. Keep that synchronous
-                    // merge on the host runtime: `out` is polled by the
-                    // dedicated core thread, which also owns the node-lease
-                    // renew and fence timers. Polling the proof inline can
-                    // therefore turn a graceful handoff into a self-fence.
-                    let task = crate::asyncrt::spawn(async move {
+                    // This durability wait runs during a graceful handoff.
+                    // The drain keeps it off the core, which owns the lease timers.
+                    // `spawn_detached` only keeps the seeded DST schedule stable
+                    // (see `StepOutput::spawn_detached`).
+                    out.spawn_detached(async move {
                         let proved = runtime.ensure_durable(&cell, epoch, revocable).await;
                         let result = proved.map_err(|error| {
                             eprintln!(
@@ -3866,9 +3816,6 @@ impl Actor {
                         });
                         CompletedEffect::plain(Event::DurabilityChecked { op, result })
                     });
-                    out.effects.push(Box::pin(async move {
-                        task.await.expect("durability proof task panicked")
-                    }));
                 } else {
                     immediate.push_back(Event::DurabilityChecked { op, result: Ok(()) });
                 }
@@ -3883,7 +3830,7 @@ impl Actor {
                 position,
             } => {
                 if let Some(runtime) = self.host.clone() {
-                    out.effects.push(Box::pin(async move {
+                    out.spawn_scoped(async move {
                         // The replicator reports the position it actually
                         // proved durable and which mechanism proved it; the
                         // core acks only if the position covers this write,
@@ -3901,7 +3848,7 @@ impl Actor {
                                 }
                             };
                         CompletedEffect::plain(Event::DurableReached { op, result, source })
-                    }));
+                    });
                 } else {
                     immediate.push_back(Event::DurableReached {
                         op,
@@ -3921,7 +3868,7 @@ impl Actor {
                 // restores from a lineage that already contains the write.
                 let ownership = self.ownership.clone();
                 let node = self.state.node().to_string();
-                out.effects.push(Box::pin(async move {
+                out.spawn_scoped(async move {
                     let result = match ownership.read_owner(&cell).await {
                         Ok(Some(record))
                             if record.node.as_deref() == Some(node.as_str())
@@ -3940,7 +3887,7 @@ impl Actor {
                         Err(failure) => Err(failure),
                     };
                     CompletedEffect::plain(Event::OwnershipVerified { op, result })
-                }));
+                });
             }
             // The shell's only per-channel code: how the effect was held, and
             // how it is released. Every channel but one takes a durability
@@ -4007,7 +3954,7 @@ impl Actor {
                     self.published.remove(&cell);
                     if let Some(runtime) = self.host.clone() {
                         let released = cell.clone();
-                        let task = crate::asyncrt::spawn(report_stopped_when_released(
+                        out.spawn_detached(report_stopped_when_released(
                             op,
                             cell,
                             epoch,
@@ -4019,9 +3966,6 @@ impl Actor {
                                 async move { runtime.swap_out_cell(&cell, epoch).await }
                             },
                         ));
-                        out.effects.push(Box::pin(async move {
-                            task.await.expect("swap out task panicked")
-                        }));
                     } else {
                         immediate.push_back(Event::RuntimeStopped { op });
                     }
@@ -4057,25 +4001,21 @@ impl Actor {
                         StopCause::Swap => unreachable!("generation swaps return above"),
                     };
                     if evicting {
-                        if let Some(live) = &self.live_load {
-                            live.shed_cells.fetch_add(1, Ordering::Relaxed);
-                        }
+                        self.live_load.shed_cells.fetch_add(1, Ordering::Relaxed);
                     }
                     self.published.remove(&cell);
                     if let Some(runtime) = self.host.clone() {
-                        // A stop closes a whole database. It fsyncs the directory
-                        // and the file, then unlinks the local copy, and it does
-                        // all of that inside one synchronous call. Poll it on the
-                        // host runtime: this future lives in `out`, which the core
-                        // thread drives in the same select as the timer queue, and
-                        // the core owns the node lease timer. A slow fsync on the
-                        // core thread starves the lease renew and the lease fence,
-                        // and the node then fences itself.
+                        // The drain keeps the stop off the core and its lease timers.
+                        // `spawn_detached` only keeps the seeded DST schedule stable.
+                        // `remove_local` still runs a SQLite close and a rename or unlink
+                        // synchronously on a host runtime worker. Unlike `close_in_place`,
+                        // which uses `asyncrt::blocking`, this work is off the core but
+                        // not isolated from other runtime work.
                         let released = cell.clone();
                         let deadline_mono_ms = bounded.then(|| {
                             crate::asyncrt::mono_ms().saturating_add(self.operation_deadline_ms)
                         });
-                        let task = crate::asyncrt::spawn(report_stopped_when_released(
+                        out.spawn_detached(report_stopped_when_released(
                             op,
                             cell,
                             epoch,
@@ -4088,9 +4028,6 @@ impl Actor {
                                 async move { runtime.stop_cell(&cell, epoch, stop_mode).await }
                             },
                         ));
-                        out.effects.push(Box::pin(async move {
-                            task.await.expect("stop runtime task panicked")
-                        }));
                     } else {
                         immediate.push_back(Event::RuntimeStopped { op });
                     }
@@ -4117,7 +4054,7 @@ impl Actor {
                 scheduled_ms,
             } => {
                 if let Some(runtime) = self.host.clone() {
-                    out.effects.push(Box::pin(async move {
+                    out.spawn_scoped(async move {
                         // The shell reports the firing raw: the deadline that
                         // stands after the handler, whether a wake entry
                         // covers it, and the position of the consuming
@@ -4144,7 +4081,7 @@ impl Actor {
                             now_mono_ms: crate::asyncrt::mono_ms(),
                             result,
                         })
-                    }));
+                    });
                 } else {
                     immediate.push_back(Event::AlarmFinished {
                         op,
@@ -4262,18 +4199,22 @@ impl Actor {
     fn state_json(&self) -> String {
         // The lease sample reads counts the load tick last stored. Store them
         // now, so the sample below agrees with the state beside it.
-        let node_load = self.live_load.as_ref().map(|live| {
-            live.owned_cells
-                .store(self.state.owned_cells(), Ordering::Relaxed);
-            live.ownership_confirmed
-                .store(self.state.ownership_confirmed(), Ordering::Relaxed);
-            live.resident_cells
-                .store(self.state.occupied(), Ordering::Relaxed);
-            live.host_websockets
-                .store(self.state.host_websockets(), Ordering::Relaxed);
-            serde_json::to_string(&crate::ownership_store::process_load(live))
-                .expect("node load serializes")
-        });
+        let live = &self.live_load;
+        live.owned_cells
+            .store(self.state.owned_cells(), Ordering::Relaxed);
+        live.ownership_confirmed
+            .store(self.state.ownership_confirmed(), Ordering::Relaxed);
+        live.resident_cells
+            .store(self.state.occupied(), Ordering::Relaxed);
+        live.host_websockets
+            .store(self.state.host_websockets(), Ordering::Relaxed);
+        // Keep the raw RSS/in-use pair from one stored sample; a gap can reflect
+        // allocator retention. The allocator and libc statistics below are read
+        // live, so they can describe a later instant.
+        let sample = live.sample();
+        let load = crate::ownership_store::process_load(live);
+        let node_load = matches!(&self.ownership, Ownership::Bucket(_))
+            .then(|| serde_json::to_string(&load).expect("node load serializes"));
         let activity = self.state.presence_snapshot().activity;
         let residents = self
             .state
@@ -4288,9 +4229,6 @@ impl Actor {
             .map(|cell| format!("{cell:?}"))
             .collect::<Vec<_>>()
             .join(",");
-        // Both numbers: a gap between them is memory the allocator kept, which
-        // no eviction returns. One sample, so they cannot disagree.
-        let memory = crate::memory::sample();
         // `restoring` is a sum, and a node that refuses cells for a quarter of
         // an hour needs its parts. `activating` holds a permit and is doing
         // work; `activation_waiting` is queued behind the activation ceiling;
@@ -4326,18 +4264,18 @@ impl Actor {
             self.state
                 .shed_reason()
                 .map_or_else(|| "null".to_string(), |reason| format!("{reason:?}")),
-            memory.rss_bytes,
-            memory.in_use_bytes,
-            // The allocator's split of the two numbers above. `None`
-            // serializes as null, so a failed read leaves the rest intact.
+            sample.rss_bytes,
+            sample.in_use_bytes,
+            // Read allocator details live. `None` serializes as null, so a
+            // failed read leaves the rest intact.
             serde_json::to_string(&crate::memory::allocator_stats())
                 .unwrap_or_else(|_| "null".to_string()),
             serde_json::to_string(&crate::memory::libc_malloc_stats())
                 .unwrap_or_else(|_| "null".to_string()),
-            memory
+            sample
                 .cgroup_working_set_bytes
                 .map_or_else(|| "null".to_string(), |bytes| bytes.to_string()),
-            memory
+            sample
                 .cgroup_current_bytes
                 .map_or_else(|| "null".to_string(), |bytes| bytes.to_string()),
             node_load.unwrap_or_else(|| "null".to_string()),

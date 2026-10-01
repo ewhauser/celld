@@ -17,6 +17,7 @@ use rusqlite::{Connection, OptionalExtension};
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::ffi::{CStr, CString};
+use std::ops::Bound;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
@@ -339,10 +340,17 @@ struct ActiveAlarm {
     generation: Option<i64>,
 }
 
+// Keep a keyset position, not a stepped SQLite statement. LTX checkpoints
+// write their control tables through another connection; a retained read
+// snapshot then makes application writes fail with SQLITE_BUSY_SNAPSHOT.
+// Fetching one row per step also keeps abandoned iterators harmless without
+// materializing an unbounded list or depending on JavaScript iterator cleanup.
 struct SyncListCursor {
     scope: String,
-    database: *mut rusqlite::ffi::sqlite3,
-    statement: *mut rusqlite::ffi::sqlite3_stmt,
+    lower: Bound<String>,
+    end: Option<String>,
+    remaining: usize,
+    reverse: bool,
 }
 
 struct SqlCursor {
@@ -374,17 +382,6 @@ impl Drop for CachedSqlStatement {
             unsafe {
                 rusqlite::ffi::sqlite3_finalize(self.statement);
             }
-        }
-    }
-}
-
-impl Drop for SyncListCursor {
-    fn drop(&mut self) {
-        // SAFETY: the statement is prepared by sync_list_start(), stored in
-        // exactly one cursor, and finalized before its owning connection is
-        // removed from DBS.
-        unsafe {
-            rusqlite::ffi::sqlite3_finalize(self.statement);
         }
     }
 }
@@ -4321,39 +4318,28 @@ pub fn sync_list_start(
     reverse: bool,
 ) -> anyhow::Result<u64> {
     close_sync_list_cursors(scope);
-    let (query, parameters) = list_query(scope, begin, end, start_after, prefix, limit, reverse);
-    let query = CString::new(query)?;
-    let cursor = with(scope, |connection| -> anyhow::Result<SyncListCursor> {
-        // SAFETY: the connection remains resident in DBS for the cursor's
-        // lifetime. close() finalizes all of its cursors before removal.
-        unsafe {
-            let database = connection.handle();
-            let mut statement = std::ptr::null_mut();
-            let result = rusqlite::ffi::sqlite3_prepare_v2(
-                database,
-                query.as_ptr(),
-                -1,
-                &mut statement,
-                std::ptr::null_mut(),
-            );
-            if result != rusqlite::ffi::SQLITE_OK {
-                return Err(sqlite_failure(database, "prepare sync KV cursor"));
-            }
-            for (offset, value) in parameters.iter().enumerate() {
-                if bind_cursor_value(statement, offset as i32 + 1, value).is_err() {
-                    let error = sqlite_failure(database, "bind sync KV cursor");
-                    rusqlite::ffi::sqlite3_finalize(statement);
-                    return Err(error);
-                }
-            }
-            Ok(SyncListCursor {
-                scope: scope.to_string(),
-                database,
-                statement,
-            })
-        }
-    })
-    .unwrap_or_else(|| Err(anyhow::anyhow!("no db for {scope}")))?;
+    with(scope, |_| ()).ok_or_else(|| anyhow::anyhow!("no db for {scope}"))?;
+    // Give SQLite one bound per direction. With redundant range/prefix
+    // predicates it can seek to the original lower bound, then scan and
+    // filter every previously returned key on each next() (quadratic work).
+    let lower = match (begin.max(prefix), start_after) {
+        (Some(begin), Some(after)) if begin > after => Bound::Included(begin.to_string()),
+        (_, Some(after)) => Bound::Excluded(after.to_string()),
+        (Some(begin), None) => Bound::Included(begin.to_string()),
+        (None, None) => Bound::Unbounded,
+    };
+    let end = end
+        .map(str::to_string)
+        .into_iter()
+        .chain(prefix.and_then(prefix_upper_bound))
+        .min();
+    let cursor = SyncListCursor {
+        scope: scope.to_string(),
+        lower,
+        end,
+        remaining: limit.unwrap_or(usize::MAX).min(i64::MAX as usize),
+        reverse,
+    };
     let id = NEXT_SYNC_LIST_CURSOR.fetch_add(1, Ordering::Relaxed);
     sync_list_cursors(|cursors| cursors.borrow_mut().insert(id, cursor));
     Ok(id)
@@ -4365,64 +4351,51 @@ pub fn sync_list_next(cursor_id: u64) -> anyhow::Result<Option<(String, StoredVa
         let cursor = cursors
             .get_mut(&cursor_id)
             .ok_or_else(|| anyhow::anyhow!("sync KV cursor was invalidated"))?;
-        // SAFETY: the cursor owns a prepared statement on its still-live
-        // connection. Column bytes are copied before the next step/finalize.
-        let result = unsafe { rusqlite::ffi::sqlite3_step(cursor.statement) };
+        if cursor.remaining == 0 {
+            cursors.remove(&cursor_id);
+            return Ok(None);
+        }
+        let result = with(&cursor.scope, |connection| -> anyhow::Result<_> {
+            let (begin, start_after) = match &cursor.lower {
+                Bound::Included(key) => (Some(key.as_str()), None),
+                Bound::Excluded(key) => (None, Some(key.as_str())),
+                Bound::Unbounded => (None, None),
+            };
+            let (query, parameters) = list_query(
+                &cursor.scope,
+                begin,
+                cursor.end.as_deref(),
+                start_after,
+                None,
+                Some(1),
+                cursor.reverse,
+            );
+            // query_row resets the statement before returning. A cached,
+            // reset statement holds no read snapshot between iterator steps.
+            let mut statement = connection.prepare_cached(&query)?;
+            Ok(statement
+                .query_row(rusqlite::params_from_iter(parameters), |row| {
+                    Ok((row.get::<_, String>(0)?, stored_value(row.get_ref(1)?)))
+                })
+                .optional()?)
+        })
+        .unwrap_or_else(|| Err(anyhow::anyhow!("no db for {}", cursor.scope)));
         match result {
-            rusqlite::ffi::SQLITE_ROW => {
-                let key = unsafe {
-                    let length = rusqlite::ffi::sqlite3_column_bytes(cursor.statement, 0) as usize;
-                    let pointer = rusqlite::ffi::sqlite3_column_text(cursor.statement, 0);
-                    if length == 0 {
-                        String::new()
-                    } else {
-                        String::from_utf8_lossy(std::slice::from_raw_parts(pointer, length))
-                            .into_owned()
-                    }
-                };
-                let value = unsafe {
-                    match rusqlite::ffi::sqlite3_column_type(cursor.statement, 1) {
-                        rusqlite::ffi::SQLITE_BLOB => {
-                            let length =
-                                rusqlite::ffi::sqlite3_column_bytes(cursor.statement, 1) as usize;
-                            let pointer =
-                                rusqlite::ffi::sqlite3_column_blob(cursor.statement, 1).cast();
-                            StoredValue::V8(if length == 0 {
-                                Vec::new()
-                            } else {
-                                std::slice::from_raw_parts(pointer, length).to_vec()
-                            })
-                        }
-                        rusqlite::ffi::SQLITE_TEXT => {
-                            let length =
-                                rusqlite::ffi::sqlite3_column_bytes(cursor.statement, 1) as usize;
-                            let pointer = rusqlite::ffi::sqlite3_column_text(cursor.statement, 1);
-                            StoredValue::LegacyJson(if length == 0 {
-                                String::new()
-                            } else {
-                                String::from_utf8_lossy(std::slice::from_raw_parts(pointer, length))
-                                    .into_owned()
-                            })
-                        }
-                        rusqlite::ffi::SQLITE_INTEGER => StoredValue::LegacyJson(
-                            rusqlite::ffi::sqlite3_column_int64(cursor.statement, 1).to_string(),
-                        ),
-                        rusqlite::ffi::SQLITE_FLOAT => StoredValue::LegacyJson(
-                            rusqlite::ffi::sqlite3_column_double(cursor.statement, 1).to_string(),
-                        ),
-                        _ => StoredValue::LegacyJson("null".to_string()),
-                    }
-                };
+            Ok(Some((key, value))) => {
+                // The returned key already satisfies every original bound.
+                // Tighten only the bound in the traversal direction, so a
+                // delete or insert before this position cannot shift an offset.
+                if cursor.reverse {
+                    cursor.end = Some(key.clone());
+                } else {
+                    cursor.lower = Bound::Excluded(key.clone());
+                }
+                cursor.remaining -= 1;
                 Ok(Some((key, value)))
             }
-            rusqlite::ffi::SQLITE_DONE => {
+            other => {
                 cursors.remove(&cursor_id);
-                Ok(None)
-            }
-            _ => {
-                let error = sqlite_failure(cursor.database, "step sync KV cursor");
-                cursors.remove(&cursor_id);
-                Err(error)
+                other
             }
         }
     })

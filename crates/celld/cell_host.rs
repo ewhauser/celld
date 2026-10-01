@@ -22,6 +22,24 @@ impl From<RuntimeManager> for CellHost {
 }
 
 impl CellHost {
+    pub(crate) async fn fetch_cell(
+        &self,
+        cell: String,
+        name: Option<String>,
+        request: crate::engine_api::RuntimeFetch,
+        cancel: Option<tokio::sync::oneshot::Receiver<()>>,
+    ) -> anyhow::Result<crate::engine_api::HttpResponse> {
+        match self {
+            Self::Engine(runtime) => runtime.fetch_cell(cell, name, request, cancel).await,
+            #[cfg(all(test, celld_internal_tests))]
+            Self::Scripted(runtime) => {
+                runtime
+                    .fetch_cell_for_world(cell, name, request, cancel)
+                    .await
+            }
+        }
+    }
+
     pub(crate) fn local_reload_cells(&self) -> anyhow::Result<Vec<celld_logic::LocalCell>> {
         match self {
             Self::Engine(runtime) => runtime.local_reload_cells(),

@@ -238,6 +238,14 @@ class CelldHttpBodyStream extends ReadableStream {
     ];
   }
 }
+// Body streams expose the standard constructor to consumers. In particular,
+// the Python Workers SDK validates JS body types by constructor.name.
+// Keep the internal prototypes and their specialized read/tee behavior.
+for (const bodyStream of [CelldBodyStream, CelldHttpBodyStream]) {
+  Object.defineProperty(bodyStream.prototype, "constructor", {
+    value: ReadableStream, writable: true, configurable: true,
+  });
+}
 globalThis.Response = class Response {
   constructor(body, init = {}) {
     // Streaming/iterable detection runs only for object bodies, so
@@ -2105,14 +2113,36 @@ let __nextFacetOwner = 1;
 // here is a bag nothing validated, and reading one key out of it is how every
 // other key came to be dropped in silence. The loader stub validates the bag
 // and encodes its value before it creates the class.
-const __makeDurableObjectClass = (idPromise, name, propsSc) => {
+const __makeDurableObjectClass = (loadPromise, name, propsSc) => {
   const value = {};
   __durableClassMeta.set(value, {
-    idPromise,
+    loadPromise,
     name: name === null || name === undefined ? "default" : String(name),
     propsSc,
   });
   return value;
+};
+// Loopback classes are callable; a specialized class is only a handle. Capture
+// props now, so later mutation of the caller's options cannot change startup.
+const __makeLoopbackDurableObjectClass = (name) => {
+  const loadPromise = Promise.resolve({ id: 0 });
+  const specialize = function(options) {
+    if (arguments.length === 0)
+      throw new TypeError("DurableObjectClass requires an options argument.");
+    if (options !== undefined && options !== null &&
+        typeof options !== "object" && typeof options !== "function")
+      throw new TypeError("DurableObjectClass options must be an object.");
+    const props = options?.props;
+    if (props !== undefined &&
+        (props === null || (typeof props !== "object" && typeof props !== "function")))
+      throw new TypeError("DurableObjectClass props must be an object.");
+    return __makeDurableObjectClass(
+      loadPromise, name, __rpcOut(props === undefined ? {} : props, false));
+  };
+  __durableClassMeta.set(specialize, {
+    loadPromise, name, propsSc: __rpcOut({}, false),
+  });
+  return specialize;
 };
 class DurableObjectFacets {
   constructor(state) {
@@ -2155,11 +2185,14 @@ class DurableObjectFacets {
         if (meta === undefined)
           throw new TypeError(
             "FacetStartupOptions.class must be a DurableObjectClass.");
-        const loader = await meta.idPromise;
-        const id = options.id instanceof DurableObjectId
-          ? options.id.toString()
-          : options.id === undefined ? this._state.id.toString() : String(options.id);
-        return [loader, meta.name, id, meta.propsSc];
+        const { id: loader } = await meta.loadPromise;
+        const id = options.id === undefined ? this._state.id : options.id;
+        // Keep the ID kind and name in one clone. A string round-trip erases
+        // named IDs and turns a literal string ID into a DurableObjectId.
+        const idSc = __sc_encode(id instanceof DurableObjectId
+          ? [id._className, id.toString(), id.name] : String(id));
+        // Keep the load alive after the startup callback and class are gone.
+        return [loader, meta.name, idSc, meta.propsSc, meta];
       });
     const invoke = async (operation) => {
       if (record.aborted) throw record.error;
@@ -2246,8 +2279,16 @@ class DurableObjectFacets {
     barrier.then(clear, () => {});
   }
   _release() {
-    for (const name of Array.from(this._running.keys()))
-      this._abort(name, new Error("The parent Durable Object was released."));
+    // The host closes these facets during give-back. Queuing _abort here
+    // leaves an undriven op whose promise retains the manager, its root,
+    // and the loaded classes after the root has stopped.
+    const reason = new Error("The parent Durable Object was released.");
+    for (const record of this._running.values()) {
+      record.aborted = true;
+      record.error = reason;
+    }
+    this._running.clear();
+    this._barriers.clear();
   }
 }
 // The reason a failed critical section gives its waiters. It must not throw:
@@ -2559,10 +2600,11 @@ class DurableObjectState {
     this._facetDepth = facet?.depth ?? 0;
     const separator = scope.indexOf(":");
     const className = separator < 0 ? scope : scope.slice(0, separator);
-    const value = facet?.id ?? (separator < 0 ? scope : scope.slice(separator + 1));
-    this.id = new DurableObjectId(
-      className, value, __cell.idNames[scope],
-    );
+    this.id = facet === undefined
+      ? new DurableObjectId(
+        className, separator < 0 ? scope : scope.slice(separator + 1),
+        __cell.idNames[scope])
+      : typeof facet.id === "string" ? facet.id : new DurableObjectId(...facet.id);
     this.props = facet?.props;
     // A class outside `containers` has no `ctx.container`, which is what
     // the `@cloudflare/containers` constructor checks.
@@ -3166,8 +3208,9 @@ const __finishServiceFetch = async (res, req, replay) => {
 const __outboundMeta = new WeakMap();
 const __loaderServiceMarker = "__celld$loaderSvc";
 __celld.__makeLoader = () => {
-  // `get(name, ...)` is memoized by name to one isolate; `load()` is anonymous.
-  // A stub holds a Promise<id> so `getCode` may be async and load lazily.
+  // A name weakly caches a shared load; `load()` is anonymous. Keep the load
+  // promise itself on every derived capability, including a running facet,
+  // so collection cannot evict a Worker while that capability still uses it.
   const byName = new Map();
   const loaderOptions = (method, options, supportsLimits) => {
     if (options === null || options === undefined) return undefined;
@@ -3274,17 +3317,24 @@ __celld.__makeLoader = () => {
       },
     });
   };
-  // Anonymous load() workers are evicted when their only stub is GC'd: the
-  // finalizer drops the worker's isolate so it does not leak. Named get()
-  // workers are retained by `byName` (memoized) and so are not registered.
-  const finalizer = typeof FinalizationRegistry === "function"
-    ? new FinalizationRegistry((id) => __loader_drop(id))
-    : null;
-  const makeStub = (loadPromise, evictable) => {
-    // Explicit disposal evicts the worker deterministically; the finalizer is
-    // a GC backstop for anonymous stubs that are dropped without disposing.
-    // __loader_drop is idempotent, so the two paths cannot double-free.
+  // The load promise is the shared lifetime, retained by stubs, entrypoints,
+  // classes, and running facets. Finalizing only the original stub can evict
+  // a Worker that one of its derived capabilities still uses.
+  const finalizer = new FinalizationRegistry(({ id, name, ref }) => {
+    if (ref !== undefined && byName.get(name) === ref) byName.delete(name);
+    if (id !== undefined) __loader_drop(id);
+  });
+  const track = (loadPromise, name, ref) => {
+    // Register before settlement, so failed loads also release their names.
+    const held = { id: undefined, name, ref };
+    finalizer.register(loadPromise, held, loadPromise);
+    loadPromise.then(({ id }) => { held.id = id; }, () => {});
+    return loadPromise;
+  };
+  const makeStub = (loadPromise, name, ref) => {
     const drop = () => {
+      if (ref !== undefined && byName.get(name) === ref) byName.delete(name);
+      finalizer.unregister(loadPromise);
       loadPromise.then(({ id }) => __loader_drop(id), () => {});
     };
     const stub = {
@@ -3296,14 +3346,11 @@ __celld.__makeLoader = () => {
       },
       getDurableObjectClass(name = null, options = {}) {
         return __makeDurableObjectClass(
-          loadPromise.then(({ id }) => id), name,
-          loaderPropsSc("getDurableObjectClass", options));
+          loadPromise, name, loaderPropsSc("getDurableObjectClass", options));
       },
       dispose: drop,
     };
     if (typeof Symbol.dispose === "symbol") stub[Symbol.dispose] = drop;
-    if (evictable && finalizer)
-      loadPromise.then(({ id }) => finalizer.register(stub, id), () => {});
     return stub;
   };
   // JSON.stringify silently drops binary values, so each non-string module --
@@ -3466,14 +3513,17 @@ __celld.__makeLoader = () => {
         return { id, tails };
       });
   return {
-    load(code) { return makeStub(loadFrom(() => code), true); },
+    load(code) { return makeStub(track(loadFrom(() => code))); },
     get(name, getCode) {
-      let idPromise = byName.get(name);
-      if (idPromise === undefined) {
-        idPromise = loadFrom(getCode);
-        byName.set(name, idPromise);
+      let ref = byName.get(name);
+      let loadPromise = ref?.deref();
+      if (loadPromise === undefined) {
+        loadPromise = loadFrom(getCode);
+        ref = new WeakRef(loadPromise);
+        byName.set(name, ref);
+        track(loadPromise, name, ref);
       }
-      return makeStub(idPromise, false);
+      return makeStub(loadPromise, name, ref);
     },
   };
 };
@@ -4944,7 +4994,7 @@ const __ctxExports = () => __ctxExportsCache ??= (() => {
     if (__runtimeClasses.has(name)) continue;
     out[name] = Object.hasOwn(__cell.namespaceKeys, name)
       ? __cell.makeNamespace(name)
-      : __makeDurableObjectClass(Promise.resolve(0), name, undefined);
+      : __makeLoopbackDurableObjectClass(name);
   }
   return out;
 })();
@@ -9276,6 +9326,10 @@ class NonRetryableError extends Error {
 }
 // Backing object for the `cloudflare:workflows` builtin module.
 __celld.__cfWorkflows = { NonRetryableError };
+// `celld:python`, imported only by the Python Worker bundle.
+__celld.__pythonHost = {
+  condemnIsolate: (reason) => __isolate_condemn(String(reason)),
+};
 
 const __wfValidInstanceId = (id) =>
   typeof id === "string" && id.length >= 1 && id.length <= 100 &&
