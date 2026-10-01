@@ -39,8 +39,13 @@ use serde_json::{json, Map, Value};
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
+mod repair;
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+use repair::{repair_cell, Outcome};
+pub use repair::{repair_epochs, Repaired, Report as RepairReport};
 
 /// The marker that records which store holds this fleet's coordination
 /// records. It lives in the bucket, because the bucket is the one thing
