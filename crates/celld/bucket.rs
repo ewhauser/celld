@@ -625,6 +625,16 @@ impl Bucket {
         self
     }
 
+    /// This bucket with `paginated` serving its paged listings.
+    #[cfg(test)]
+    pub(crate) fn with_paginated_for_test(
+        mut self,
+        paginated: Arc<dyn PaginatedListStore>,
+    ) -> Self {
+        self.paginated = paginated;
+        self
+    }
+
     /// As [`Self::with_unresolved_control_for_test`], resolving lazily over
     /// `transport` instead of HTTPS.
     #[cfg(test)]

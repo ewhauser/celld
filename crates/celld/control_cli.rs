@@ -14,6 +14,7 @@ use serde_json::{json, Value};
 use crate::cli_options::{FleetFlags, FLEET_HELP};
 use crate::cli_output::{Format, Output, Record};
 use crate::control::{Backend, Settings};
+use crate::note;
 
 struct Reply(Value);
 
@@ -37,6 +38,9 @@ enum Verb {
         create: bool,
     },
     Show,
+    RepairEpochs {
+        dry_run: bool,
+    },
 }
 
 struct Command {
@@ -52,6 +56,7 @@ fn help_text() -> String {
 USAGE:
   celld control init --table NAME --bucket s3://NAME[/PREFIX] [OPTIONS]
   celld control show --bucket [s3://|gs://|az://]NAME[/PREFIX] [OPTIONS]
+  celld control repair-epochs --bucket [s3://|gs://|az://]NAME[/PREFIX] [--dry-run]
 
 `init` creates the DynamoDB table if it is absent (on-demand capacity,
 deletion protection, point-in-time recovery), claims it for this fleet, and
@@ -60,11 +65,18 @@ node starts; a fleet with live node leases in the bucket is refused.
 
 `show` prints the fleet's choice and, for a table, its health.
 
+`repair-epochs` raises every ownership record whose epoch is behind the
+newest epoch of the cell's data in the bucket, as after restoring the control
+table from a backup, so those cells can activate again. It writes each one
+unowned at that epoch and leaves every other record alone. It refuses while a
+stopped node's log is still unrecovered; the running fleet recovers it.
+
 OPTIONS:
   --table NAME          The DynamoDB table (or CELLD_CONTROL=dynamodb://NAME)
   --table-region REGION The table's region (or CELLD_CONTROL_REGION; default:
                         the bucket's region)
   --no-create           Adopt an existing table instead of creating it
+  --dry-run             repair-epochs: print the records it would raise
   --json                Print one JSON object instead of text
 {FLEET_HELP}
 "
@@ -81,6 +93,7 @@ fn parse(arguments: Vec<String>) -> anyhow::Result<Option<Command>> {
             create: true,
         },
         Some("show") => Verb::Show,
+        Some("repair-epochs") => Verb::RepairEpochs { dry_run: false },
         Some(other) => bail!("unknown celld control command {other:?}; see celld control --help"),
     };
     let mut command = Command {
@@ -110,6 +123,7 @@ fn parse(arguments: Vec<String>) -> anyhow::Result<Option<Command>> {
                 *table_region = Some(value("--table-region")?)
             }
             ("--no-create", Verb::Init { create, .. }) => *create = false,
+            ("--dry-run", Verb::RepairEpochs { dry_run }) => *dry_run = true,
             (other, _) => bail!("unknown option {other:?}; see celld control --help"),
         }
         index += 1;
@@ -162,6 +176,33 @@ pub async fn run(arguments: Vec<String>) -> anyhow::Result<()> {
             )?;
             crate::fleet::validate_bucket(&bucket).await?;
             out.row(&Reply(Value::Object(crate::control::show(&bucket).await?)))?;
+        }
+        Verb::RepairEpochs { dry_run } => {
+            let storage = command.fleet.resolve("celld control repair-epochs")?;
+            let bucket = crate::fleet::bucket_client(
+                &storage.bucket,
+                storage.endpoint.as_deref(),
+                &storage.region,
+            )?;
+            crate::fleet::validate_bucket(&bucket).await?;
+            bucket
+                .resolve_control(crate::control::Role::Operator)
+                .await?;
+            let report = crate::control::repair_epochs(&bucket, dry_run, |repaired| {
+                out.row(&Reply(json!({
+                    "cell": repaired.cell,
+                    "from": repaired.from,
+                    "owner": repaired.owner,
+                    "to": repaired.to,
+                })))
+            })
+            .await?;
+            note!(
+                "{} {} of {} cells",
+                if dry_run { "would repair" } else { "repaired" },
+                report.repaired,
+                report.scanned
+            );
         }
     }
     out.finish()
