@@ -439,31 +439,30 @@ async fn diagnose_checks(
             ))?;
             continue;
         }
-        let load_age_ms = if node.load.sampled_ms == 0 {
+        let load = crate::ownership_store::node_load(bucket, &node).await;
+        let load_age_ms = if load.sampled_ms == 0 {
             "unknown".to_string()
         } else {
             crate::ownership_store::now_ms()
-                .saturating_sub(node.load.sampled_ms)
+                .saturating_sub(load.sampled_ms)
                 .to_string()
         };
         // A 1-byte RSS is the sentinel a platform without /proc leaves behind,
         // not a measurement. Report it the way the load age already reports a
         // missing sample, so no operator reads it as a real number.
-        let rss_bytes = if node.load.rss_bytes <= 1 {
+        let rss_bytes = if load.rss_bytes <= 1 {
             "unknown".to_string()
         } else {
-            node.load.rss_bytes.to_string()
+            load.rss_bytes.to_string()
         };
         // The shedding decision reads the in-use figure, not the resident set
         // size, so a diagnosis that prints only the latter cannot explain why
         // a node sheds. A node from before this field reports nothing, which
         // is not the same as zero.
-        let in_use_bytes = node
-            .load
+        let in_use_bytes = load
             .in_use_bytes
             .map_or_else(|| "unknown".to_string(), |bytes| bytes.to_string());
-        let owned_cells = node
-            .load
+        let owned_cells = load
             .owned_cells
             .map_or_else(|| "unknown".to_string(), |cells| cells.to_string());
         out.row(&Check::ok(
@@ -474,16 +473,16 @@ async fn diagnose_checks(
                  pressured={} shed_cells={} restoring={} load_age_ms={}",
                 node.peer_protocol,
                 owned_cells,
-                node.load.resident_cells,
-                node.load.host_websockets,
+                load.resident_cells,
+                load.host_websockets,
                 rss_bytes,
                 in_use_bytes,
-                node.load.cpu_percent_x100 as f64 / 100.0,
-                node.load.open_fds,
-                node.load.fd_limit,
-                node.load.pressured,
-                node.load.shed_cells,
-                node.load.restoring,
+                load.cpu_percent_x100 as f64 / 100.0,
+                load.open_fds,
+                load.fd_limit,
+                load.pressured,
+                load.shed_cells,
+                load.restoring,
                 load_age_ms,
             ),
         ))?;

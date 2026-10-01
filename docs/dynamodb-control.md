@@ -81,6 +81,14 @@ the node logs under `log/`, the deployments, the alarm index under `wake/`,
 the peer-authentication secret, and a new file, `fleet/control.json`, that
 records which store the fleet chose.
 
+On a table fleet each node also keeps its load (residency, memory, CPU,
+container counts) in a small item of its own beside its lease, so the
+leases every node reads stay small. Placement takes the fleet's nodes from
+their leases and their load from one query over those items, which replaces
+the shared sample `fleet/capacity-v1.json` that a bucket fleet keeps. Nodes
+of an older release, which keep their load inside the lease, are counted
+during a rolling update.
+
 ## Set up a fleet
 
 You need an `s3://` fleet bucket, or a prefix of one, that holds no fleet
@@ -367,7 +375,5 @@ celld control repair-epochs --bucket s3://NAME[/PREFIX] [--dry-run] [--json]
 - `celld cell list` reads the cell prefixes in the bucket. A cell that has
   an ownership record but has never written data has no prefix, so the
   listing leaves it out. Such a cell holds no data.
-- The shared fleet capacity sample, `fleet/capacity-v1.json`, stays in the
-  bucket.
 - Releases that predate this feature do not read `fleet/control.json`.
   Never run one against a table fleet.

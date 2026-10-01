@@ -73,14 +73,15 @@ Non-goals:
 | Record | Bucket key | Home on a table fleet |
 |---|---|---|
 | Cell ownership | `cells/<cell>/own.json` | **table** |
-| Node lease, with the folded node-log record and load | `nodes/<node>.json` | **table** |
+| Node lease, with the folded node-log record | `nodes/<node>.json` | **table** |
+| Node load (inside the lease on a bucket fleet) | none | **table, own item** |
 | Drain token | `drain/token.json` | **table** |
 | Waker role lease | `wake/waker.json` | **table** |
 | Fleet deploy pointer | `deploy/current.json` | **table** |
 | Named deploy pointer | `deploy/<script>/current.json` | **table** |
 | Queue attachment | `deploy/queues/<queue>/consumer.json` | **table** |
 | Backend marker (new) | `fleet/control.json` | bucket |
-| Fleet capacity sample | `fleet/capacity-v1.json` | bucket |
+| Fleet capacity sample | `fleet/capacity-v1.json` | bucket; unused on a table fleet |
 | Wake index | `wake/entries/`, `wake/retired/`, `wake/format.json` | bucket |
 | Peer-auth secret | `fleet/peer-auth.json` | bucket |
 | LTX data | `cells/<cell>/ltx/` | bucket |
@@ -182,6 +183,7 @@ recovery and deletion protection when `celld control init` creates it.
 | Fleet pointer | `deploy` | `current` |
 | Named pointer | `deploy` | `script#<name>` |
 | Queue attachment | `deploy` | `queue#<queue>` |
+| Node load | `load` | `<node>` |
 | Probe (transient) | `probe` | `<random>` |
 
 Every item carries the same three attributes: `doc`, the record's JSON
@@ -299,6 +301,38 @@ that read. The wake-format stop check keeps its direct reads; it runs once,
 before a format change, and wants the freshest answer. A bucket fleet
 lists and reads as it always did.
 
+### Load and placement
+
+On a table fleet a lease renewal writes the lease without its load
+telemetry, and, once the lease applied, writes a load item: the same body
+without the folded log, so it decodes as a lease and carries the node, its
+address and its expiry beside its load. The load item is an unconditional
+`PutItem` in the background. It grants nothing, so a lost or late write
+only leaves placement one renewal behind, and the renewal never waits for
+it. The lease is about a third of its old size, which is what every
+consistent lease scan reads. The lease keeps one load field, the bucket
+format the node reads, as a top-level `bucket_format`, because the format
+gate must judge every live node from its authoritative record.
+
+Placement, rebalancing, the format gate, container `max_instances` and
+`celld diagnose` take membership from the leases, through the node's shared
+lease view, and join each lease to its node's load item, read with one
+eventually consistent `Query` on the `load` partition. A node whose item is
+missing or late still counts, with an empty load until its item lands. A
+lease that still carries its whole load, written by a release before the
+split during a rolling update, keeps that load. The format always comes
+from the lease, never from an item, so a missing or stale item can only
+close the format gate, never open it. The shared capacity sample
+(`fleet/capacity-v1.json`) and its refresh claim are not used: the lease
+view is already read for dead-node detection, the load query costs half a
+consistent read, and neither has a size limit, where the sample embeds
+every lease and would pass DynamoDB's 400 KB item limit between 200 and
+400 nodes. The join keeps the sample's contract: leases older than the
+recency window are left out, and an empty answer is an error rather than
+an empty fleet. Dead-node GC deletes a dead node's load item; a successor
+that reuses the name writes a new one with its next renewal. A bucket
+fleet keeps load inside the lease and keeps the sample, unchanged.
+
 ### Fleet singletons and deploy pointers
 
 The waker role and the drain token keep their protocols unchanged,
@@ -395,17 +429,19 @@ A DynamoDB partition serves up to 1,000 write units and 3,000 read units
 per second. The node leases share the `nodes` partition, or spread over
 the fleet's lease shards.
 
-- **Writes.** A lease with its load telemetry is about 1.5 KB, two write
-  units, renewed every TTL/3. One partition carries renewals for roughly
-  1,500 nodes, and each shard adds as much.
+- **Writes.** A lease without its load telemetry is under 1 KB, one write
+  unit, renewed every TTL/3; the load item, about 1.5 KB and two write
+  units, is in its own `load` partition. One partition carries renewals
+  for roughly 1,500 nodes, and each lease shard adds as much.
 - **Reads.** Every node reads every lease once per `CELLD_FLEET_VIEW_MS`,
   one query per shard, rather than once per loop with a `GetItem` per
   lease. A consistent query costs one read unit per 4 KB returned, so a
-  fleet of N nodes reads about N × N × 1.5 KB / 4 KB units per view
+  fleet of N nodes reads about N × N × 1 KB / 4 KB units per view
   interval, spread over the shards. At the default five seconds, 500
-  nodes read about 19,000 units a second, which needs eight shards or
+  nodes read about 12,500 units a second, which needs five shards or
   more; raise `CELLD_FLEET_VIEW_MS` to trade freshness of dead-node
-  detection for reads.
+  detection for reads. Placement reads the load partition with eventually
+  consistent queries, at half the cost.
 
 Owner items are keyed by cell, so activation traffic spreads across
 partitions without configuration.
@@ -621,11 +657,6 @@ A move back to the bucket scans the table, so the nodes need
 
 These were proposed in revision 1 and are left for later:
 
-- **Splitting load telemetry out of the lease** into its own small item,
-  which would cut the cost of every consistent lease scan by about two
-  thirds.
-- **Replacing the capacity sample with a query.** The sample stays in the
-  bucket; a table item could not hold it past a few hundred nodes.
 - **The wake index**, which keeps its bucket protocol of immutable entry
   names and retirement watermarks.
 - **Release qualification against real DynamoDB**, beside the R2 release
@@ -652,10 +683,12 @@ These were proposed in revision 1 and are left for later:
   celld already uses for S3.
 - **A 4xx is not committed.** DynamoDB applies nothing it refuses, which
   keeps a throttled renewal from costing a readback.
-- **The capacity sample, wake index and peer-auth secret stay in the
-  bucket.** None is on a latency-critical path that the table improves
-  today, and each has its own reason to stay: the sample's size, the wake
-  index's protocol, and the secret's write-once use.
+- **The wake index and peer-auth secret stay in the bucket.** Neither is
+  on a latency-critical path that the table improves today, and each has
+  its own reason to stay: the wake index's protocol, and the secret's
+  write-once use. A table fleet replaces the capacity sample with a query
+  over load items instead of moving it, because a table item could not
+  hold it past a few hundred nodes.
 
 ## Open questions
 
