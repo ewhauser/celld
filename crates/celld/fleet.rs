@@ -459,12 +459,10 @@ async fn diagnose_checks(
         // size, so a diagnosis that prints only the latter cannot explain why
         // a node sheds. A node from before this field reports nothing, which
         // is not the same as zero.
-        let in_use_bytes = node
-            .load
+        let in_use_bytes = load
             .in_use_bytes
             .map_or_else(|| "unknown".to_string(), |bytes| bytes.to_string());
-        let owned_cells = node
-            .load
+        let owned_cells = load
             .owned_cells
             .map_or_else(|| "unknown".to_string(), |cells| cells.to_string());
         out.row(&Check::ok(

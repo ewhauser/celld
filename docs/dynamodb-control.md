@@ -83,9 +83,11 @@ records which store the fleet chose.
 
 On a table fleet each node also keeps its load (residency, memory, CPU,
 container counts) in a small item of its own beside its lease, so the
-leases every node reads stay small. Placement reads every node's load with
-one query, which replaces the shared sample `fleet/capacity-v1.json` that a
-bucket fleet keeps.
+leases every node reads stay small. Placement takes the fleet's nodes from
+their leases and their load from one query over those items, which replaces
+the shared sample `fleet/capacity-v1.json` that a bucket fleet keeps. Nodes
+of an older release, which keep their load inside the lease, are counted
+during a rolling update.
 
 ## Set up a fleet
 

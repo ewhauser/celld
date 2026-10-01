@@ -1642,6 +1642,8 @@ fn a_table_fleet_migrates_back_to_the_bucket() {
         old.put("deploy/api/current.json", br#"{"version":"v2"}"#.to_vec())
             .await
             .unwrap();
+        let table = old.load_table().await.unwrap().unwrap().clone();
+        table.put_load("n1", br#"{"node":"n1"}"#).await.unwrap();
 
         let command = fleet.client();
         let migrated = migrate::migrate_with(
@@ -1665,7 +1667,7 @@ fn a_table_fleet_migrates_back_to_the_bucket() {
             .lock()
             .unwrap()
             .keys()
-            .any(|(pk, _)| pk == NODES_PK || pk == DEPLOY_PK));
+            .any(|(pk, _)| pk == NODES_PK || pk == DEPLOY_PK || pk == "load"));
 
         // Running it again finishes nothing new and moves nothing.
         let again = migrate::migrate_with(
@@ -2277,7 +2279,12 @@ fn a_table_fleet_keeps_load_out_of_its_leases() {
             crate::asyncrt::sleep(Duration::from_millis(5)).await;
         }
         let lease = item_doc(&fake, NODES_PK, "n1").unwrap();
+        // The lease keeps only the bucket format of its load.
         assert!(lease.get("load").is_none(), "{lease}");
+        assert_eq!(
+            lease["bucket_format"],
+            json!(celld_logic::format::BUCKET_FORMAT)
+        );
         assert_eq!(lease["addr"], "10.0.0.1:9000");
         let load = item_doc(&fake, "load", "n1").expect("a load item");
         assert!(load.get("log").is_none(), "{load}");
@@ -2300,5 +2307,91 @@ fn a_table_fleet_keeps_load_out_of_its_leases() {
             .unwrap()
             .keys()
             .all(|(pk, _)| pk != FLEET_PK));
+    });
+}
+
+#[test]
+fn placement_and_the_format_gate_count_every_live_lease() {
+    crate::asyncrt::test_block_on(async {
+        let (bucket, _fake) = table_fleet().await;
+        let ownership = crate::ownership_store::BucketOwnership::new(
+            bucket.clone(),
+            bucket.clone(),
+            "new".into(),
+            "probe-key".into(),
+        )
+        .with_lease_ttl_ms(10_000);
+        let expires = crate::ownership_store::now_ms() + 60_000;
+        let load = |sampled_ms: u64, format: Option<u16>| {
+            let mut load =
+                serde_json::to_value(crate::ownership_store::NodeLoadWire::default()).unwrap();
+            load["sampled_ms"] = json!(sampled_ms);
+            load["bucket_format"] = json!(format);
+            load
+        };
+        // A node of the release before the split: its whole load inline, no
+        // load item, and a format-1 reader.
+        let old = json!({
+            "node": "old",
+            "addr": "10.0.0.2:9000",
+            "expires_ms": expires,
+            "load": load(7, None),
+        });
+        bucket
+            .put_cas("nodes/old.json", old.to_string().into_bytes(), None)
+            .await
+            .unwrap()
+            .unwrap();
+        // A split node whose load item says format 2 but whose lease does not.
+        let stale = json!({ "node": "stale", "addr": "10.0.0.3:9000", "expires_ms": expires });
+        bucket
+            .put_cas("nodes/stale.json", stale.to_string().into_bytes(), None)
+            .await
+            .unwrap()
+            .unwrap();
+        let table = bucket.load_table().await.unwrap().unwrap().clone();
+        let item = |node: &str, format: u16| {
+            json!({ "node": node, "expires_ms": expires, "load": load(9, Some(format)) })
+                .to_string()
+                .into_bytes()
+        };
+        table.put_load("stale", &item("stale", 2)).await.unwrap();
+        // A split node at format 2, in both its lease and its item.
+        let new = json!({
+            "node": "new",
+            "addr": "10.0.0.1:9000",
+            "expires_ms": expires,
+            "bucket_format": 2,
+        });
+        bucket
+            .put_cas("nodes/new.json", new.to_string().into_bytes(), None)
+            .await
+            .unwrap()
+            .unwrap();
+        table.put_load("new", &item("new", 2)).await.unwrap();
+
+        let mut peers = ownership.read_capacity_peers().await.unwrap();
+        peers.sort_by(|a, b| a.node.cmp(&b.node));
+        let nodes: Vec<&str> = peers.iter().map(|peer| peer.node.as_str()).collect();
+        assert_eq!(nodes, ["new", "old", "stale"]);
+        assert_eq!(peers[0].bucket_format, Some(2));
+        assert_eq!(peers[0].sampled_ms, 9);
+        // The old node keeps its inline load.
+        assert_eq!(peers[1].sampled_ms, 7);
+        assert_eq!(peers[1].bucket_format, None);
+        // The format is the lease's, not the advisory item's.
+        assert_eq!(peers[2].bucket_format, None);
+        assert_eq!(peers[2].sampled_ms, 9);
+
+        let now = crate::ownership_store::now_ms();
+        assert!(!celld_logic::format::fleet_reads(&peers, now, 2));
+        let (_, shared) = ownership.read_shared_capacity_peers(5_000).await.unwrap();
+        assert_eq!(shared.len(), 3);
+        assert!(!celld_logic::format::fleet_reads(&shared, now, 2));
+        let only_new: Vec<_> = peers
+            .into_iter()
+            .filter(|peer| peer.node == "new")
+            .collect();
+        assert!(celld_logic::format::fleet_reads(&only_new, now, 2));
     });
 }

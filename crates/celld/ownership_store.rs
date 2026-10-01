@@ -663,22 +663,14 @@ impl BucketOwnership {
         const READ_CONCURRENCY: usize = 16;
         let current_ms = now_ms();
         if let Some(table) = self.bucket.load_table().await? {
-            // One query over the load items, each the lease without its log.
-            // The same recency rule drops the items of nodes long gone.
-            let mut peers = Vec::new();
-            for (_, record) in table.loads().await? {
-                if !capacity_record_is_recent(
-                    record.updated_ms.div_euclid(1_000),
-                    current_ms,
-                    self.lease_ttl_ms,
-                ) {
-                    continue;
-                }
-                let body = String::from_utf8(record.body.to_vec())
-                    .context("a node load item is not UTF-8")?;
-                peers.push(RawValue::from_string(body).context("decode a node load item")?);
-            }
-            return Ok(peers);
+            return table_capacity_bodies(&self.bucket, table, self.lease_ttl_ms)
+                .await?
+                .1
+                .into_iter()
+                .map(|peer| {
+                    RawValue::from_string(peer.to_string()).context("encode a node capacity view")
+                })
+                .collect();
         }
         let mut nodes = Vec::new();
         for object in self.bucket.list("nodes/").await? {
@@ -761,23 +753,26 @@ impl BucketOwnership {
         sample_ms: u64,
     ) -> anyhow::Result<(u64, Vec<CapacityPeer>)> {
         anyhow::ensure!(sample_ms > 0, "the fleet sample interval must be positive");
-        if self.bucket.load_table().await?.is_some() {
-            // A table fleet has no shared sample: one query over the small
-            // load items costs less than reading a sample object would, and
-            // has no size limit. Stamped before the query, like a refresh.
-            let started_ms = now_ms();
-            let leases = self.read_capacity_leases().await?;
+        if let Some(table) = self.bucket.load_table().await? {
+            // A table fleet has no shared sample: its shared lease view and
+            // one query over the small load items cost less than reading a
+            // sample object would, and have no size limit. Stamped with the
+            // lease read, like a refresh.
+            let (read_ms, bodies) =
+                table_capacity_bodies(&self.bucket, table, self.lease_ttl_ms).await?;
             anyhow::ensure!(
-                !leases.is_empty(),
-                "the fleet load query found no live node"
+                !bodies.is_empty(),
+                "the fleet lease view found no live node"
             );
-            return Ok((
-                started_ms,
-                leases
-                    .into_iter()
-                    .map(NodeLeaseWire::into_capacity_peer)
-                    .collect(),
-            ));
+            let peers = bodies
+                .into_iter()
+                .map(|body| {
+                    serde_json::from_value::<NodeLeaseWire>(body)
+                        .map(NodeLeaseWire::into_capacity_peer)
+                        .context("decode a node lease for placement")
+                })
+                .collect::<anyhow::Result<_>>()?;
+            return Ok((read_ms, peers));
         }
         // Two attempts: a node that loses the claim race re-reads once, so it
         // takes the winner's previous view or result instead of reporting the
@@ -1233,8 +1228,19 @@ fn split_lease_body(
         anyhow::bail!("a node lease serializes as an object");
     };
     let mut load = lease.clone();
-    lease.remove("load");
     load.remove("log");
+    // The lease keeps the one load field that is not advisory: the bucket
+    // format the node reads, which a format gate must see for every live
+    // node from the authoritative record.
+    let format = lease
+        .remove("load")
+        .and_then(|load| load.get("bucket_format").cloned())
+        .filter(|format| !format.is_null());
+    // Beside the load, not inside it: a reader of any release decodes a
+    // lease without `load` as an empty load, but not a partial one.
+    if let Some(format) = format {
+        lease.insert("bucket_format".to_string(), format);
+    }
     Ok((
         serde_json::to_vec(&lease)?,
         Some(serde_json::to_vec(&load)?),
@@ -1261,6 +1267,11 @@ fn publish_load(bucket: Bucket, node: String, body: Vec<u8>) {
 /// The load a node last published: its load item on a table fleet, or the
 /// load inside the lease `lease` on a bucket fleet.
 pub(crate) async fn node_load(bucket: &Bucket, lease: &NodeLeaseWire) -> NodeLoadWire {
+    if lease.load.sampled_ms != 0 {
+        // A bucket fleet's lease, or the lease of a node whose release still
+        // writes its load inline.
+        return lease.load.clone();
+    }
     match bucket.load_table().await {
         Ok(Some(table)) => table
             .get_load(&lease.node)
@@ -1272,6 +1283,91 @@ pub(crate) async fn node_load(bucket: &Bucket, lease: &NodeLeaseWire) -> NodeLoa
             .unwrap_or_default(),
         _ => lease.load.clone(),
     }
+}
+
+/// Every recent node of a table fleet, for placement and the format gate:
+/// its authoritative lease without the folded log, with the load its load
+/// item publishes and the bucket format its lease carries. Answers with the
+/// wall clock of the lease read too, at which a reader judges expiry: the
+/// view can be a few seconds old, and a lease renewed since must not read as
+/// expired.
+///
+/// Membership comes from the leases, never from the load items: a load item
+/// is advisory, written in the background and read eventually, so a node
+/// whose item is missing or late must still count, both for placement and
+/// for a format gate that has to see every live node's capability. Such a
+/// node keeps the load its lease carries, which is all of it on a node
+/// whose release writes load inline (a rolling update to the split), and
+/// none until its item lands otherwise.
+async fn table_capacity_bodies(
+    bucket: &Bucket,
+    table: &crate::control::Table,
+    lease_ttl_ms: u64,
+) -> anyhow::Result<(u64, Vec<Value>)> {
+    let view = bucket
+        .table_lease_view(crate::control::fleet_view_max_age())
+        .await?
+        .context("a table fleet has a lease view")?;
+    let mut loads = std::collections::HashMap::<String, Value>::new();
+    for (node, record) in table.loads().await? {
+        if let Ok(Value::Object(mut item)) = serde_json::from_slice::<Value>(&record.body) {
+            if let Some(load) = item.remove("load") {
+                loads.insert(node, load);
+            }
+        }
+    }
+    let current_ms = now_ms();
+    let mut peers = Vec::new();
+    for listed in &view.leases {
+        // The same recency rule as the bucket listing drops nodes long gone.
+        if !capacity_record_is_recent(
+            listed.record.updated_ms.div_euclid(1_000),
+            current_ms,
+            lease_ttl_ms,
+        ) {
+            continue;
+        }
+        let Value::Object(mut lease) = serde_json::from_slice::<Value>(&listed.record.body)
+            .with_context(|| format!("decode the node lease {}", listed.key))?
+        else {
+            anyhow::bail!("the node lease {} is not an object", listed.key);
+        };
+        lease.remove("log");
+        let inline = lease.remove("load").unwrap_or(Value::Null);
+        let format = lease
+            .remove("bucket_format")
+            .filter(|format| !format.is_null());
+        let load = if inline
+            .get("sampled_ms")
+            .and_then(Value::as_u64)
+            .unwrap_or(0)
+            > 0
+        {
+            // A release before the split writes the whole load inline.
+            inline
+        } else {
+            let node = lease
+                .get("node")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            // No item yet reads as an empty load.
+            let mut load = match loads.remove(node) {
+                Some(load @ Value::Object(_)) => load,
+                _ => serde_json::to_value(NodeLoadWire::default())?,
+            };
+            // The format is the lease's, whatever the advisory item says.
+            if let Value::Object(load) = &mut load {
+                match format {
+                    Some(format) => load.insert("bucket_format".to_string(), format),
+                    None => load.remove("bucket_format"),
+                };
+            }
+            load
+        };
+        lease.insert("load".to_string(), load);
+        peers.push(Value::Object(lease));
+    }
+    Ok((view.read_ms, peers))
 }
 
 pub(crate) async fn load_node_lease(
@@ -1303,16 +1399,11 @@ pub(crate) async fn load_node_lease(
 /// peers.
 pub async fn fleet_class_instances(bucket: &Bucket, class: &str, exclude_node: &str) -> u64 {
     if let Ok(Some(table)) = bucket.load_table().await {
-        // A table fleet's load items are the sample: one query.
-        return match table.loads().await {
-            Ok(items) => items
-                .iter()
-                .filter(|(_, record)| {
-                    capacity_record_is_recent(record.updated_ms.div_euclid(1_000), now_ms(), 0)
-                })
-                .filter_map(|(_, record)| {
-                    serde_json::from_slice::<NodeLeaseWire>(&record.body).ok()
-                })
+        // A table fleet's leases and load items are the sample.
+        return match table_capacity_bodies(bucket, table, 0).await {
+            Ok((_, peers)) => peers
+                .into_iter()
+                .filter_map(|peer| serde_json::from_value::<NodeLeaseWire>(peer).ok())
                 .filter(|lease| lease.node != exclude_node)
                 .filter_map(|lease| lease.load.container_instances.get(class).copied())
                 .sum(),

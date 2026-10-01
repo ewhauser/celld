@@ -310,21 +310,28 @@ address and its expiry beside its load. The load item is an unconditional
 `PutItem` in the background. It grants nothing, so a lost or late write
 only leaves placement one renewal behind, and the renewal never waits for
 it. The lease is about a third of its old size, which is what every
-consistent lease scan reads.
+consistent lease scan reads. The lease keeps one load field, the bucket
+format the node reads, as a top-level `bucket_format`, because the format
+gate must judge every live node from its authoritative record.
 
 Placement, rebalancing, the format gate, container `max_instances` and
-`celld diagnose` read load from the load items. The shared capacity
-sample (`fleet/capacity-v1.json`) and its refresh claim are not used: one
-eventually consistent `Query` on the `load` partition costs less than the
-sample's read would, at half the price of a consistent read, and has no
-size limit, where the sample embeds every lease and would pass DynamoDB's
-400 KB item limit between 200 and 400 nodes. The query keeps the sample's
-contract: it is stamped before it is read, a reader judges expiry at that
-instant, items older than the recency window are left out, and an empty
-answer is an error rather than an empty fleet. Dead-node GC deletes a dead
-node's load item; a successor that reuses the name writes a new one with
-its next renewal. A bucket fleet keeps load inside the lease and keeps the
-sample, unchanged.
+`celld diagnose` take membership from the leases, through the node's shared
+lease view, and join each lease to its node's load item, read with one
+eventually consistent `Query` on the `load` partition. A node whose item is
+missing or late still counts, with an empty load until its item lands. A
+lease that still carries its whole load, written by a release before the
+split during a rolling update, keeps that load. The format always comes
+from the lease, never from an item, so a missing or stale item can only
+close the format gate, never open it. The shared capacity sample
+(`fleet/capacity-v1.json`) and its refresh claim are not used: the lease
+view is already read for dead-node detection, the load query costs half a
+consistent read, and neither has a size limit, where the sample embeds
+every lease and would pass DynamoDB's 400 KB item limit between 200 and
+400 nodes. The join keeps the sample's contract: leases older than the
+recency window are left out, and an empty answer is an error rather than
+an empty fleet. Dead-node GC deletes a dead node's load item; a successor
+that reuses the name writes a new one with its next renewal. A bucket
+fleet keeps load inside the lease and keeps the sample, unchanged.
 
 ### Fleet singletons and deploy pointers
 

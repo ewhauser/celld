@@ -164,6 +164,13 @@ impl Store<'_> {
         for (key, _) in &records {
             self.delete(key).await?;
         }
+        // A table fleet's load items are advisory and move with no one: the
+        // nodes publish their load again wherever the fleet now lives.
+        if let Store::Table(table) = self {
+            for (node, _) in table.loads().await? {
+                table.delete_load(&node).await?;
+            }
+        }
         Ok(records.len())
     }
 }
