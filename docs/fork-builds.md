@@ -279,3 +279,66 @@ the heap average.
 Rollout: no record or storage format changes. Follower append responses no
 longer carry `quiesced`, which only strict disk removal set; older nodes read
 its absence as false. Nodes can roll from 0.6.0-ewhauser.1.
+
+## 0.6.1-ewhauser.1
+
+Based on upstream v0.6.1. It keeps every fork change through
+0.6.0-ewhauser.2. Upstream's v0.6.1 release notes list the new behavior:
+Python Workers, epoch GC (`CELLD_LTX_RETENTION_SECS`), `celld cell gc
+--dry-run`, configurable asset and Dynamic Worker size limits, log severity,
+and the WebSocket ordering fixes.
+
+### Change export
+
+A node can export every committed row change of the classes it is told to
+export, as a convergent mirror of each cell's tables. It is off by default;
+`CELLD_EXPORT_*` turns it on. `docs/export.md` is the user guide and
+`docs/design/change-export.md` the design.
+
+- The release build carries the bucket sink, which writes Parquet record
+  files beside the cell's data, and the `celld export` commands: `repair`,
+  `backfill`, `inspect`, `reconcile`, `verify` and `erase`.
+- The blob-stream sink (`export-blob-stream`), the Kafka sink
+  (`export-kafka`) and the Snowflake audit (`export-snowflake`,
+  `celld export ... --consumer snowflake`) are Cargo features that the
+  release binaries and image do not enable. Build celld with the feature to
+  use one; a node configured for a sink it was not built with refuses to
+  start.
+- `celld-export-loader` loads a blob-stream or Kafka topic into Snowflake
+  through Snowpipe Streaming. It is built from `crates/export-snowflake` and
+  is not a release asset.
+- Facet databases export as their own streams, with ordered incarnations and
+  `deleted` records when a facet goes away.
+
+Known gaps: nothing loads the bucket sink into Snowflake continuously, a
+node runs one sink at a time, and the Snowflake path has been tested against
+an emulator, not a real Snowflake account.
+
+### Other changes
+
+- Cell runtimes start off the core thread, and a lone dev node activates
+  fresh cells faster.
+- A Durable Object alarm set years ahead no longer aborts the node.
+- `celld dev` nodes stop when their supervisor dies on macOS.
+- `celld-perf` runs performance and network-fault tests; nightly results,
+  the TCK dashboard, and the fork documentation are published on the docs
+  site.
+
+### How the fork changes sit on upstream v0.6.1
+
+- Upstream now runs ordinary Actor effects on the host runtime, off the core
+  thread that owns the node lease timer. The fork already did this for
+  node-log recovery and isolate startup; those effects now use upstream's
+  path.
+- Actor timers keep the fork's deadline-ordered queue instead of tokio-util's
+  `DelayQueue`, so a Durable Object alarm years ahead still cannot panic the
+  core.
+- The log Parquet files gain upstream's `severity_number` and
+  `severity_text` columns.
+
+Rollout: upstream's rule for v0.6.0 to v0.6.1 applies. Nodes can roll from
+0.6.0-ewhauser.2. Set `CELLD_LTX_RETENTION_SECS`, deploy a Python Worker, or
+raise `CELLD_MAX_ASSET_FILE_BYTES` above 25 MiB only after every node runs
+this build. With epoch GC on, change export repair and backfill can no longer
+restore positions in a deleted epoch; they restore at the chain's base
+instead.
