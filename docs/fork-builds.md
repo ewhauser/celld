@@ -288,6 +288,53 @@ Python Workers, epoch GC (`CELLD_LTX_RETENTION_SECS`), `celld cell gc
 --dry-run`, configurable asset and Dynamic Worker size limits, log severity,
 and the WebSocket ordering fixes.
 
+### Change export
+
+A node can export every committed row change of the classes it is told to
+export, as a convergent mirror of each cell's tables. It is off by default;
+`CELLD_EXPORT_*` turns it on. `docs/export.md` is the user guide and
+`docs/design/change-export.md` the design.
+
+- The release build carries the bucket sink, which writes Parquet record
+  files beside the cell's data, and the `celld export` commands: `repair`,
+  `backfill`, `inspect`, `reconcile`, `verify` and `erase`.
+- The blob-stream sink (`export-blob-stream`), the Kafka sink
+  (`export-kafka`) and the Snowflake audit (`export-snowflake`,
+  `celld export ... --consumer snowflake`) are Cargo features that the
+  release binaries and image do not enable. Build celld with the feature to
+  use one; a node configured for a sink it was not built with refuses to
+  start.
+- `celld-export-loader` loads a blob-stream or Kafka topic into Snowflake
+  through Snowpipe Streaming. It is built from `crates/export-snowflake` and
+  is not a release asset.
+- Facet databases export as their own streams, with ordered incarnations and
+  `deleted` records when a facet goes away.
+
+Known gaps: nothing loads the bucket sink into Snowflake continuously, a
+node runs one sink at a time, and the Snowflake path has been tested against
+an emulator, not a real Snowflake account.
+
+### Optional DynamoDB control plane
+
+A fleet can keep its coordination records (node leases, cell ownership,
+deploy pointers and node load) in a DynamoDB table instead of the bucket,
+with `CELLD_CONTROL=dynamodb://TABLE`. Bucket coordination stays the
+default. `celld control init` creates a table fleet, `celld control migrate`
+moves an existing fleet to a table or back with one short stop of every
+node, and `celld control repair-epochs` repairs ownership records after a
+table is restored from a backup. `docs/dynamodb-control.md` is the guide.
+The table path has not been qualified against real AWS.
+
+### Other changes
+
+- Cell runtimes start off the core thread, and a lone dev node activates
+  fresh cells faster.
+- A Durable Object alarm set years ahead no longer aborts the node.
+- `celld dev` nodes stop when their supervisor dies on macOS.
+- `celld-perf` runs performance and network-fault tests; nightly results,
+  the TCK dashboard, and the fork documentation are published on the docs
+  site.
+
 ### How the fork changes sit on upstream v0.6.1
 
 - Upstream now runs ordinary Actor effects on the host runtime, off the core
