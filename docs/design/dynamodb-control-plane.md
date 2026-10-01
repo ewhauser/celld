@@ -427,17 +427,28 @@ write on the token just read, and the next acquire claims the epoch after
 it.
 
 - A record at the newest epoch is the one that wrote it, so it is left
-  alone, and so is every cell a live node owns: a live owner's epoch is
-  never behind its own data. The command therefore runs against a live
-  fleet, and only the cells that cannot activate change.
+  alone.
 - The record is written unowned rather than keeping the node it named.
   After a restore that node need not be the newest epoch's writer, and a
   record naming it at an epoch it never acquired would present another
   node's stream as its own.
+- The fleet must be stopped. A running node is not proof against the
+  repair: a restore can leave it serving a cell at an epoch its record no
+  longer shows, and it can activate a root at an epoch below a dormant
+  facet's data, because facets restore on demand, so its record is behind
+  while it serves. Clearing either record lets a second node claim the cell
+  while the first still serves it. So the command refuses while any lease
+  is live.
 - An unowned record lets a takeover skip node-log recovery. So the command
-  refuses while any expired lease holds a log that is open or recovering,
-  and names those nodes; the running fleet recovers them, and the command
-  is run again. A sealed log, or none, has nothing left to write.
+  also refuses while any expired lease holds a log that is open or
+  recovering, and names those nodes; one node started until the logs are
+  sealed recovers them. A sealed log, or none, has nothing left to write.
+- Those checks run once, before the walk, and a node can start during it.
+  So before each write the command reads the lease of the node the record
+  names, and leaves the record alone unless that lease expired with its log
+  sealed. An expired lease never renews, and a node can only take the cell
+  again by changing the record, which fails the conditional write. Records
+  left alone are listed and the command fails, to be run again.
 
 The command uses only routed reads and writes, so it repairs a bucket
 fleet's `own.json` records the same way.

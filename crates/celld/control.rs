@@ -43,6 +43,8 @@ mod repair;
 #[cfg(test)]
 mod tests;
 
+#[cfg(test)]
+use repair::{repair_cell, Outcome};
 pub use repair::{repair_epochs, Repaired, Report as RepairReport};
 
 /// The marker that records which store holds this fleet's coordination

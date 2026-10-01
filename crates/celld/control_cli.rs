@@ -68,8 +68,9 @@ node starts; a fleet with live node leases in the bucket is refused.
 `repair-epochs` raises every ownership record whose epoch is behind the
 newest epoch of the cell's data in the bucket, as after restoring the control
 table from a backup, so those cells can activate again. It writes each one
-unowned at that epoch and leaves every other record alone. It refuses while a
-stopped node's log is still unrecovered; the running fleet recovers it.
+unowned at that epoch and leaves every other record alone. Stop the fleet
+first: it refuses while any node is running, or while a stopped node's log is
+still unrecovered.
 
 OPTIONS:
   --table NAME          The DynamoDB table (or CELLD_CONTROL=dynamodb://NAME)

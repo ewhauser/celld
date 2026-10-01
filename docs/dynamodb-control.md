@@ -213,29 +213,40 @@ Point-in-time recovery restores the ownership records to an earlier moment,
 when some cells may have moved to higher epochs since. celld does not
 overwrite data in that case: a cell whose ownership record is behind the
 data in the bucket refuses to activate. Treat a table restore as a
-fleet-wide recovery event, and repair the epochs once the restored table is
-in place:
+fleet-wide recovery event: stop every node, restore the table, repair the
+epochs, then start the fleet again.
 
-```sh
-celld control repair-epochs --bucket "$CELLD_BUCKET" --dry-run
-celld control repair-epochs --bucket "$CELLD_BUCKET"
-```
+1. Stop every node gracefully, so each seals its node log, and wait for
+   their leases to expire.
+2. Restore the table and point the fleet at it.
+3. Repair the epochs:
+
+   ```sh
+   celld control repair-epochs --bucket "$CELLD_BUCKET" --dry-run
+   celld control repair-epochs --bucket "$CELLD_BUCKET"
+   ```
+
+4. Start the fleet.
 
 The command walks every cell in the bucket, including its facets, and finds
 the newest epoch that holds data. Each ownership record below that epoch is
 rewritten as unowned at it, so the next activation claims the epoch after
 it and restores everything the bucket holds. Records that are already
-consistent, including every cell a running node owns, are left alone, and
-each rewrite is a conditional write that never replaces a record a node
-changed since. It prints one line per repaired cell, and `--dry-run` prints
-them without writing.
+consistent are left alone, and each rewrite is a conditional write that
+never replaces a record a node changed since. It prints one line per
+repaired cell, and `--dry-run` prints them without writing.
 
-The command refuses while a stopped node's log is still open or being
-recovered, and names those nodes. Recovering such a log writes that node's
-acknowledged writes into the bucket, and a cell repaired before that would
-activate without them. Start the fleet, or leave it running, until those
-logs are sealed, then run the command again. It is safe to run more than
-once, and it works on a bucket fleet as well.
+The command refuses while any node is running, because a running node can
+serve a cell at an epoch its restored record no longer shows, and clearing
+that record would let a second node take the cell while the first still
+serves it. It also refuses while a stopped node's log is still open or
+being recovered, as after a crash, and names those nodes: recovering such a
+log writes that node's acknowledged writes into the bucket, and a cell
+repaired before that would activate without them. Start one node until
+those logs are sealed, stop it, and run the command again. If a node starts
+while the command runs, the cells it owns are left alone and listed, and
+the command fails; stop that node and run it again. It is safe to run more
+than once, and it works on a bucket fleet as well.
 
 ## Test locally
 

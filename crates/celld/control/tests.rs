@@ -1107,3 +1107,88 @@ fn repair_waits_for_dead_nodes_logs() {
         assert_eq!(report.repaired, 1);
     });
 }
+
+async fn put_lease(bucket: &Bucket, node: &str, expires_ms: u64, log: &str) {
+    let key = format!("nodes/{node}.json");
+    let token = bucket.get(&key).await.unwrap().map(|(_, token)| token);
+    let body = format!(
+        r#"{{"node":"{node}","expires_ms":{expires_ms},"log":{{"state":"{log}","epoch":1,"ensemble":[],"tiered":0}}}}"#
+    );
+    bucket
+        .put_cas(&key, body.into_bytes(), token.as_deref())
+        .await
+        .unwrap()
+        .unwrap();
+}
+
+#[test]
+fn repair_refuses_a_running_fleet() {
+    crate::asyncrt::test_block_on(async {
+        let (bucket, _, _dir) = paged_table_fleet().await;
+        put_lease(&bucket, "n1", u64::MAX / 2, "open").await;
+        put_ltx(&bucket, "Room:lost", 2).await;
+        for dry_run in [true, false] {
+            let error = repair_epochs(&bucket, dry_run, |_| Ok(()))
+                .await
+                .unwrap_err();
+            assert!(format!("{error:#}").contains("running: n1"), "{error:#}");
+        }
+        assert_eq!(owner_of(&bucket, "Room:lost").await, None);
+
+        // Once the node stopped and its log is sealed, the repair proceeds.
+        put_lease(&bucket, "n1", 1, "sealed").await;
+        let report = repair_epochs(&bucket, false, |_| Ok(())).await.unwrap();
+        assert_eq!(report.repaired, 1);
+    });
+}
+
+/// A node that starts during the walk can activate a root below a dormant
+/// facet's epoch, since facets restore on demand. The repair must not clear
+/// its record while it may still serve the cell, nor while its log holds
+/// writes the bucket does not have yet.
+#[test]
+fn repair_leaves_a_cell_whose_owner_may_still_serve_it() {
+    crate::asyncrt::test_block_on(async {
+        let (bucket, _, _dir) = paged_table_fleet().await;
+        bucket
+            .put_cas(
+                "cells/Room:a/own.json",
+                br#"{"node":"n2","epoch":3}"#.to_vec(),
+                None,
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        put_ltx(&bucket, "Room:a", 3).await;
+        put_ltx(&bucket, "Room:a/facets/aa", 5).await;
+        let held = Outcome::Held { owner: "n2".into() };
+
+        put_lease(&bucket, "n2", u64::MAX / 2, "open").await;
+        assert_eq!(repair_cell(&bucket, "Room:a", false).await.unwrap(), held);
+        // Its lease lapsed with the log still open: recovery comes first.
+        put_lease(&bucket, "n2", 1, "open").await;
+        assert_eq!(repair_cell(&bucket, "Room:a", false).await.unwrap(), held);
+        put_lease(&bucket, "n2", 1, "recovering").await;
+        assert_eq!(repair_cell(&bucket, "Room:a", false).await.unwrap(), held);
+        assert_eq!(
+            owner_of(&bucket, "Room:a").await.unwrap(),
+            json!({"node": "n2", "epoch": 3})
+        );
+
+        // Stopped and sealed: the record is raised.
+        put_lease(&bucket, "n2", 1, "sealed").await;
+        assert_eq!(
+            repair_cell(&bucket, "Room:a", false).await.unwrap(),
+            Outcome::Repaired(Repaired {
+                cell: "Room:a".into(),
+                from: Some(3),
+                owner: Some("n2".into()),
+                to: 5,
+            })
+        );
+        assert_eq!(
+            owner_of(&bucket, "Room:a").await.unwrap(),
+            json!({"node": "", "epoch": 5})
+        );
+    });
+}

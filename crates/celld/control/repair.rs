@@ -16,9 +16,23 @@
 //! newest non-empty epoch is above its owner record's epoch, write the
 //! record unowned at that newest epoch, so the next acquire claims the epoch
 //! after it. A record at or above the bucket's newest epoch is consistent
-//! and is left alone, which keeps every cell that can activate, and every
-//! cell a live node owns, untouched. The write is a conditional write on the
-//! token just read, so it never overwrites a record a node changed since.
+//! and is left alone, which keeps every cell that can activate untouched.
+//!
+//! The fleet must be stopped. A restore can leave a live node serving a cell
+//! at an epoch its rolled-back record no longer shows, and a node can
+//! activate a root at an epoch below a dormant facet's data, because facets
+//! restore on demand. Clearing either record would let a second node claim
+//! the cell while the first still serves it. So the repair refuses while any
+//! lease is live, and while any stopped node's log is unrecovered, since a
+//! record written unowned lets the next activation skip that recovery.
+//!
+//! A node can still start during the walk. Before each write the repair
+//! reads the lease of the node the record names and leaves the record alone
+//! unless that lease has expired with its log sealed: an expired lease never
+//! renews, and that node can only take the cell back by changing the record,
+//! which fails the conditional write on the token just read. Records left
+//! alone are reported, and the command fails, so it can be run again once
+//! those nodes have stopped.
 
 use crate::bucket::Bucket;
 use crate::ownership_store::{load_node_lease, now_ms};
@@ -54,30 +68,63 @@ pub struct Report {
     pub repaired: u64,
 }
 
+/// What one cell's check found.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum Outcome {
+    /// The record is consistent with the bucket, or the cell has no data.
+    Consistent,
+    Repaired(Repaired),
+    /// The record is behind, but names a node whose lease is live or whose
+    /// log is not sealed, so it was left alone.
+    Held {
+        owner: String,
+    },
+}
+
 /// Walk every cell in the bucket and raise each ownership record that is
 /// behind the cell's newest epoch. `each` sees every repaired cell as it is
 /// written (or found, with `dry_run`).
 ///
-/// It refuses while a node that stopped without recovery still holds an
-/// open log. Recovering that log writes the cell's acknowledged writes at
-/// the dead node's epoch, and a takeover normally waits for it because the
-/// owner record names that node. A repaired record names no node, so a cell
-/// activated after the repair would not wait, and the recovery would write
-/// into an epoch the cell had already left.
+/// It refuses while any node lease is live, and while a node that stopped
+/// without recovery still holds an open log. Recovering that log writes the
+/// cell's acknowledged writes at the dead node's epoch, and a takeover
+/// normally waits for it because the owner record names that node. A
+/// repaired record names no node, so a cell activated after the repair would
+/// not wait, and the recovery would write into an epoch the cell had already
+/// left. It fails after the walk when it left any behind record alone.
 pub async fn repair_epochs(
     bucket: &Bucket,
     dry_run: bool,
     mut each: impl FnMut(&Repaired) -> anyhow::Result<()>,
 ) -> anyhow::Result<Report> {
-    let unrecovered = unrecovered_logs(bucket).await?;
+    let leases = lease_states(bucket).await?;
+    let live: Vec<&str> = leases
+        .iter()
+        .filter(|(_, state)| *state == LeaseState::Live)
+        .map(|(node, _)| node.as_str())
+        .collect();
+    if !live.is_empty() {
+        bail!(
+            "nodes are running: {}. Repairing epochs needs a stopped fleet, because a running \
+             node can serve a cell at an epoch its restored record no longer shows. Stop every \
+             node, let its lease expire, then run repair-epochs again",
+            live.join(", ")
+        );
+    }
+    let unrecovered: Vec<&str> = leases
+        .iter()
+        .filter(|(_, state)| *state == LeaseState::Unrecovered)
+        .map(|(node, _)| node.as_str())
+        .collect();
     if !unrecovered.is_empty() {
         bail!(
-            "node logs of stopped nodes are not recovered yet: {}. Start the fleet, or \
-             leave it running, until those logs are sealed, then run repair-epochs again",
+            "node logs of stopped nodes are not recovered yet: {}. Start one node until those \
+             logs are sealed, stop it, then run repair-epochs again",
             unrecovered.join(", ")
         );
     }
     let mut report = Report::default();
+    let mut held = Vec::new();
     let mut cursor = None;
     loop {
         let page = bucket
@@ -99,55 +146,87 @@ pub async fn repair_epochs(
         }
         let mut checks = futures_util::stream::iter(cells)
             .map(|cell| async move {
-                let repaired = repair_cell(bucket, &cell, dry_run)
+                let outcome = repair_cell(bucket, &cell, dry_run)
                     .await
                     .with_context(|| format!("repair the epoch of {cell}"))?;
-                anyhow::Ok(repaired)
+                anyhow::Ok((cell, outcome))
             })
             .buffer_unordered(CONCURRENCY);
         while let Some(result) = checks.next().await {
             report.scanned += 1;
-            if let Some(repaired) = result? {
-                report.repaired += 1;
-                each(&repaired)?;
+            match result? {
+                (_, Outcome::Consistent) => {}
+                (_, Outcome::Repaired(repaired)) => {
+                    report.repaired += 1;
+                    each(&repaired)?;
+                }
+                (cell, Outcome::Held { owner }) => held.push(format!("{cell} (owned by {owner})")),
             }
         }
         cursor = page.page_token;
         if cursor.is_none() {
-            return Ok(report);
+            break;
         }
     }
+    if !held.is_empty() {
+        bail!(
+            "{} cells are behind the bucket but owned by nodes that started during the repair: \
+             {}. Stop those nodes, then run repair-epochs again",
+            held.len(),
+            held.join(", ")
+        );
+    }
+    Ok(report)
 }
 
-/// Nodes whose lease expired with a log that is still open or mid-recovery.
-async fn unrecovered_logs(bucket: &Bucket) -> anyhow::Result<Vec<String>> {
+/// Where a node lease stands for the repair.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum LeaseState {
+    /// The node may still be running.
+    Live,
+    /// Expired, with a log that is still open or mid-recovery.
+    Unrecovered,
+    /// Expired, with a sealed log or none.
+    Stopped,
+}
+
+/// The state of one node's lease, `None` when it has none.
+async fn lease_state(bucket: &Bucket, node: &str) -> anyhow::Result<Option<LeaseState>> {
     use celld_logic::log_tier::LogState;
-    let now = now_ms();
-    let mut unrecovered = Vec::new();
+    let Some(lease) = load_node_lease(bucket, node).await? else {
+        return Ok(None);
+    };
+    Ok(Some(if lease.expires_ms > now_ms() {
+        LeaseState::Live
+    } else if matches!(
+        lease.log_state,
+        Some(LogState::Open) | Some(LogState::Recovering)
+    ) {
+        LeaseState::Unrecovered
+    } else {
+        LeaseState::Stopped
+    }))
+}
+
+/// Every node lease and its state.
+async fn lease_states(bucket: &Bucket) -> anyhow::Result<Vec<(String, LeaseState)>> {
+    let mut states = Vec::new();
     for node in crate::fleet::node_lease_ids(bucket).await? {
-        let Some(lease) = load_node_lease(bucket, &node).await? else {
-            continue;
-        };
-        if lease.expires_ms <= now
-            && matches!(
-                lease.log_state,
-                Some(LogState::Open) | Some(LogState::Recovering)
-            )
-        {
-            unrecovered.push(node);
+        if let Some(state) = lease_state(bucket, &node).await? {
+            states.push((node, state));
         }
     }
-    Ok(unrecovered)
+    Ok(states)
 }
 
 /// Raise one cell's ownership record when the bucket is ahead of it.
-async fn repair_cell(
+pub(crate) async fn repair_cell(
     bucket: &Bucket,
     cell: &str,
     dry_run: bool,
-) -> anyhow::Result<Option<Repaired>> {
+) -> anyhow::Result<Outcome> {
     let Some(newest) = newest_epoch(bucket, cell).await? else {
-        return Ok(None);
+        return Ok(Outcome::Consistent);
     };
     let key = format!("cells/{cell}/own.json");
     for _ in 0..ATTEMPTS {
@@ -174,13 +253,26 @@ async fn repair_cell(
         // a cell with no record and only a preview's epoch 0 activates as it
         // always has.
         if newest <= from.unwrap_or(0) {
-            return Ok(None);
+            return Ok(Outcome::Consistent);
         }
         let owner = record
             .get("node")
             .and_then(Value::as_str)
             .filter(|node| !node.is_empty())
             .map(str::to_string);
+        // Read after the record: a node that holds the cell now has a live
+        // lease, or an unsealed log, or changes the record before it could
+        // hold it again, which fails the write below.
+        if let Some(owner) = &owner {
+            match lease_state(bucket, owner).await? {
+                None | Some(LeaseState::Stopped) => {}
+                Some(LeaseState::Live | LeaseState::Unrecovered) => {
+                    return Ok(Outcome::Held {
+                        owner: owner.clone(),
+                    })
+                }
+            }
+        }
         let repaired = Repaired {
             cell: cell.to_string(),
             from,
@@ -188,7 +280,7 @@ async fn repair_cell(
             to: newest,
         };
         if dry_run {
-            return Ok(Some(repaired));
+            return Ok(Outcome::Repaired(repaired));
         }
         // Unowned, as a release writes it: the next acquire claims
         // `newest + 1`, which no stream holds yet. Unknown fields stay.
@@ -203,7 +295,7 @@ async fn repair_cell(
                 to = newest,
                 "raised an ownership record to the bucket's newest epoch"
             );
-            return Ok(Some(repaired));
+            return Ok(Outcome::Repaired(repaired));
         }
         // A node changed the record since it was read; judge it again.
     }
