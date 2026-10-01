@@ -13,6 +13,7 @@
 //! model is refused, never silently dropped.
 use crate::bucket::Bucket;
 use crate::container::ContainerSpec;
+use crate::control::{Expect, Swap};
 use crate::note;
 use crate::protocol::{
     asset_blob_key, AssetConfig, AssetEntry, AssetIndex, AssetManifestRef, DeployPointer, Manifest,
@@ -907,7 +908,7 @@ pub async fn write(bucket: &Bucket, built: &Built) -> anyhow::Result<()> {
     // the prefix is complete, so a node can never resolve a consumer to a
     // half-uploaded deployment. The named and fleet pointers can move later
     // without tearing this queue-to-consumer relationship.
-    publish_queue_attachments(bucket, &built.manifest, &built.prefix, queue_attachments).await?;
+    let mut swaps = queue_attachment_swaps(&built.manifest, &built.prefix, queue_attachments)?;
 
     let pointer = DeployPointer {
         script_name: Some(built.script_name.clone()),
@@ -919,14 +920,34 @@ pub async fn write(bucket: &Bucket, built: &Built) -> anyhow::Result<()> {
     // The named pointer resolves service-binding components; the fleet-wide
     // one is the sole application selector, so it moves last. A concurrent
     // deploy must produce a loser, not a lost write.
-    put_pointer(
-        bucket,
-        &format!("deploy/{}/current.json", built.script_name),
-        encoded.clone(),
-    )
-    .await?;
-    put_pointer(bucket, "deploy/current.json", encoded).await?;
-    Ok(())
+    for key in [
+        format!("deploy/{}/current.json", built.script_name),
+        "deploy/current.json".to_string(),
+    ] {
+        let expect = match bucket.head(&key).await? {
+            Some((_, token)) => Expect::Token(token),
+            None => Expect::Absent,
+        };
+        swaps.push(Swap {
+            key,
+            body: encoded.clone(),
+            expect,
+        });
+    }
+    // On a table fleet the attachments and both pointers switch in one
+    // transaction; on the bucket they go in the order above.
+    match bucket.swap_all(&swaps).await {
+        Ok(None) => Ok(()),
+        Ok(Some(key)) => Err(anyhow!(
+            "write {}://{}/{key} lost a race\n\
+             Another deploy may have landed first; re-run `celld deploy`.",
+            bucket.scheme(),
+            bucket.name
+        )),
+        Err(error) => {
+            Err(error.context("Another deploy may have landed first; re-run `celld deploy`."))
+        }
+    }
 }
 
 pub(crate) struct QueueAttachmentState {
@@ -1021,17 +1042,20 @@ async fn current_queue_consumers(
         .collect())
 }
 
-pub(crate) async fn publish_queue_attachments(
-    bucket: &Bucket,
+/// The attachment writes a deployment of `manifest` at `prefix` makes: claim
+/// every queue it consumes, and release every queue it no longer does, each
+/// conditional on the attachment it read.
+pub(crate) fn queue_attachment_swaps(
     manifest: &Manifest,
     prefix: &str,
     states: Vec<QueueAttachmentState>,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<Vec<Swap>> {
     let consumer = QueueConsumerDeployment {
         script_name: manifest.script_name.clone(),
         version: manifest.version.clone(),
         prefix: prefix.to_string(),
     };
+    let mut swaps = Vec::new();
     for state in states {
         let next_consumer = if state.desired {
             Some(consumer.clone())
@@ -1053,26 +1077,16 @@ pub(crate) async fn publish_queue_attachments(
         if state.current.as_ref() == Some(&next) {
             continue;
         }
-        let body = serde_json::to_vec_pretty(&next)?;
-        match bucket
-            .put_cas(&state.key, body, state.token.as_deref())
-            .await
-        {
-            Ok(Some(_)) => {}
-            Ok(None) => {
-                bail!(
-                    "queue consumer attachment {} lost a race; another deploy may have landed first; re-run `celld deploy`",
-                    state.key
-                )
-            }
-            Err(error) => {
-                return Err(error.context(
-                    "a queue consumer attachment write may have committed; re-run `celld deploy`",
-                ));
-            }
-        }
+        swaps.push(Swap {
+            key: state.key,
+            body: serde_json::to_vec_pretty(&next)?,
+            expect: match state.token {
+                Some(token) => Expect::Token(token),
+                None => Expect::Absent,
+            },
+        });
     }
-    Ok(())
+    Ok(swaps)
 }
 
 async fn ensure_asset_blob(bucket: &Bucket, sha256: &str, body: &[u8]) -> anyhow::Result<()> {
@@ -1085,24 +1099,6 @@ async fn ensure_asset_blob(bucket: &Bucket, sha256: &str, body: &[u8]) -> anyhow
     bucket
         .put_with_meta(&key, body.to_vec(), &[("sha256", sha256)])
         .await
-}
-
-/// Compare-and-swap on a pointer: create it if absent, otherwise replace
-/// exactly the value we read.
-async fn put_pointer(bucket: &Bucket, key: &str, body: Vec<u8>) -> anyhow::Result<()> {
-    let etag = bucket.head(key).await.ok().flatten().map(|(_, etag)| etag);
-    match bucket.put_cas(key, body, etag.as_deref()).await {
-        Ok(Some(_)) => Ok(()),
-        Ok(None) => Err(anyhow!(
-            "write {}://{}/{key} lost a race\n\
-             Another deploy may have landed first; re-run `celld deploy`.",
-            bucket.scheme(),
-            bucket.name
-        )),
-        Err(error) => {
-            Err(error.context("Another deploy may have landed first; re-run `celld deploy`."))
-        }
-    }
 }
 
 /// What `celld d1` needs out of a project: the declared databases, so a name

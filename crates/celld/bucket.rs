@@ -1277,6 +1277,49 @@ impl Bucket {
         }
     }
 
+    /// Write several records as one switch. `Ok(None)` applied every write;
+    /// `Ok(Some(key))` names the first write whose expectation failed.
+    ///
+    /// On a fleet whose coordination records live in a control table, and
+    /// when every key is one of those records, the writes are one
+    /// transaction: all of them apply or none does, so a reader never sees
+    /// one moved and another not. The bucket has no transaction, so there
+    /// the writes go in order, each conditional on its own expectation, and
+    /// a failed one leaves the earlier ones applied, as one write at a time
+    /// always did.
+    pub async fn swap_all(&self, swaps: &[crate::control::Swap]) -> anyhow::Result<Option<String>> {
+        use crate::control::Expect;
+        if !swaps.is_empty() {
+            if let Some(table) = self.control_table().await? {
+                let records: Option<Vec<_>> = swaps
+                    .iter()
+                    .map(|swap| ControlKey::parse(&swap.key).map(|record| (record, swap)))
+                    .collect();
+                if let Some(records) = records {
+                    return table.transact(&records).await;
+                }
+            }
+        }
+        for swap in swaps {
+            let token = match &swap.expect {
+                Expect::Any => {
+                    self.put(&swap.key, swap.body.clone()).await?;
+                    continue;
+                }
+                Expect::Absent => None,
+                Expect::Token(token) => Some(token.as_str()),
+            };
+            if self
+                .put_cas(&swap.key, swap.body.clone(), token)
+                .await?
+                .is_none()
+            {
+                return Ok(Some(swap.key.clone()));
+            }
+        }
+        Ok(None)
+    }
+
     /// Idempotent: deleting an absent key succeeds, as S3's DELETE does.
     pub async fn delete(&self, key: &str) -> anyhow::Result<()> {
         if let Some(record @ ControlKey::Owner(_)) = ControlKey::parse(key) {

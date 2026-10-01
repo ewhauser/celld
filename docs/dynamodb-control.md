@@ -55,6 +55,11 @@ one store is worth more to you than the latency.
 Warm requests and writes acknowledged by follower nodes do not touch the
 coordination records, so they do not change.
 
+A deploy is also atomic on the table: `celld deploy` switches the queue
+consumer attachments and both deployment pointers in one DynamoDB
+transaction, so nodes never see a pointer moved without its attachments,
+and a deploy that loses a race to another changes nothing.
+
 ## What moves to the table
 
 | Record | Bucket key |
@@ -204,11 +209,13 @@ dynamodb:DescribeTable
 dynamodb:DescribeTimeToLive
 ```
 
-`celld control repair-epochs` needs `dynamodb:GetItem`, `dynamodb:PutItem`
-and `dynamodb:Query`. `celld control migrate` needs the same permissions as
-`init`, and `dynamodb:Scan` to find the table's records. While a fleet
-migrates back to the bucket, the nodes also need `dynamodb:Scan` to walk the
-ownership records. `celld control init` also needs `dynamodb:CreateTable`,
+`celld deploy` writes the pointers with `TransactWriteItems`, which needs
+only `dynamodb:PutItem` on the table. `celld control repair-epochs` needs
+`dynamodb:GetItem`, `dynamodb:PutItem` and `dynamodb:Query`. `celld control
+migrate` needs the same permissions as `init`, and `dynamodb:Scan` to find
+the table's records. While a fleet migrates back to the bucket, the nodes
+also need `dynamodb:Scan` to walk the ownership records. `celld control
+init` also needs `dynamodb:CreateTable`,
 `dynamodb:UpdateContinuousBackups` and `dynamodb:DescribeContinuousBackups`,
 and `celld control show` needs `dynamodb:DescribeContinuousBackups`.
 

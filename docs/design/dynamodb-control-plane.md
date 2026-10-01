@@ -301,8 +301,25 @@ lists and reads as it always did.
 
 ### Fleet singletons and deploy pointers
 
-The waker role, the drain token, the deploy pointers and the queue
-attachments keep their protocols unchanged, through the routed calls.
+The waker role and the drain token keep their protocols unchanged,
+through the routed calls.
+
+A deploy switches the queue attachments it changes, the named pointer and
+the fleet pointer through `Bucket::swap_all`. On a table fleet that is one
+`TransactWriteItems`, each write conditioned on the token the deploy read
+(or on absence), so a reader sees either the old deployment everywhere or
+the new one everywhere, and a deploy that lost a race to another changes
+nothing. The modules, manifests and assets are still written to the bucket
+first. The request carries a `ClientRequestToken` and is built once, so a
+transaction that timed out, answered 5xx, was throttled or hit a
+transaction conflict is repeated up to twice as the identical request, and
+DynamoDB answers a repeat of one that applied with its success instead of
+applying it again. A cancellation whose reasons include
+`ConditionalCheckFailed` is the clean rejection, and names the record that
+lost. The managed control-plane client writes the same records the same
+way, unconditionally, as it always has. On a bucket fleet the writes go in
+the old order, attachments, named pointer, fleet pointer, each conditional
+on its own expectation.
 `control_plane::deployment_exists` lists `deploy/` to find a pointer; the
 merged listing returns the table's pointers alongside the bucket's
 deployments.
@@ -600,7 +617,6 @@ These were proposed in revision 1 and are left for later:
   thirds.
 - **Replacing the capacity sample with a query.** The sample stays in the
   bucket; a table item could not hold it past a few hundred nodes.
-- **Switching the deploy pointers in one transaction.**
 - **The wake index**, which keeps its bucket protocol of immutable entry
   names and retirement watermarks.
 - **Release qualification against real DynamoDB**, beside the R2 release
