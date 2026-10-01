@@ -919,6 +919,151 @@ struct CellHydration {
     complete: AtomicBool,
 }
 
+/// How long a read of a stream's retired mark answers coverage questions
+/// before the next question reads it again.
+const RETIRED_MARK_TTL_MS: u64 = 5 * 60 * 1000;
+
+/// How long a read that found no retired mark answers before the next
+/// question reads it again. A mark is read only for a stream this node does
+/// not hold and only for a row its per-cell prefix does not cover, which is
+/// rare outside recovery, so a short wait costs little; it bounds how long a
+/// node keeps the rows of an epoch another owner retired.
+const RETIRED_MARK_ABSENT_TTL_MS: u64 = 30 * 1000;
+
+/// Restores of an unowned snapshot before a missing object is an error. Each
+/// retry lists the epochs again, so it fails only when the bucket keeps losing
+/// an object that every fresh chain still needs.
+const RESTORE_SNAPSHOT_ATTEMPTS: usize = 3;
+
+/// The body of `cells/<stream>/ltx/retired.json`.
+#[derive(serde::Serialize, serde::Deserialize)]
+struct RetiredMark {
+    retired_below: u64,
+}
+
+/// What one epoch-GC pass did for one stream.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EpochGcOutcome {
+    /// The chain's base; the stream's rows below it are covered.
+    pub retired_below: u64,
+    /// The epoch prefixes this pass deleted.
+    pub deleted: Vec<u64>,
+    /// No further pass for this activation can delete more.
+    pub settled: bool,
+}
+
+/// One superseded epoch below a stream's chain base.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct EpochBelowBase {
+    pub listed: celld_logic::epoch_gc::ListedEpoch,
+    /// Bytes under the epoch's prefix.
+    pub bytes: u64,
+}
+
+fn retired_mark_key(prefix: &str, cell: &str) -> celld_ltx::object_store::path::Path {
+    celld_ltx::object_store::path::Path::from(format!("{prefix}cells/{cell}/ltx/retired.json"))
+}
+
+/// Read one stream's retired mark from the bucket; `None` when it has none.
+pub(crate) async fn read_retired_mark(
+    store: &dyn ObjectStore,
+    prefix: &str,
+    cell: &str,
+) -> anyhow::Result<Option<u64>> {
+    match store.get(&retired_mark_key(prefix, cell)).await {
+        Ok(result) => {
+            let bytes = result.bytes().await?;
+            Ok(Some(
+                serde_json::from_slice::<RetiredMark>(&bytes)?.retired_below,
+            ))
+        }
+        Err(celld_ltx::object_store::Error::NotFound { .. }) => Ok(None),
+        Err(error) => Err(error.into()),
+    }
+}
+
+/// The most superseded epochs one owner pass summarizes and deletes. A cell
+/// with thousands of them spends one listing per epoch, so a pass takes the
+/// oldest few and the next pass continues.
+const EPOCH_GC_EPOCHS_PER_PASS: usize = 64;
+
+/// A read-only view of one stream's epochs for epoch GC.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EpochScan {
+    /// The newest listed epoch.
+    pub newest: u64,
+    /// The restore chain over every listed epoch, oldest first.
+    pub chain: Vec<u64>,
+    /// The oldest listed epochs below the chain's base, ascending, at most
+    /// the scan's bound.
+    pub below: Vec<EpochBelowBase>,
+    /// More epochs below the base exist than the scan summarized.
+    pub more_below: bool,
+}
+
+/// Scan one stream's epochs the way a restore sees them: build the restore
+/// chain over every listed epoch with the restore code, require its restore
+/// plan to resolve, and summarize each epoch below its base. `None` when the
+/// stream has no epoch or no complete chain. The owner's pass and
+/// `celld cell gc --dry-run` share this, so the dry run reports what the
+/// owner would decide.
+pub async fn scan_epochs(
+    store: &dyn ObjectStore,
+    prefix: &str,
+    cell: &str,
+    max_below: usize,
+    client_for: impl Fn(u64) -> ObjectStoreClient,
+) -> anyhow::Result<Option<EpochScan>> {
+    use celld_ltx::object_store::path::Path as ObjPath;
+    use futures_util::StreamExt as _;
+    let base_path = ObjPath::from(format!("{prefix}cells/{cell}/ltx"));
+    let mut listed: Vec<u64> = store
+        .list_with_delimiter(Some(&base_path))
+        .await?
+        .common_prefixes
+        .iter()
+        .filter_map(|p| p.filename()?.strip_prefix('e')?.parse().ok())
+        .collect();
+    listed.sort_unstable();
+    let Some(&newest) = listed.last() else {
+        return Ok(None);
+    };
+    let clients = listed.iter().map(|e| (*e, client_for(*e))).collect();
+    let chain = match EpochChain::build(clients).await {
+        Ok(chain) => chain,
+        Err(celld_ltx::Error::TxNotAvailable) => return Ok(None),
+        Err(error) => return Err(error.into()),
+    };
+    if replica::calc_restore_plan(&chain, TXID(0)).await.is_err() {
+        return Ok(None);
+    }
+    let chain: Vec<u64> = chain.spans().into_iter().map(|(e, _)| e).collect();
+    let base = chain.first().copied().unwrap_or(newest);
+    let mut below = Vec::new();
+    let superseded: Vec<u64> = listed.into_iter().filter(|e| *e < base).collect();
+    let more_below = superseded.len() > max_below;
+    for epoch in superseded.into_iter().take(max_below) {
+        let path = ObjPath::from(format!("{prefix}cells/{cell}/ltx/e{epoch}"));
+        let mut objects = store.list(Some(&path));
+        let (mut newest_ms, mut bytes) = (0_u64, 0_u64);
+        while let Some(object) = objects.next().await {
+            let object = object?;
+            newest_ms = newest_ms.max(object.last_modified.timestamp_millis().max(0) as u64);
+            bytes = bytes.saturating_add(object.size);
+        }
+        below.push(EpochBelowBase {
+            listed: celld_logic::epoch_gc::ListedEpoch { epoch, newest_ms },
+            bytes,
+        });
+    }
+    Ok(Some(EpochScan {
+        newest,
+        chain,
+        below,
+        more_below,
+    }))
+}
+
 pub struct LtxRepl {
     /// Local root: cell dbs live at `watch/<cell>/ltx/e<epoch>/db.sqlite`.
     watch: PathBuf,
@@ -1022,6 +1167,20 @@ pub struct LtxRepl {
     /// second, and the retained backlog grew for the life of the process.
     /// On 2026-09-03 a dead session's recovery read 209 of them.
     covered_by_cell: Mutex<BTreeMap<(String, u64), u64>>,
+    /// Each stream's retired mark (`cells/<stream>/ltx/retired.json`) as
+    /// last read or written, with the monotonic time of that read. A
+    /// coverage question for a stream this node does not hold reads the mark
+    /// when the per-cell answer does not reach the row, so a read is reused
+    /// for [`RETIRED_MARK_TTL_MS`], or [`RETIRED_MARK_ABSENT_TTL_MS`] when it
+    /// found none; a mark only rises, so a stale one only under-reports and
+    /// keeps a row.
+    retired_marks: Mutex<BTreeMap<String, (Option<u64>, u64)>>,
+    /// How old the newest object of a superseded epoch must be before epoch
+    /// GC deletes the epoch, or `None` when epoch GC is off
+    /// (`CELLD_LTX_RETENTION_SECS`, unset or `0`). Deletion is off by default:
+    /// turning it on is the operator's decision, not a side effect of an
+    /// upgrade.
+    epoch_gc_grace_ms: Option<u64>,
     /// The cell's TRUNCATE checkpoint threshold. Passive checkpoints never
     /// shrink the WAL FILE, so after every periodic restart the capture's
     /// tail read spans the stale high-water region — ~350 KB per sync on
@@ -1305,6 +1464,11 @@ impl LtxRepl {
                 durability_timeout_ms.saturating_mul(SNAPSHOT_BYTES_PER_MS),
             ),
             covered_by_cell: Mutex::new(BTreeMap::new()),
+            retired_marks: Mutex::new(BTreeMap::new()),
+            epoch_gc_grace_ms: crate::env_vars::optional::<u64>("CELLD_LTX_RETENTION_SECS")
+                .unwrap_or(None)
+                .filter(|secs| *secs > 0)
+                .map(|secs| secs.saturating_mul(1000)),
             truncate_pages: Some(
                 crate::env_vars::optional::<u32>("CELLD_LTX_TRUNCATE_PAGES")
                     .ok()
@@ -1451,40 +1615,100 @@ impl LtxRepl {
         Self::all_cells_shipped_tiered(&cells) && self.dirty_tails.lock().unwrap().is_empty()
     }
 
-    /// Recovery's primitive: PUT one gathered L0 segment to the exact key
-    /// the dead leader's own upload would have used. Idempotent by key.
     /// The highest TXID the cell's per-cell prefix already covers, over
-    /// every level. Recovery uses it to skip re-uploading rows the drain
-    /// points (compaction, eviction sync) have already folded in — one
-    /// LIST per level and cell instead of one PUT per historical row.
-    pub async fn covered_txid(&self, cell: &str, epoch: u64) -> u64 {
+    /// every level, or `u64::MAX` for a retired epoch. The caller passes the
+    /// highest row it needs covered. Recovery uses the answer to skip
+    /// re-uploading rows the drain points (compaction, eviction sync) have
+    /// already folded in, bundle GC and the graceful seal's scan to decide
+    /// which bundle rows are safe to drop, and the compaction overlay to
+    /// skip rows the prefix holds.
+    ///
+    /// An epoch below the stream's retired mark is covered through every
+    /// txid: the chain's base holds all of its acknowledged rows, and epoch
+    /// GC may have deleted its prefix, so a listing would answer zero and
+    /// keep its bundles and re-upload its rows forever. The mark is read only
+    /// when the per-cell answer does not reach `needed`, so a covered row
+    /// costs no mark read on any fleet, and a mark read never stands between
+    /// a question and a per-cell answer that already settles it. Every node
+    /// reads the mark, whether or not it runs epoch GC itself: while a fleet
+    /// rolls the setting out, a node without it must still seal over, drop,
+    /// and not re-upload the rows of an epoch another node deleted. An
+    /// absent mark is cached for [`RETIRED_MARK_ABSENT_TTL_MS`], which bounds
+    /// how long such a node lags a new mark.
+    ///
+    /// A stream this node holds a handle for answers from its per-cell
+    /// watermark alone and reads no mark. A busy cell's bundle rows sit above
+    /// that watermark until the next drain point, so reading the mark there
+    /// would cost a GET on every bundle-GC tick for every active cell, on
+    /// every fleet. Holding the handle means the epoch is this node's current
+    /// one, or a fenced node's whose successor may have retired it, because
+    /// teardown is asynchronous; that answer is lower than the truth, which
+    /// keeps rows and is safe. Once the handle goes, its coverage moves to
+    /// the remembered watermark and the mark decides rows above it. The
+    /// compaction overlay therefore reads no mark while its cell is
+    /// resident, and a fenced compactor can write merged rows back under a
+    /// retired prefix; no restore reads a prefix below the base, and a later
+    /// owner pass deletes it again once the grace passes, measured from the
+    /// rewritten objects. The current owner keeps it when it is the epoch
+    /// just before its own, because a plan never deletes that epoch.
+    ///
+    /// This is safe only because the base holds every acknowledged row of
+    /// every epoch below it. A successor claims a cell only after the prior
+    /// owner's node-log session is recovered and sealed, and recovery puts
+    /// every acknowledged row in the per-cell prefix first, so the
+    /// successor's restore, and with it the base, contains those rows; a
+    /// local wake restores from the file its own rows were shipped from. A
+    /// recovery upload that lands after the seal can only repeat rows the
+    /// base already holds.
+    pub async fn covered_txid(&self, cell: &str, epoch: u64, needed: u64) -> u64 {
         let key = (cell.to_string(), epoch);
-        let resident = self
-            .cells
-            .lock()
-            .unwrap()
-            .get(&key)
-            .map(|handle| percell_coverage(handle));
+        // Held is decided by the handle, not its value: a fresh cell that has
+        // not reached a drain point holds a zero watermark and must not fall
+        // through to the mark on every tick either.
+        let (held, resident) = {
+            let cells = self.cells.lock().unwrap();
+            let handle = cells.get(&key);
+            (
+                handle.is_some(),
+                handle
+                    .map(|handle| percell_coverage(handle))
+                    .filter(|covered| *covered > 0),
+            )
+        };
+        // A handoff snapshot raises the remembered watermark while the
+        // evicting handle is still resident, so the higher of the two holds.
         let known = self.covered_by_cell.lock().unwrap().get(&key).copied();
-        if let Some(covered) = resident.filter(|covered| *covered > 0).max(known) {
+        if held {
+            return resident.max(known).unwrap_or(0);
+        }
+        let covered = match resident.max(known) {
+            Some(covered) => covered,
+            // Nothing this process put there: a cell it never served, or one
+            // it has not shipped yet. Ask the bucket once, with one listing
+            // of the epoch's whole prefix rather than one per level, and
+            // remember the answer; the watermark only rises, so a remembered
+            // value never over-reports. A restarting node recovers thousands
+            // of cells it never served, so this listing, and a mark read for
+            // a row it does not cover, is its recovery cost.
+            None => match self.client_for(cell, epoch).max_txid_all_levels().await {
+                Ok(txid) => {
+                    // Zero is a useful answer too: undrained cells otherwise
+                    // force the same empty-prefix LIST on every GC tick. A
+                    // read error is not zero coverage and must remain
+                    // retryable.
+                    self.note_covered(cell, epoch, txid.0);
+                    txid.0
+                }
+                Err(_) => 0,
+            },
+        };
+        if covered >= needed {
             return covered;
         }
-        // Nothing this process put there: a cell it never served, or one it
-        // has not shipped yet. Ask the bucket once, with one listing of the
-        // epoch's whole prefix rather than one per level, and remember the
-        // answer; the watermark only rises, so a remembered value never
-        // over-reports. A restarting node recovers thousands of cells it
-        // never served, so this listing is its whole recovery cost.
-        match self.client_for(cell, epoch).max_txid_all_levels().await {
-            Ok(txid) => {
-                // Zero is a useful answer too: undrained cells otherwise
-                // force the same empty-prefix LIST on every GC tick. A read
-                // error is not zero coverage and must remain retryable.
-                self.note_covered(cell, epoch, txid.0);
-                txid.0
-            }
-            Err(_) => 0,
+        if celld_logic::epoch_gc::retired(epoch, self.retired_mark(cell).await) {
+            return u64::MAX;
         }
+        covered
     }
 
     /// Remember that the bucket holds this cell epoch through `txid`.
@@ -1492,6 +1716,222 @@ impl LtxRepl {
         let mut covered = self.covered_by_cell.lock().unwrap();
         let entry = covered.entry((cell.to_string(), epoch)).or_insert(0);
         *entry = (*entry).max(txid);
+    }
+
+    fn retired_mark_key(&self, cell: &str) -> celld_ltx::object_store::path::Path {
+        retired_mark_key(&self.prefix, cell)
+    }
+
+    /// The stream's retired mark, by its exact stream name. A read error
+    /// answers the cached mark, or none: a missing mark keeps rows, which
+    /// costs space, never data.
+    pub async fn retired_mark(&self, cell: &str) -> Option<u64> {
+        let now = asyncrt::mono_ms();
+        if let Some((mark, read_at)) = self.retired_marks.lock().unwrap().get(cell) {
+            let ttl = if mark.is_some() {
+                RETIRED_MARK_TTL_MS
+            } else {
+                RETIRED_MARK_ABSENT_TTL_MS
+            };
+            if now.saturating_sub(*read_at) < ttl {
+                return *mark;
+            }
+        }
+        let Ok(mark) = read_retired_mark(self.store.as_ref(), &self.prefix, cell).await else {
+            // A failed read answers the cached mark and restarts its wait:
+            // 30 s with nothing cached, and 5 min for an expired cached mark,
+            // which a failed reread keeps. A store outage therefore does not
+            // cost a GET on every question, and a stale answer is only low.
+            return self.remember_retired(cell, None, now);
+        };
+        self.remember_retired(cell, mark, now)
+    }
+
+    /// Record that the stream's epochs below `below` are retired. The owner
+    /// writes this before it deletes any of them, so a prefix is never gone
+    /// while its bundle rows still look uncovered. The write is not
+    /// conditional: an owner that stalled after its checks can write an
+    /// older, lower base over a successor's mark. Every written base was a
+    /// real base once, so a lower mark only makes some rows look uncovered
+    /// again, which costs a re-upload and a later pass, not data.
+    async fn record_retired(&self, cell: &str, below: u64) -> anyhow::Result<()> {
+        let body = serde_json::to_vec(&RetiredMark {
+            retired_below: below,
+        })?;
+        self.store
+            .put(&self.retired_mark_key(cell), body.into())
+            .await
+            .map_err(|error| anyhow!("record retired epochs of {cell} below e{below}: {error}"))?;
+        self.remember_retired(cell, Some(below), asyncrt::mono_ms());
+        Ok(())
+    }
+
+    /// Cache a mark read or written at `at`. The cached value never falls,
+    /// because an older read racing a newer write must not lower it.
+    /// Returns the mark the cache now holds.
+    fn remember_retired(&self, cell: &str, mark: Option<u64>, at: u64) -> Option<u64> {
+        let mut marks = self.retired_marks.lock().unwrap();
+        let entry = marks.entry(cell.to_string()).or_insert((None, at));
+        entry.0 = entry.0.max(mark);
+        entry.1 = at;
+        entry.0
+    }
+
+    /// The epoch-GC grace in milliseconds, or `None` when epoch GC is off.
+    pub(crate) fn epoch_gc_grace_ms(&self) -> Option<u64> {
+        self.epoch_gc_grace_ms
+    }
+
+    /// The streams this node holds, with the epoch it holds each at.
+    pub(crate) fn resident_epochs(&self) -> Vec<(String, u64)> {
+        self.cells.lock().unwrap().keys().cloned().collect()
+    }
+
+    /// Delete one stream's superseded epoch prefixes, as the owner of
+    /// `epoch` (denoland/celld#240).
+    ///
+    /// The steps run in a fixed order, and the order is the fence:
+    ///
+    /// 1. Build the restore chain over every listed epoch, the owner's
+    ///    included, with the restore code. Stop unless its newest span is
+    ///    `epoch` and the chain's full restore plan resolves. The first
+    ///    proves the owner's own opener is listed, so a successor that claims
+    ///    the cell after step 2 lists it too and restores from a base at or
+    ///    above this one. A successor that claimed before step 2 fails it.
+    /// 2. `confirm_owner`: read the ownership record and require this node
+    ///    at `epoch`. Reading before step 1 would let a fenced owner delete
+    ///    the base of a successor that restored while its epoch was still
+    ///    empty.
+    /// 3. Record the stream's retired mark, so coverage treats the rows of
+    ///    every epoch below the base as covered before any prefix is gone.
+    /// 4. Delete the planned prefixes. A crash here leaves the mark, and the
+    ///    next owner deletes the rest.
+    ///
+    /// A conditional write on the ownership record would add nothing: the
+    /// cell can move between any check and the delete. What makes the late
+    /// delete safe is that an epoch below the base never re-enters a chain.
+    /// The argument assumes a list-after-write consistent store.
+    pub async fn gc_superseded_epochs<F, Fut>(
+        &self,
+        cell: &str,
+        epoch: u64,
+        grace_ms: u64,
+        confirm_owner: F,
+    ) -> anyhow::Result<Option<EpochGcOutcome>>
+    where
+        F: FnOnce() -> Fut,
+        Fut: std::future::Future<Output = anyhow::Result<bool>>,
+    {
+        // The cheap facts first, so a cell that cannot decide anything costs
+        // no listing. A cell that is not resident here has no owner here to
+        // run this pass. A paged cell reads pages from its activation chain's
+        // objects until its fill completes, and a paged cell whose fill is
+        // off never completes one, so only a positive completion unpins it.
+        let pinned_reads = match self.cells.lock().unwrap().get(&(cell.to_string(), epoch)) {
+            None => return Ok(None),
+            Some(handle) => {
+                handle.paged_vfs.is_some()
+                    && handle
+                        .hydration
+                        .as_ref()
+                        .is_none_or(|fill| !fill.complete.load(Ordering::SeqCst))
+            }
+        };
+        // The plan below refuses pinned reads too; returning here skips the
+        // listings it would not use.
+        if pinned_reads {
+            return Ok(None);
+        }
+        let Some(scan) = scan_epochs(
+            self.store.as_ref(),
+            &self.prefix,
+            cell,
+            EPOCH_GC_EPOCHS_PER_PASS,
+            |e| self.client_for(cell, e),
+        )
+        .await?
+        else {
+            return Ok(None);
+        };
+        if scan.newest != epoch {
+            if scan.newest < epoch {
+                self.queue_epoch_opener(cell, epoch);
+            }
+            return Ok(None);
+        }
+        let below: Vec<_> = scan.below.iter().map(|b| b.listed).collect();
+        // The grace compares the store's upload times with this node's
+        // clock, so skew shortens or lengthens it. It is a margin for a slow
+        // unowned reader, not part of the safety argument.
+        let now_ms = asyncrt::wall_ms().max(0) as u64;
+        let Some(plan) = celld_logic::epoch_gc::plan(
+            epoch,
+            &scan.chain,
+            &below,
+            self.retired_mark(cell).await,
+            pinned_reads,
+            now_ms,
+            grace_ms,
+        ) else {
+            return Ok(None);
+        };
+        if !confirm_owner().await? {
+            return Ok(None);
+        }
+        if plan.record {
+            self.record_retired(cell, plan.retired_below).await?;
+        }
+        for victim in &plan.delete {
+            self.client_for(cell, *victim)
+                .delete_all()
+                .await
+                .map_err(|error| anyhow!("delete {cell} e{victim}: {error}"))?;
+            self.note_covered(cell, *victim, u64::MAX);
+        }
+        // Only the previous epoch may stay below the base once the grace has
+        // passed; the next activation's pass deletes it.
+        let settled = !scan.more_below
+            && below
+                .iter()
+                .all(|l| plan.delete.contains(&l.epoch) || l.epoch + 1 == epoch);
+        Ok(Some(EpochGcOutcome {
+            retired_below: plan.retired_below,
+            deleted: plan.delete,
+            settled,
+        }))
+    }
+
+    /// Folds a cloned activation's durable rows into its first L1 object, the
+    /// opener that epoch GC waits for. Under bundled tiering a write reaches
+    /// only the node's bundles, and the first per-cell object is otherwise
+    /// the threshold fold (`CELLD_LTX_COMPACTION_MIN_TXIDS`) or a handoff
+    /// snapshot. A cell with fewer writes per activation then never lists
+    /// its opener and never deletes a superseded epoch; the 2026-09-30 GCE
+    /// run measured that. The fold opens at TXID 1, so it makes the owner's
+    /// epoch the chain's base, and the next pass decides. A paged epoch
+    /// already lists its marker, and a cell without a durable row has
+    /// nothing to fold. Publishing a handoff snapshot instead would cancel
+    /// compaction for the rest of the activation, and rows after the image
+    /// would reach no per-cell object.
+    fn queue_epoch_opener(&self, cell: &str, epoch: u64) {
+        let Some(handle) = self
+            .cells
+            .lock()
+            .unwrap()
+            .get(&(cell.to_string(), epoch))
+            .cloned()
+        else {
+            return;
+        };
+        let Some(compaction) = &handle.compaction else {
+            return;
+        };
+        if compaction.base_txid == 1
+            && compaction.compacted_txid.load(Ordering::SeqCst) == 0
+            && handle.durable_txid.load(Ordering::SeqCst) > 0
+        {
+            enqueue_compaction(&handle);
+        }
     }
 
     /// Highest contiguous TXID prefix proved by the live per-cell L0/L1 objects.
@@ -1548,6 +1988,8 @@ impl LtxRepl {
         Ok(covered)
     }
 
+    /// Recovery's primitive: PUT one gathered L0 segment to the exact key
+    /// the dead leader's own upload would have used. Idempotent by key.
     pub async fn upload_raw_l0(
         &self,
         cell: &str,
@@ -3288,30 +3730,64 @@ impl LtxRepl {
 
     /// Restore the newest durable replica into a private snapshot without
     /// claiming or activating the cell.
+    ///
+    /// This reader holds no ownership, so the owner's epoch GC can delete an
+    /// epoch this restore planned against. A missing planned object therefore
+    /// rebuilds the chain from a fresh epoch listing and restores again; the
+    /// new chain starts at a base at or above the deleted epochs. Replanning
+    /// over the old chain would pick the same deleted objects, because the
+    /// chain caches its listings.
     pub async fn restore_snapshot(&self, cell: &str) -> anyhow::Result<Option<RestoredSnapshot>> {
-        let Some(chain) = self.epoch_chain(cell, u64::MAX).await? else {
-            return Ok(None);
-        };
-        let epoch = chain.spans().last().map_or(0, |(e, _)| *e);
-        let directory = self.watch.join(format!(".restore-{cell}"));
-        let _ = self.ltx_host.remove_dir_all(&directory);
-        self.ltx_host.create_dir_all(&directory)?;
-        let path = directory.join("db.sqlite");
-        replica::restore_with_host_and_download_slots(
-            &chain,
-            &path,
-            TXID(0),
-            self.ltx_host.clone(),
-            self.restore_slots.clone(),
-        )
-        .await
-        .map_err(|error| anyhow!("restore snapshot {cell} e{epoch}: {error}"))?;
-        Ok(Some(RestoredSnapshot::new(
-            epoch,
-            path,
-            directory,
-            self.ltx_host.filesystem(),
-        )))
+        let mut attempts_left = RESTORE_SNAPSHOT_ATTEMPTS;
+        loop {
+            // GC can delete a listed epoch while the chain lists its levels,
+            // which leaves a continuation without its base; list again.
+            let chain = match self.epoch_chain(cell, u64::MAX).await {
+                Ok(Some(chain)) => chain,
+                Ok(None) => return Ok(None),
+                Err(_) if attempts_left > 1 => {
+                    attempts_left -= 1;
+                    continue;
+                }
+                Err(error) => return Err(error),
+            };
+            // A base deleted between the epoch listing and its level listing
+            // does not fail the build: the walk skips the empty epoch and
+            // returns a continuation whose oldest span starts past TXID 1.
+            if chain.spans().first().is_none_or(|(_, lo)| *lo != TXID(1)) && attempts_left > 1 {
+                attempts_left -= 1;
+                continue;
+            }
+            let epoch = chain.spans().last().map_or(0, |(e, _)| *e);
+            let directory = self.watch.join(format!(".restore-{cell}"));
+            let _ = self.ltx_host.remove_dir_all(&directory);
+            self.ltx_host.create_dir_all(&directory)?;
+            let path = directory.join("db.sqlite");
+            match replica::restore_with_host_and_download_slots(
+                &chain,
+                &path,
+                TXID(0),
+                self.ltx_host.clone(),
+                self.restore_slots.clone(),
+            )
+            .await
+            {
+                Ok(_) => {
+                    return Ok(Some(RestoredSnapshot::new(
+                        epoch,
+                        path,
+                        directory,
+                        self.ltx_host.filesystem(),
+                    )))
+                }
+                Err(celld_ltx::Error::LTXMissing | celld_ltx::Error::TxNotAvailable)
+                    if attempts_left > 1 =>
+                {
+                    attempts_left -= 1
+                }
+                Err(error) => return Err(anyhow!("restore snapshot {cell} e{epoch}: {error}")),
+            }
+        }
     }
 
     pub fn prune_local_cache(&self, max_bytes: u64) -> std::io::Result<(usize, usize, u64)> {
@@ -3588,9 +4064,19 @@ fn maybe_queue_compaction(handle: &CellHandle, durable_txid: u64) {
         .saturating_sub(compaction.compacted_txid.load(Ordering::SeqCst))
         >= compaction.min_txids;
     let due_by_bytes = compaction.pending_bytes.load(Ordering::SeqCst) >= compaction.min_bytes;
+    if due_by_txids || due_by_bytes {
+        enqueue_compaction(handle);
+    }
+}
+
+/// Queues one round regardless of the thresholds, behind the same
+/// cancellation, backoff and single-flight guards as a threshold round.
+fn enqueue_compaction(handle: &CellHandle) {
+    let Some(compaction) = &handle.compaction else {
+        return;
+    };
     if compaction.cancelled.load(Ordering::SeqCst)
         || asyncrt::mono_ms() < compaction.retry_after_ms.load(Ordering::SeqCst)
-        || !(due_by_txids || due_by_bytes)
         || compaction
             .queued
             .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)

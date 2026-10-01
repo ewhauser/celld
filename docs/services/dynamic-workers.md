@@ -41,8 +41,12 @@ not a module, so celld refuses them as workerd does. A static or dynamic relativ
 module's name. Thus, `dir/a.js` can import `./b.js` when the map contains
 `dir/b.js`. `compatibilityDate` is required, as in workerd, and
 `compatibilityFlags` is optional. Both select the runtime behavior of the loaded
-Worker. The module sources can
-total 64 MiB, which is the workerd limit. A `WorkerCode.limits` object can set
+Worker. The module sources can total 64 MiB by default, matching workerd.
+A fleet operator can set `CELLD_MAX_DYNAMIC_WORKER_CODE_BYTES` to a positive
+byte count before starting each node to admit larger module sets. This is
+node configuration; loaded code cannot raise it through `WorkerCode`. Heap,
+execution, and admission limits continue to apply independently.
+A `WorkerCode.limits` object can set
 `cpuMs` and `subRequests` for each invocation. celld refuses a `WorkerCode`
 that sets `allowExperimental`. Read the
 [API reference](https://developers.cloudflare.com/dynamic-workers/api-reference/)
@@ -104,16 +108,24 @@ for the Cloudflare behavior.
 `get(id, getCode)` memoizes the load by id inside one loader binding of one
 host isolate. The first use of an id runs `getCode` and compiles the modules,
 and a later use of that id in the same isolate reuses the compiled isolate and
-runs no callback, so module scope survives between the two calls. Another
-isolate holds its own map. A request that a different node serves, or a fresh
-isolate on the same node, therefore pays the compile again. Two `worker_loaders`
-entries are two maps as well, so the same id in each one loads twice.
+runs no callback while the loaded Worker is alive. Module scope therefore
+survives between the two calls. Another isolate holds its own map. A request
+that a different node serves, or a fresh isolate on the same node, pays the
+compile again. Two `worker_loaders` entries are two maps as well, so the same
+id in each one loads twice.
 Cloudflare describes the same reuse as a possibility and not as a guarantee.
 
-`load(code)` caches nothing and compiles on each call. Its isolate goes away
-when the application disposes the stub, and a garbage collection of an
-undisposed stub drops it as a backstop. A `get()` stub instead stays in the
-memo map, so its loaded isolate lives as long as the loader's isolate does.
+`load(code)` caches nothing and compiles on each call. For both methods, a
+stub, an entrypoint, a Durable Object class, or a running facet keeps its
+loaded Worker alive. The id map holds only a weak reference, so the garbage
+collector can release a Worker after its last reference disappears. A later
+`get()` call with that id then runs `getCode` again. The garbage collector does
+not guarantee a release time.
+
+The `dispose()` method of a stub releases its loaded Worker explicitly, and it
+removes the id from the map. The other stubs for that load cannot start new
+calls, and a later `get()` call creates a replacement. An in-flight call
+finishes with the Worker that started it.
 
 Every loaded Worker belongs to the isolate that created it. celld drops all of
 them when that isolate retires, which happens when the request load falls or

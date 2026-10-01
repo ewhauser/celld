@@ -324,6 +324,7 @@ mod asyncrt_contract_tests {
 }
 pub mod bucket;
 pub mod cell_cli;
+pub mod cell_dispatch;
 mod cell_host;
 pub mod cell_runtime;
 pub mod clean_reload;

@@ -33,7 +33,21 @@ or the cap removes it. A cell that then keeps its
 hibernatable WebSocket clients, and stays on its node, is **hibernated**.
 A cell that no node holds is **inactive**. An inactive cell is only an
 object in the bucket, so it costs almost zero, and every cell starts in
-this state.
+this state. A paged activation adds its epoch prefix to the bucket
+immediately, when it uploads its marker. An activation that is not paged
+adds the prefix at its first per-cell upload. With fleet durability, a
+write goes first to the log bundles of the node. The first per-cell
+upload is therefore the first L1 compaction of the activation, a handoff
+snapshot, or a direct upload while the log ensemble of the node is
+degraded. When epoch GC is on and the cell has an older prefix, the owner
+does not wait for `CELLD_LTX_COMPACTION_MIN_TXIDS`. It starts that
+compaction at its next epoch GC pass after the first write, and a pass
+can come up to 5 minutes later. With `CELLD_LTX_COMPACTION=0` the owner
+does not compact, so the prefix waits for one of the other uploads. A
+restore reads only
+the newest epochs of a cell. celld deletes the older prefixes only when
+`CELLD_LTX_RETENTION_SECS` enables epoch GC, so without it the bytes of
+a cell increase with each activation that adds a prefix.
 
 A cell keeps no memory across these transitions, so the constructor
 runs again on the next event. A hibernated cell wakes the same way a
@@ -133,6 +147,7 @@ A cell fits a workload that divides into named, stateful units:
 - [Testing](testing.md)
 - [Performance tests](performance-tests.md)
 - [WebAssembly](wasm.md)
+- [Python Workers](services/workers.md#python-workers)
 
 ## Services
 
@@ -685,6 +700,12 @@ not report an empty node while it still owns its hibernated cells. The
 `resident_cells` value includes only the cells that consume the local
 runtime capacity.
 
+The shared runtime samples the process memory, open files, and CPU every
+second, and once before the first lease acquisition. The lease and `/state`
+report these values from the latest sample, so they are normally one sample
+period old. The `allocator` and `libc_malloc` objects in `/state` are read
+when the request arrives.
+
 The internal listener answers `GET /state` with the live counters:
 `owned_cells`, `occupied`, `capacity_waiting`, `activation_waiting`, `restoring`,
 `shedding`, and the memory values. The `allocator` object reports the
@@ -922,6 +943,19 @@ Some upgrades are exceptions:
   the entries-only format, so the v0.6.0 node refuses to start. A fleet
   that uses `bucket` durability has no followers, so it can use a rolling
   update.
+- The upgrade from v0.6.0 to v0.6.1 can use a rolling update. Do not set
+  `CELLD_LTX_RETENTION_SECS` on a node until every node runs v0.6.1. A
+  v0.6.0 node does not read `cells/<cell>/ltx/retired.json`, so it treats
+  the rows of a deleted epoch as unstored. That node keeps those bundle
+  rows, it cannot seal its log at shutdown, and its next start uploads the
+  rows again. No data is lost, but storage use and recovery time increase.
+  A v0.6.0 node refuses a Python Workers deployment, so deploy a Python
+  application only after every node runs v0.6.1. A v0.6.0 node also refuses
+  an asset index with a file larger than 25 MiB. Therefore, raise
+  `CELLD_MAX_ASSET_FILE_BYTES` above that size only after every node runs
+  v0.6.1. A rollback to v0.6.0 can
+  also use a rolling update. Unset `CELLD_LTX_RETENTION_SECS` on every node
+  first, so that no v0.6.1 node deletes an epoch while a v0.6.0 node runs.
 
 The internal listener also provides an alpha operator API. `/state`
 reports the node state, and its `node_load` object is the same load sample
@@ -1048,6 +1082,29 @@ so a script reads only instance data:
 celld cell list --all --json --bucket "$CELLD_BUCKET" > cells.ndjson
 ```
 
+To see the superseded epoch prefixes that epoch GC can delete, run
+`celld cell gc --dry-run`. The command takes the same listing options and
+writes nothing. It prints one row for each cell that has candidates: the
+candidate epochs, their bytes, and the base of the cell's restore chain.
+The owners can delete later than the report shows, or not at all:
+
+- Only a fleet node with a positive `CELLD_LTX_RETENTION_SECS` deletes,
+  and it uses that grace instead of `--grace-secs`.
+- A paged cell waits until its local file is complete.
+- An inactive cell waits until it is active again.
+- A cell that is not paged waits until its activation has a write, so a
+  cell that is only read deletes nothing. After the write, the owner
+  compacts at its next pass and deletes at the pass after it. With
+  `CELLD_LTX_COMPACTION=0`, the cell waits for a handoff snapshot.
+- One pass deletes at most 64 epochs of a cell.
+
+If the command cannot read a cell, it reports the cell, continues, and
+exits with an error at the end.
+
+```sh
+celld cell gc --dry-run --bucket "$CELLD_BUCKET" --grace-secs 3600
+```
+
 ## Hot-cell overload
 
 celld admits a maximum of 64 concurrent fetch events for one Durable Object.
@@ -1116,15 +1173,21 @@ For the full list, run `celld -h`. This table shows the primary settings:
 | `CELLD_LOG_PIPELINE` | The limit for fleet log rounds that can be in flight (default: 4) |
 | `CELLD_LOG_HEDGE_MS` | The wait before a leader sends a second copy of a slow log append to a follower. The default is adaptive: celld derives the wait from the slowest recent append in the ensemble (4 times that append, at least 250 ms, and always below the eviction backstop), so a loaded fleet does not send copies for honest slow appends. Set a value to use a fixed wait in milliseconds, and set `0` to disable the second copy. An append is idempotent per sequence, so the copy is safe, and the leader uses the answer that arrives first and confirms |
 | `CELLD_LTX_TRUNCATE_PAGES` | The WAL size, in pages, at which celld truncates an ordinary cell's WAL file at the next checkpoint (default: 128, a 512 KiB cap). A passive checkpoint does not shrink the WAL file, so each capture reads the stale region after a restart. The truncate keeps the read small. A truncate ends in a full image of the database, so a database larger than 4 MiB also waits until its WAL is larger than the database. Queue cells use passive checkpoints only. Set `0` to disable the truncate for all cells |
+| `CELLD_LTX_RETENTION_SECS` | Unset or `0` by default, and then celld deletes no epoch prefix. A positive value enables epoch GC on a fleet node (`CELLD_DURABILITY=fleet`, the default); a node with `CELLD_DURABILITY=bucket` deletes nothing. After the owner of a cell activates it, the owner deletes each epoch prefix below the base of the cell's restore chain. The base is the epoch where a restore stops, because that epoch opens with a whole-database snapshot. A paged cell waits until its local file is complete, because until then it reads pages from the older epochs. A cell that is not paged waits until its activation has a write, so a cell that is only read deletes nothing. After the write, the owner compacts the new rows into the first L1 object of its epoch, even below `CELLD_LTX_COMPACTION_MIN_TXIDS`. That object lets the owner prove that a successor restores from its epoch. The owner compacts at its next pass after the write and deletes at the pass after the compaction, and each pass can come up to 5 minutes after the previous one. With `CELLD_LTX_COMPACTION=0` the owner does not compact, so the cell waits for a handoff snapshot. With `CELLD_LTX_HYDRATE_MBPS=0` a paged cell never completes its file, so epoch GC never runs for it. The owner keeps its own epoch and the epoch before it. It also keeps each epoch whose newest object is younger than the value, in seconds. The owner first writes `cells/<cell>/ltx/retired.json`, so that bundle GC and recovery treat the rows of those epochs as stored. Epoch GC skips facet streams. It needs a store with list-after-write consistency; see [the storage requirements](guarantees.md#what-the-bucket-must-provide). Run `celld cell gc --dry-run` to see the candidates |
 | `CELLD_LTX_COMPACTION` | The default is `1`: celld creates additive L1 objects, and a takeover reads tens of objects instead of thousands. Set `0` on every node of a mixed fleet until all nodes can read v0.5.2 block objects, because an old reader cannot take over a cell after its first L1 publication |
 | `CELLD_LTX_COMPACTION_MIN_TXIDS` | The durable TXID distance that queues a background L1 attempt (default: 256) |
 | `CELLD_LTX_COMPACTION_MIN_MB` | The L0 bytes since the last fold that queue a background L1 attempt, in MiB (default: 32, at most 64). The byte threshold lets a cell with large rows compact before it reaches the transaction threshold |
-| `CELLD_LTX_PAGED` | The default is `1`: celld restores a taken-over cell by paging when its chain is at least `CELLD_LTX_PAGED_MIN_MB`. It opens the database through a fault-in VFS that reads each page from the bucket on first use, instead of downloading the whole restore chain first, and a smaller chain is cloned. Set `0` to clone every chain. A paged cell's local file is a cache, so celld does not preserve it as an eviction snapshot and does not publish a handoff snapshot from it. A paged epoch continues the chain it paged in. celld uploads a small marker object at the next transaction before the cell serves, and its later objects follow it, so a restore composes the epochs. Set `0` on every node of a mixed fleet until all nodes run v0.4.1 or later, because a paged epoch holds no whole-database snapshot and a node before v0.4.1 restores one epoch only. Such a node refuses the activation of that cell, and the refusal is permanent for the cell. A full activation opens its epoch with a whole-database snapshot. A node pages only while every live lease in the fleet publishes a bucket format that reads a paged epoch, so a rolling update from a release without paged restore clones until that release has left the fleet; the `paged_gate` log event reports each change. A clean reload does not keep a paged cell resident; the next process pages it in again. An inspect of a paged cell must read the bucket, because celld does not copy the cell's sparse file in place. After the activation, celld fills the rest of the file in the background at `CELLD_LTX_HYDRATE_MBPS`, so a cell that stays resident soon reads only its local file |
+| `CELLD_LTX_PAGED` | The default is `1`: celld restores a taken-over cell by paging when its chain is at least `CELLD_LTX_PAGED_MIN_MB`. It opens the database through a fault-in VFS that reads each page from the bucket on first use, instead of downloading the whole restore chain first, and a smaller chain is cloned. Set `0` to clone every chain. A paged cell's local file is a cache, so celld does not preserve it as an eviction snapshot and does not publish a handoff snapshot from it. A paged epoch continues the chain it paged in. celld uploads a small marker object at the next transaction before the cell serves, and its later objects follow it, so a restore composes the epochs. Set `0` on every node of a mixed fleet until all nodes run v0.4.1 or later, because a paged epoch holds no whole-database snapshot and a node before v0.4.1 restores one epoch only. Such a node refuses the activation of that cell, and the refusal is permanent for the cell. A full activation opens its epoch with a whole-database snapshot. A node pages only while every live lease in the fleet publishes a bucket format that reads a paged epoch, so a rolling update from a release without paged restore clones until that release has left the fleet; the `paged_gate` log event reports each change. A clean reload does not keep a paged cell resident; the next process pages it in again. An inspect of a paged cell must read the bucket, because celld does not copy the cell's sparse file in place. After the activation, celld fills the rest of the file in the background at `CELLD_LTX_HYDRATE_MBPS`, so a cell that stays resident soon reads only its local file. Until that fill completes, a read of a page that is not in the local file is a page fault. The fault reads the bucket synchronously inside the JavaScript turn, so it blocks the cell and the other cells on its isolate until its bucket reads complete. A query that reads many such pages can therefore take minutes. Set `CELLD_LTX_PAGED=0` to remove the fault path for every cell. A higher `CELLD_LTX_PAGED_MIN_MB` removes the fault path only for a chain that is smaller than the new value. In both cases, the cost is a slower activation, because celld downloads the whole chain before the cell serves |
 | `CELLD_LTX_PAGED_MIN_MB` | The chain size, in MiB, from which a restore pages instead of cloning (default: 256). A clone of a smaller chain takes seconds and fits the node's memory, so it needs no fault path and no hydration. Set `0` to page every chain |
 | `CELLD_LTX_HYDRATE_MBPS` | The rate, in MiB per second, at which a paged cell's file fills in the background (default: 16). One cell fills at a time per node. Set `0` to keep a paged cell sparse, so every cold page is read from the bucket on first use |
 | `CELLD_LTX_COMPACTIONS` | The node-wide limit for concurrent background L1 attempts (default: 2). `CELLD_RELEASES` bounds final handoff snapshots |
 | `CELLD_LTX_DURABILITY_TIMEOUT_SECS` | The budget for one durability proof, in seconds (default: 10). The budget runs from the moment the node starts to upload the write. A write that waits behind the uploads of other cells waits while the node proves other writes, for at most six budgets. The same budget bounds the final snapshot or L0 fallback of a handoff. A slow object store can need a longer budget for a large write |
+| `CELLD_TOKIO_THREADS` | The worker thread count of the host Tokio runtime (default: the CPU count) |
 | `RUST_LOG` | The runtime log filter |
+
+When a node starts, celld emits one `host_runtime` log event at the `info`
+level. The `worker_count` field reports the worker count of the host Tokio
+runtime, so an operator can verify the applied `CELLD_TOKIO_THREADS` setting.
 
 Each L1 compaction attempt merges at most 256 source objects. The buffer
 budget for the source data is 64 MiB. If one source object exceeds this

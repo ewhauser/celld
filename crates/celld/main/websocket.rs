@@ -30,12 +30,53 @@ async fn dispatch_ws_message(
         .await
         .map_err(|error| anyhow::anyhow!("route WebSocket {scope}: {error:?}"))?;
     anyhow::ensure!(route == Route::Local, "WebSocket owner moved off node");
+    // The handler's output must reach the gate even when the caller stops
+    // waiting. A socket task stops reading, and drops this future, once its own
+    // socket closes, but the handler it started runs on regardless. A dropped
+    // reply loses a captured batch that already reserved places on other
+    // sockets, and a lost batch must close those sockets with 1011 because the
+    // gate never answered for it. A task, which a dropped handle only
+    // detaches, therefore owns everything from the handoff on. Routing stays
+    // above it: a message the cell never received has no output to lose.
+    let app = app.clone();
+    let scope = scope.to_string();
+    let (started, receive) = tokio::sync::oneshot::channel();
+    let delivery_scope = scope.clone();
+    let delivery = celld::asyncrt::spawn(async move {
+        deliver_ws_message(&app, &delivery_scope, request, ws_id, data, started).await
+    });
+    // The reader waits only until the first turn. Keep observing completion:
+    // ignoring the detached task would hide failures and leave a broken
+    // connection open. The delivery still owns its activity and output gate
+    // handoff even if this socket closes while the handler is suspended.
+    celld::asyncrt::spawn(async move {
+        let failure = match delivery.await {
+            Ok(Ok(())) => return,
+            Ok(Err(error)) => format!("{error:#}"),
+            Err(panic) => format!("WebSocket message delivery panicked: {panic}"),
+        };
+        tracing::warn!(scope, ws_id, %failure, "WebSocket message delivery failed");
+        celld::js::ws_close(ws_id, 1011, "WebSocket message delivery failed");
+    })
+    .detach();
+    receive.await.context("WebSocket message did not start")
+}
+
+/// Run `webSocketMessage` and hand its output to the cell's barrier queue.
+async fn deliver_ws_message(
+    app: &AppHandle,
+    scope: &str,
+    request: u64,
+    ws_id: u64,
+    data: celld::js::WsIn,
+    started: tokio::sync::oneshot::Sender<()>,
+) -> anyhow::Result<()> {
     let activity = app.activity(request, scope.to_string());
     let dispatch = match app
         .runtime
         .as_ref()
         .context("no cell runtime")?
-        .ws_message(scope.to_string(), ws_id, data)
+        .ws_message(scope.to_string(), ws_id, data, started)
         .await
     {
         Ok(dispatch) => dispatch,
@@ -901,7 +942,7 @@ pub(crate) async fn handle_websocket(mut request: Request<Incoming>, app: AppHan
     .await
     {
         Ok(payload) => payload,
-        Err(response) => return response,
+        Err(response) => return *response,
     };
     let body_read_us = body_started.elapsed().as_micros() as u64;
     let worker_started = Instant::now();

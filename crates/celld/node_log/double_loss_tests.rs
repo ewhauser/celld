@@ -13,16 +13,7 @@ use super::*;
 use std::sync::atomic::AtomicUsize;
 
 fn run(future: impl std::future::Future<Output = ()>) {
-    static RUNTIME: std::sync::OnceLock<tokio::runtime::Runtime> = std::sync::OnceLock::new();
-    let runtime = RUNTIME.get_or_init(|| {
-        tokio::runtime::Builder::new_multi_thread()
-            .worker_threads(2)
-            .enable_all()
-            .build()
-            .unwrap()
-    });
-    crate::asyncrt::set_host_handle(runtime.handle().clone());
-    runtime.block_on(future);
+    crate::asyncrt::test_block_on(future);
 }
 
 const PAIR: [&str; 2] = ["pair-0", "pair-1"];

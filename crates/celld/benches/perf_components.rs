@@ -28,15 +28,17 @@ use std::time::Duration;
 #[global_allocator]
 static ALLOC: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 
-/// The one runtime of the process. The node's execution domain binds to the
-/// first runtime that reaches it, so every case shares this one.
+/// The one runtime of the process, installed as the node's host runtime,
+/// which `set_host_handle` accepts once. Every case shares it.
 fn runtime() -> &'static tokio::runtime::Runtime {
     static RUNTIME: OnceLock<tokio::runtime::Runtime> = OnceLock::new();
     RUNTIME.get_or_init(|| {
-        tokio::runtime::Builder::new_current_thread()
+        let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
-            .unwrap()
+            .unwrap();
+        celld::asyncrt::set_host_handle(runtime.handle().clone());
+        runtime
     })
 }
 

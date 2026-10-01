@@ -60,6 +60,25 @@ record carries the trace id and the span id of the handler that wrote
 it, so a query can join the logs to the traces. The correlation
 survives `await`.
 
+The log record also carries the OpenTelemetry severity of the console
+method:
+
+| method | severity number | severity text |
+| --- | --- | --- |
+| `console.debug` | `5` | `DEBUG` |
+| `console.log`, `console.info` | `9` | `INFO` |
+| `console.warn` | `13` | `WARN` |
+| `console.error` | `17` | `ERROR` |
+
+The OTLP export sets these values in the `severity_number` and
+`severity_text` fields. The Parquet export writes them to columns with
+the same names. The body contains only the message, so a query must use
+the severity to find the level.
+
+A log file from an earlier celld version has no severity columns. A
+DuckDB query over files from both versions must therefore read them
+with `union_by_name = true`.
+
 celld reads the W3C `traceparent` header on incoming requests, so its
 spans join the trace of the system in front of it. celld sends a
 `traceparent` header on outbound `fetch()`, so downstream systems can
@@ -178,6 +197,9 @@ CREATE VIEW logs AS SELECT * FROM
 -- The slowest requests.
 SELECT name, duration_us, trace_id FROM traces
   ORDER BY duration_us DESC LIMIT 20;
+
+-- The error lines.
+SELECT time_unix_us, body FROM logs WHERE severity_number >= 17;
 
 -- Every log line, inside the span that wrote it.
 SELECT l.body, t.name, t.duration_us FROM logs l

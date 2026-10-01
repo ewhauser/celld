@@ -2294,16 +2294,7 @@ mod tests {
     /// Run on a process-lived runtime: stream tasks spawn on the host
     /// handle, which a `#[tokio::test]` runtime would not outlive.
     fn run(future: impl std::future::Future<Output = ()>) {
-        static RUNTIME: OnceLock<tokio::runtime::Runtime> = OnceLock::new();
-        let runtime = RUNTIME.get_or_init(|| {
-            tokio::runtime::Builder::new_multi_thread()
-                .worker_threads(2)
-                .enable_all()
-                .build()
-                .unwrap()
-        });
-        crate::asyncrt::set_host_handle(runtime.handle().clone());
-        runtime.block_on(future);
+        crate::asyncrt::test_block_on(future);
     }
 
     #[test]

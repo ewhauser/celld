@@ -58,6 +58,109 @@ pub enum WsOut {
     Close(u16, String),
 }
 
+/// Outbound frames together with any positions already reserved in their sockets.
+/// Captured sends reserve positions inside the isolate, before a later RPC can
+/// send. The reservation travels through the handler and Actor gate with the
+/// batch; reconstructing a plain vector at either handoff loses send order.
+pub struct WsBatch(WsBatchState);
+
+enum WsBatchState {
+    Frames(Vec<(u64, WsOut)>),
+    Captured(CapturedWsBatch),
+}
+
+struct CapturedWsBatch {
+    registry: Arc<std::sync::Mutex<WsRegistry>>,
+    state: Arc<WsFlushState>,
+    /// The one flush that owns every segment this batch reserved. `None`
+    /// only until the first frame, since a guard must name a segment.
+    flush: Option<WsFlushGuard>,
+    /// The newest segment `flush` holds on each socket, by token. A map, so a
+    /// broadcast to many sockets does not scan every earlier segment per frame.
+    tails: HashMap<u64, u64>,
+    frames: usize,
+}
+
+impl Default for WsBatch {
+    fn default() -> Self {
+        Self(WsBatchState::Frames(Vec::new()))
+    }
+}
+
+impl WsBatch {
+    pub fn len(&self) -> usize {
+        match &self.0 {
+            WsBatchState::Frames(frames) => frames.len(),
+            WsBatchState::Captured(batch) => batch.frames,
+        }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    pub(crate) fn capture(&mut self, id: u64, out: WsOut) {
+        if let WsBatchState::Frames(frames) = &self.0 {
+            assert!(frames.is_empty(), "capture starts with an empty batch");
+            self.0 = WsBatchState::Captured(CapturedWsBatch {
+                registry: ws_registry(),
+                state: ws_flush_state(),
+                flush: None,
+                tails: HashMap::new(),
+                frames: 0,
+            });
+        }
+        let WsBatchState::Captured(batch) = &mut self.0 else {
+            unreachable!("capture installs its ordered batch");
+        };
+        batch
+            .state
+            .capture(&mut batch.flush, &mut batch.tails, id, out);
+        batch.frames += 1;
+    }
+
+    pub(crate) fn release(self, verdict: Result<(), String>) {
+        match self.0 {
+            WsBatchState::Captured(mut batch) => {
+                if let Some(flush) = batch.flush.take() {
+                    flush.release(&batch.registry, verdict);
+                }
+            }
+            WsBatchState::Frames(frames) if verdict.is_ok() && !frames.is_empty() => {
+                let flushing = ws_flush_state().emit_or_defer(&ws_registry(), frames, false);
+                debug_assert!(flushing.is_none(), "a released batch opens no flush");
+            }
+            WsBatchState::Frames(_) => {}
+        }
+    }
+
+    /// A rejected handler never published these frames. Remove its reservations
+    /// without cancelling independent events queued behind them.
+    pub(crate) fn discard(self) {
+        if let WsBatchState::Captured(mut batch) = self.0 {
+            if let Some(flush) = batch.flush.take() {
+                flush.discard(&batch.registry);
+            }
+        }
+    }
+}
+
+impl From<Vec<(u64, WsOut)>> for WsBatch {
+    fn from(frames: Vec<(u64, WsOut)>) -> Self {
+        Self(WsBatchState::Frames(frames))
+    }
+}
+
+impl Drop for CapturedWsBatch {
+    fn drop(&mut self) {
+        // A lost dispatch or cancelled flush has no successful gate verdict.
+        // Refuse its reservations so successors cannot hang or cross the gap.
+        if let Some(flush) = self.flush.take() {
+            flush.release(&self.registry, Err("WebSocket batch abandoned".into()));
+        }
+    }
+}
+
 /// The result of delivering one `webSocketMessage`. `frames` are the outbound
 /// frames of the turn the handler answered in, captured by the output gate; a
 /// turn the handler suspended in released its own frames as it ended, so those
@@ -66,7 +169,7 @@ pub enum WsOut {
 /// handler wrote, and its frames must be held until that position is durable.
 /// `None` means no write: flush the frames.
 pub struct WsDispatch {
-    pub frames: Vec<(u64, WsOut)>,
+    pub frames: WsBatch,
     pub write_position: Option<u64>,
     /// As on `HttpResponse`: what a handler that wrote nothing observed above
     /// the cell's published baseline, for the gate to hold its frames behind
@@ -763,6 +866,52 @@ impl WsFlushState {
         flushing
     }
 
+    /// Reserve one captured frame's place in its socket's queue, inside the
+    /// batch's single flush.
+    ///
+    /// The frame joins the flush's own segment while that segment is still
+    /// the socket's tail, so a handler that sends many frames, or broadcasts
+    /// one frame to many sockets, holds one segment per socket, as a batch
+    /// through `emit_or_defer` does. A segment for each frame would cost a
+    /// queue lock, a count, and a waiter wake-up for each frame at release.
+    /// A frame that another event queued in between ends that segment, and
+    /// this frame opens a new one behind it, so send order still holds.
+    fn capture(
+        self: &Arc<Self>,
+        flush: &mut Option<WsFlushGuard>,
+        tails: &mut HashMap<u64, u64>,
+        id: u64,
+        out: WsOut,
+    ) {
+        // One queue lock covers the tail check and the count, as in
+        // `emit_or_defer`: a teardown must not observe a queued frame with no
+        // flush behind it.
+        let mut deferred = self.deferred.lock().unwrap();
+        let queue = deferred.entry(id).or_default();
+        let own_tail = tails
+            .get(&id)
+            .and_then(|token| queue.back_mut().filter(|segment| segment.token == *token));
+        if let Some(segment) = own_tail {
+            segment.frames.push(out);
+            return;
+        }
+        let token = self.next_token.fetch_add(1, Ordering::Relaxed);
+        queue.push_back(WsSegment {
+            token,
+            frames: vec![out],
+            settled: None,
+        });
+        *self.flushes.lock().unwrap().entry(id).or_default() += 1;
+        tails.insert(id, token);
+        flush
+            .get_or_insert_with(|| WsFlushGuard {
+                state: self.clone(),
+                segments: Vec::new(),
+            })
+            .segments
+            .push((id, token));
+    }
+
     /// Wait until no flush holds frames for `id` any more.
     async fn await_flushes(&self, id: u64) {
         loop {
@@ -883,6 +1032,21 @@ pub(crate) struct WsFlushGuard {
 }
 
 impl WsFlushGuard {
+    fn discard(self, registry: &std::sync::Mutex<WsRegistry>) {
+        {
+            let mut deferred = self.state.deferred.lock().unwrap();
+            for (id, token) in &self.segments {
+                if let Some(segment) = deferred
+                    .get_mut(id)
+                    .and_then(|queue| queue.iter_mut().find(|segment| segment.token == *token))
+                {
+                    segment.frames.clear();
+                }
+            }
+        }
+        self.release(registry, Ok(()));
+    }
+
     /// Give the gate's verdict to every segment this flush holds, then
     /// deliver what each socket can now release.
     ///
@@ -1025,16 +1189,8 @@ fn emit_frames(
 /// Release a batch into each socket's ordered stream. A socket whose
 /// durability-ticket queue is still present joins that queue, so an Actor
 /// barrier release cannot overtake an earlier frame on the same socket.
-pub fn ws_emit_batch(frames: Vec<(u64, WsOut)>) {
-    let flush = ws_flush_state();
-    let registry = ws_registry();
-    // Ungated: the Actor's own barrier already released these frames, so they
-    // need no verdict of their own and no flush comes back to wait for one.
-    let flushing = flush.emit_or_defer(&registry, frames, false);
-    debug_assert!(
-        flushing.is_none(),
-        "an already released batch opens no flush",
-    );
+pub fn ws_emit_batch(frames: impl Into<WsBatch>) {
+    frames.into().release(Ok(()));
 }
 
 /// Close one socket. A forced generation swap closes the regular and

@@ -67,8 +67,13 @@ fn node_filesystem() -> Arc<dyn celld_ltx::FileSystem> {
     direct
 }
 
+// No lazy initialization: a first call from a thread whose current runtime is
+// not the shared one, such as the core's, would bind every later spawn to that
+// runtime and silently put effect work back on the lease timer thread.
 fn current_domain() -> &'static ProductionDomain {
-    PROCESS_DOMAIN.get_or_init(|| ProductionDomain::new(tokio::runtime::Handle::current()))
+    PROCESS_DOMAIN
+        .get()
+        .expect("asyncrt::set_host_handle must run before the first spawn or domain access")
 }
 
 struct ProductionDomainOwner {
@@ -190,9 +195,13 @@ impl<T> Future for TaskHandle<T> {
     }
 }
 
-/// Install the process runtime handle.
+/// Install the process runtime handle, exactly once. A second call would
+/// otherwise be ignored and leave the first runtime in place.
 pub fn set_host_handle(handle: tokio::runtime::Handle) {
-    let _ = PROCESS_DOMAIN.set(ProductionDomain::new(handle));
+    assert!(
+        PROCESS_DOMAIN.set(ProductionDomain::new(handle)).is_ok(),
+        "asyncrt::set_host_handle must run exactly once"
+    );
 }
 
 /// Return the Tokio handle for the V8 arm.
@@ -601,20 +610,20 @@ pub mod rng {
     impl CryptoRng for Stream {}
 }
 
-/// Run a test future on one process-lifetime runtime. The process domain
-/// binds to the first runtime that touches it, so a test on its own
-/// `#[tokio::test]` runtime can leave every later test in the binary on a
-/// dropped one. Tests that reach `asyncrt` run here instead.
+/// Run a test future on one process-lifetime runtime, which is also the
+/// process domain's. `set_host_handle` runs once per process, and the domain
+/// has no lazy fallback, so tests that reach `asyncrt` run here instead.
 #[cfg(test)]
 pub(crate) fn test_block_on<T>(future: impl Future<Output = T>) -> T {
     static RUNTIME: std::sync::OnceLock<tokio::runtime::Runtime> = std::sync::OnceLock::new();
     let runtime = RUNTIME.get_or_init(|| {
-        tokio::runtime::Builder::new_multi_thread()
+        let runtime = tokio::runtime::Builder::new_multi_thread()
             .worker_threads(2)
             .enable_all()
             .build()
-            .unwrap()
+            .unwrap();
+        set_host_handle(runtime.handle().clone());
+        runtime
     });
-    set_host_handle(runtime.handle().clone());
     runtime.block_on(future)
 }

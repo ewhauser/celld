@@ -107,6 +107,8 @@ fn audit(c: &mut Criterion) {
         .enable_all()
         .build()
         .unwrap();
+    // The audit reads celld's clock, which needs the host runtime installed.
+    celld::asyncrt::set_host_handle(runtime.handle().clone());
     let mut group = c.benchmark_group("audit_cache");
     let records = support::history(64, 1, false);
     support::check_history(&records, 64, 1, false);

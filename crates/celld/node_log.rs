@@ -4130,6 +4130,20 @@ fn log_state_name(state: LogState) -> &'static str {
     }
 }
 
+/// The wait before epoch GC retries a cell whose last pass decided nothing
+/// or left an epoch inside the grace.
+const EPOCH_GC_RETRY_MS: u64 = 5 * 60 * 1000;
+
+/// The wait before epoch GC looks again at a cell whose last pass deleted
+/// everything it could.
+const EPOCH_GC_SETTLED_RETRY_MS: u64 = 60 * 60 * 1000;
+
+/// The most cells one maintenance pass examines for epoch GC. Each costs a
+/// few bucket listings, and the pass shares the 30 s tick with the lease
+/// and log maintenance, so a node holding thousands of cells spreads them
+/// over several ticks instead of stalling the others behind one pass.
+const EPOCH_GC_CELLS_PER_PASS: usize = 32;
+
 /// Everything node-log recovery needs from the node: the bucket, the signed
 /// peer client, address resolution, and the raw per-cell upload.
 pub struct NodeLogManager {
@@ -4162,6 +4176,12 @@ pub struct NodeLogManager {
     /// record) must not cost a bundle LIST on every sweep tick forever
     /// Process-local; a restart re-confirms once.
     gc_confirmed_empty: Mutex<std::collections::HashSet<String>>,
+    /// When each resident (cell, epoch) pair is next due for an epoch-GC
+    /// attempt, in monotonic milliseconds. A
+    /// pass that decides nothing (an idle cell whose opener is not listed
+    /// yet, a paged cell still filling, an epoch inside the grace) waits
+    /// [`EPOCH_GC_RETRY_MS`] instead of listing the bucket every tick.
+    epoch_gc_due: Mutex<BTreeMap<(String, u64), u64>>,
     /// Retained bundles this process has already declared unreadable. The
     /// record is the durable one; this only keeps one process from
     /// rewriting the same declaration on every scan.
@@ -4695,6 +4715,7 @@ impl NodeLogManager {
             predecessors_clean: std::sync::atomic::AtomicBool::new(false),
             recovery_locks: Mutex::new(BTreeMap::new()),
             gc_confirmed_empty: Mutex::new(std::collections::HashSet::new()),
+            epoch_gc_due: Mutex::new(BTreeMap::new()),
             declared_bundle_losses: Mutex::new(BTreeSet::new()),
             task_stop,
             child_tasks,
@@ -4941,7 +4962,7 @@ impl NodeLogManager {
     /// (cell, epoch), each group's contiguous tail merged into ONE L0
     /// segment (per-row fallback for non-contiguous chains), skipping
     /// rows the per-cell watermark already covers. Shared by recovery's
-    /// gather and the reopen healing pass. Any failure propagates —
+    /// gather and `fold_cell`. Any failure propagates —
     /// callers must not seal past an incomplete fold. A recovery passes
     /// its claim and its progress record, which carries the watermarks
     /// from one gather window to the next.
@@ -4973,7 +4994,7 @@ impl NodeLogManager {
             let ltx = self.ltx.clone();
             async move {
                 let through = rows.last().expect("a gathered cell has at least one row").0;
-                let watermark = ltx.covered_txid(&cell, cell_epoch).await;
+                let watermark = ltx.covered_txid(&cell, cell_epoch, through).await;
                 let rows: Vec<(u64, Vec<u8>)> = rows
                     .into_iter()
                     .filter(|(txid, _)| *txid > watermark)
@@ -6282,21 +6303,26 @@ impl NodeLogManager {
             bundles.push((key, rows, bytes));
         }
 
-        // A coverage watermark costs one object-store listing for each LTX
-        // level. Awaiting every distinct cell here serialized hundreds of
-        // pairs on the process-exit path, after the handoff itself had
-        // completed. Collect the exact unique set first and overlap it under
-        // the same bound recovery uses. An unbounded fan-out would trade the
+        // A coverage watermark for a cell this node does not hold costs at
+        // most one object-store listing of the epoch's prefix, and a
+        // retired-mark read for a row it does not cover. Awaiting every
+        // distinct cell here serialized hundreds of pairs on the process-exit
+        // path, after the handoff itself had completed. Collect the exact
+        // unique set first and overlap it under the same bound recovery uses. An unbounded fan-out would trade the
         // shutdown delay for a store burst and recreate the recovery storm
         // this barrier exists to avoid.
-        let cells = bundles
-            .iter()
-            .flat_map(|(_, rows, _)| rows.iter().map(|row| (row.cell.clone(), row.cell_epoch)))
-            .filter(|(cell, _)| only_cell.is_none_or(|only| only == cell))
-            .collect::<BTreeSet<_>>();
+        // Each key's highest row is what its coverage must reach.
+        let mut cells: BTreeMap<(String, u64), u64> = BTreeMap::new();
+        for row in bundles.iter().flat_map(|(_, rows, _)| rows.iter()) {
+            if only_cell.is_some_and(|only| only != row.cell) {
+                continue;
+            }
+            let needed = cells.entry((row.cell.clone(), row.cell_epoch)).or_insert(0);
+            *needed = (*needed).max(row.txid);
+        }
         let ltx = &self.ltx;
-        let lookups = cells.into_iter().map(|(cell, epoch)| async move {
-            let watermark = ltx.covered_txid(&cell, epoch).await;
+        let lookups = cells.into_iter().map(|((cell, epoch), needed)| async move {
+            let watermark = ltx.covered_txid(&cell, epoch, needed).await;
             ((cell, epoch), watermark)
         });
         let mut lookups =
@@ -6435,6 +6461,93 @@ impl NodeLogManager {
         Ok(())
     }
 
+    /// Does the ownership record still name this node at `epoch`? Epoch GC
+    /// reads it only after the owner's own opener is listed; see
+    /// [`crate::ltx_repl::LtxRepl::gc_superseded_epochs`] for why that order
+    /// is the fence.
+    async fn owns_epoch(&self, cell: &str, epoch: u64) -> anyhow::Result<bool> {
+        Ok(matches!(
+            self.ownership.read_owner(cell).await?,
+            Some(record)
+                if record.node.as_deref() == Some(self.node.as_str()) && record.epoch == epoch
+        ))
+    }
+
+    /// The maintenance pass of epoch GC (denoland/celld#240): for each root
+    /// cell this node holds, delete the epochs below its restore chain's
+    /// base. Off unless `CELLD_LTX_RETENTION_SECS` is positive. A facet stream is
+    /// skipped: it has no ownership record, its epochs are a sparse subset of
+    /// its root's, and its own chain base is usually far below the root's.
+    /// A per-cell failure does not stop the pass.
+    pub async fn gc_superseded_epochs(&self) -> anyhow::Result<()> {
+        let Some(grace_ms) = self.ltx.epoch_gc_grace_ms() else {
+            return Ok(());
+        };
+        let resident: BTreeSet<(String, u64)> = self.ltx.resident_epochs().into_iter().collect();
+        let now = mono_ms();
+        // The longest-waiting cells go first, so a set of cells that never
+        // decide anything cannot hold the pass's budget ahead of the rest.
+        let due: Vec<(String, u64)> = {
+            let mut schedule = self.epoch_gc_due.lock().unwrap();
+            schedule.retain(|key, _| resident.contains(key));
+            let mut due: Vec<(u64, (String, u64))> = resident
+                .into_iter()
+                .filter(|(cell, _)| !crate::engine_api::is_facet_cell(cell))
+                .map(|key| (schedule.get(&key).copied().unwrap_or(0), key))
+                .filter(|(at, _)| *at <= now)
+                .collect();
+            due.sort();
+            due.into_iter()
+                .take(EPOCH_GC_CELLS_PER_PASS)
+                .map(|(_, key)| key)
+                .collect()
+        };
+        for (cell, epoch) in due {
+            let next = match self
+                .ltx
+                .gc_superseded_epochs(&cell, epoch, grace_ms, || self.owns_epoch(&cell, epoch))
+                .await
+            {
+                Ok(Some(outcome)) => {
+                    if !outcome.deleted.is_empty() {
+                        info!(
+                            event = "ltx_epoch_gc",
+                            cell = %cell,
+                            epoch,
+                            retired_below = outcome.retired_below,
+                            deleted = ?outcome.deleted,
+                            "deleted superseded epoch prefixes"
+                        );
+                    }
+                    // A settled cell is looked at again later, because a
+                    // recovery upload issued before the retirement can still
+                    // recreate a deleted prefix.
+                    mono_ms().saturating_add(if outcome.settled {
+                        EPOCH_GC_SETTLED_RETRY_MS
+                    } else {
+                        EPOCH_GC_RETRY_MS
+                    })
+                }
+                Ok(None) => mono_ms().saturating_add(EPOCH_GC_RETRY_MS),
+                Err(error) => {
+                    warn!(
+                        event = "ltx_epoch_gc",
+                        cell = %cell,
+                        epoch,
+                        %error,
+                        "epoch GC pass failed"
+                    );
+                    mono_ms().saturating_add(EPOCH_GC_RETRY_MS)
+                }
+            };
+            self.epoch_gc_due
+                .lock()
+                .unwrap()
+                .insert((cell, epoch), next);
+        }
+        Ok(())
+    }
+
     pub async fn gc_bundles(&self) -> anyhow::Result<()> {
         // Bound both the listing and the work. Restarting at the prefix
         // every tick starved newer, covered bundles behind an undrained
@@ -6484,10 +6597,18 @@ impl NodeLogManager {
             let mut paired = Vec::with_capacity(rows.len());
             for row in &rows {
                 let cache_key = (row.cell.clone(), row.cell_epoch);
+                // A cached watermark answers only the rows it reaches; a
+                // higher row asks again, because only that question may read
+                // the retired mark.
                 let watermark = match covered.get(&cache_key) {
-                    Some(watermark) => *watermark,
-                    None => {
-                        let watermark = self.ltx.covered_txid(&row.cell, row.cell_epoch).await;
+                    Some(watermark) if *watermark >= row.txid => *watermark,
+                    cached => {
+                        let cached = cached.copied().unwrap_or(0);
+                        let watermark = self
+                            .ltx
+                            .covered_txid(&row.cell, row.cell_epoch, row.txid)
+                            .await
+                            .max(cached);
                         covered.insert(cache_key, watermark);
                         watermark
                     }
@@ -6686,6 +6807,7 @@ fn spawn_maintenance(
                 ("maintain", manager.maintain().boxed()),
                 ("dead-leader sweep", manager.sweep_dead_leaders().boxed()),
                 ("bundle GC", manager.gc_bundles().boxed()),
+                ("epoch GC", manager.gc_superseded_epochs().boxed()),
             ] {
                 let started = mono_ms();
                 let mut work = work;
@@ -6908,7 +7030,12 @@ impl NodeLogManager {
             evicted,
             evicted_through,
         } = self.bundle_index.lock().unwrap().cell_rows(cell, epoch);
-        let covered = self.ltx.covered_txid(cell, epoch).await;
+        // The cell is normally resident for the whole compaction, so the
+        // answer is its per-cell watermark; see `LtxRepl::covered_txid`.
+        let covered = self
+            .ltx
+            .covered_txid(cell, epoch, evicted_through.unwrap_or(0))
+            .await;
         if evicted_through.is_some_and(|through| covered < through) {
             // A cache is not the source of truth. A slow cell can lose its
             // first row long before it reaches the compaction threshold.

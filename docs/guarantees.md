@@ -35,6 +35,16 @@ conditional-write checks against a probe item. The epoch in each LTX key
 still fences a stale owner, whichever store holds the ownership record.
 See [DynamoDB control plane](design/dynamodb-control-plane.md).
 
+Epoch GC (`CELLD_LTX_RETENTION_SECS`) needs a fifth property:
+
+- List-after-write consistency: a listing after a successful write must
+  include the written object.
+
+Amazon S3, Cloudflare R2, Google Cloud Storage, and Azure Blob Storage
+provide it. A Tigris Global or Dual-region bucket provides it only in the
+region of the write. An operator must not enable epoch GC on such a
+bucket when the nodes of a fleet are in more than one region.
+
 The qualified stores are Amazon S3, Cloudflare R2, Tigris, Google Cloud
 Storage, and Azure Blob Storage. celld's release tests run against R2,
 and the S3 path uses the same client and the same headers.
@@ -352,6 +362,31 @@ from the cut onward. A link must end exactly at its successor's cut, so an
 epoch that does not continue the chain is not part of it. celld no longer
 writes an epoch seal object, and a legacy `e<epoch>.seal.json` object does
 not limit the chain.
+
+### Epoch GC
+
+When `CELLD_LTX_RETENTION_SECS` has a positive value on a fleet node, the
+owner of a cell deletes the epoch prefixes that no restore reads. The
+owner builds the restore chain over every epoch prefix of the cell,
+including its own. It continues only
+when the newest epoch of the chain is its own epoch. Then its own first
+object is in the listing, so a node that takes the cell over later also
+lists that object and restores from a base at the same epoch or higher.
+A paged cell also waits until its local file is complete, because until
+then it reads pages from the objects of the chain that it restored. Next,
+the owner reads the ownership record and continues only when the record
+names this node at this epoch. It writes `retired.json` with the
+base, and then it deletes the prefixes below the base. It keeps its own
+epoch, the epoch before it, and each epoch younger than the configured
+time.
+
+The order of these steps protects the data. If the owner reads the
+ownership record before its own first object is in the listing, a fenced
+owner can delete the base of the node that took the cell over. A
+conditional write to the ownership record does not add protection,
+because the cell can move between any check and the delete. The late
+delete is safe because an epoch below the base never becomes part of a
+chain again. This argument needs list-after-write consistency.
 
 A fenced node can append an unacknowledged tail to an older prefix. When
 a successor opened with a whole-database snapshot, a later restore reads

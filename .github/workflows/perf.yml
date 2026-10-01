@@ -38,7 +38,7 @@ concurrency:
 
 env:
   CARGO_TERM_COLOR: never
-  RUST_VERSION: 1.97.1
+  RUST_VERSION: 1.98.1
 
 jobs:
   perf:

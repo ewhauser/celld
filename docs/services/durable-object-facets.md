@@ -52,9 +52,19 @@ callback takes no argument and returns a `class` and an optional `id`. `class`
 is a `DurableObjectClass`, and two sources supply one. The first source is
 `worker.getDurableObjectClass("App")` on a Worker Loader binding. The second is
 `ctx.exports.App` for a `DurableObject` class that the Worker exports without a
-storage migration, and that facet runs in the isolate of its root. `id` sets what
-the facet reads at `ctx.id`, and the facet inherits the id of its root object
-when the callback gives no `id`.
+storage migration, and that facet runs in the isolate of its root.
+
+`id` sets the value of `ctx.id` in the facet. A `DurableObjectId` keeps its
+name, so an ID from `idFromName("child")` exposes `ctx.id.name === "child"`.
+A string ID stays a string, and an omitted ID inherits the parent ID and its
+name. An unmigrated class handle has no `idFromName()` method, so use a
+Durable Object namespace to create a named ID.
+
+`ctx.exports.App({ props })` creates a class handle with startup properties.
+The call copies the properties, so later changes to the original object do
+not change `ctx.props` in the facet. The properties must be an object that
+supports structured cloning. A loopback class without properties supplies an
+empty object, and the facet constructor can read the properties.
 
 The name alone selects the database, so a later call that keeps the name and
 changes the `id` still reaches the stored data. A name has a limit of 256 bytes.

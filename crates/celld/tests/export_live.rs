@@ -854,6 +854,10 @@ async fn repair(
     streams: &[celld_export_format::StreamId],
 ) -> Vec<celld::export_repair::Report> {
     use celld::export_repair::{run, Job, Settings};
+    // `celld export repair` installs its runtime as the host's before it
+    // dispatches; the library refuses to spawn or read its clock without one.
+    static HOST: std::sync::Once = std::sync::Once::new();
+    HOST.call_once(|| celld::asyncrt::set_host_handle(tokio::runtime::Handle::current()));
     let bucket =
         celld::dev::open_local_bucket(&project.join(".celld/dev/objects.sqlite3")).unwrap();
     let (tx, rx) = tokio::sync::mpsc::unbounded_channel();

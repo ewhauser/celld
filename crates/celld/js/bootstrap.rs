@@ -904,8 +904,8 @@ pub(super) fn adopt_cell(
     finish_cell_adoption(tc, cell, owned)
 }
 
-pub(super) struct EmbeddedStartup<'a> {
-    pub id: &'a str,
+pub(super) struct EmbeddedStartup {
+    pub id_sc: Vec<u8>,
     pub props_sc: Vec<u8>,
     pub path: std::path::PathBuf,
     pub restored: bool,
@@ -917,7 +917,7 @@ pub(super) fn adopt_embedded_cell(
     cell: &str,
     parent: &storage::StorageIdentity,
     name: &str,
-    startup: EmbeddedStartup<'_>,
+    startup: EmbeddedStartup,
     compat: Compat,
 ) -> Result<Option<i64>> {
     storage::open_embedded(
@@ -943,8 +943,10 @@ pub(super) fn adopt_embedded_cell(
         .ok_or_else(|| anyhow!("missing facet config registry"))?;
     let config = v8::Object::new(tc);
     let id_key = v8::String::new(tc, "id").unwrap();
-    let id_value = v8::String::new(tc, startup.id).unwrap();
-    config.set(tc, id_key.into(), id_value.into());
+    let id_value =
+        storage_ops::deserialize_storage_value(tc, storage::StoredValue::V8(startup.id_sc))
+            .ok_or_else(|| anyhow!("decode facet identity"))?;
+    config.set(tc, id_key.into(), id_value);
     let props = if startup.props_sc.is_empty() {
         v8::undefined(tc).into()
     } else {

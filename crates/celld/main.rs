@@ -7,13 +7,17 @@
 //! Runnable celld vertical slice.
 //!
 //! One actor serializes every event through `celld-logic`; the actor polls its
-//! mailbox, timers, and in-flight effect futures together. This is the
-//! execution shape required for monotonic lease ticks to fence the node even
-//! when a storage operation remains hung, without spawning a task per effect.
+//! mailbox, timers, lease futures, and task completions together. Other effect
+//! work runs on the host runtime so synchronous work cannot starve the core's
+//! monotonic lease timers.
 
 use anyhow::Context as _;
 use celld::actor::*;
 use celld::bucket::Bucket;
+use celld::cell_dispatch::{
+    dispatch_call_attempt, dispatch_gate, local_dispatch_request_id, local_request_error,
+    local_response_stream, split_do_call, CallAttempt, CallPayload, RoutedRequestError,
+};
 use celld::fleet;
 use celld::generation::{
     DeploymentGraph, Generation, GenerationOptions, ReloadOutcome, ReloadRequest, FIRST_GENERATION,
@@ -364,23 +368,6 @@ impl std::fmt::Display for StalePeerRoute {
 
 impl std::error::Error for StalePeerRoute {}
 
-#[derive(Debug)]
-struct RoutedRequestError(RequestError);
-
-/// The gate's verdict as the answer's error, with the handler's own failure
-/// kept below it when the answer was one: the client needs the verdict, and
-/// the operator reading the chain needs what the handler said too. The
-/// verdict stays on top, so the routed-error match still finds it.
-fn local_request_error(failure: LocalRequestFailure) -> anyhow::Error {
-    match failure {
-        LocalRequestFailure::Handler(error) => error,
-        LocalRequestFailure::OutputGate { verdict, handler } => match handler {
-            Some(handler) => handler.context(RoutedRequestError(verdict)),
-            None => anyhow::Error::new(RoutedRequestError(verdict)),
-        },
-    }
-}
-
 /// Preserve the owner's durability verdict and handler failure in a peer reply.
 fn peer_gate_failure(verdict: RequestError, handler: Option<&anyhow::Error>) -> HttpReply {
     let detail = match handler {
@@ -392,14 +379,6 @@ fn peer_gate_failure(verdict: RequestError, handler: Option<&anyhow::Error>) -> 
         format!("durability unproven: {verdict:?}{detail}"),
     ))
 }
-
-impl std::fmt::Display for RoutedRequestError {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(formatter, "route failed: {:?}", self.0)
-    }
-}
-
-impl std::error::Error for RoutedRequestError {}
 
 fn classify_remote_attempt(error: &anyhow::Error) -> celld_logic::routing::Attempt {
     if error.downcast_ref::<StalePeerRoute>().is_some()
@@ -604,34 +583,6 @@ impl WebSocketRouteTiming {
             "WebSocket cell request resolved"
         );
     }
-}
-
-/// The output gate for an effect raised inside a handler, as opposed to the
-/// handler's own response.
-///
-/// Every in-handler channel arrives here holding a `GateReq`. Reuses the routed
-/// machinery: `request` pins the cell (no eviction mid-wait) and the core gate
-/// decides. `Ok` releases the held effect; `Err` breaks the call, as a routed
-/// gate failure would.
-async fn dispatch_gate(app: AppHandle, req: celld::js::GateReq) {
-    let routed = match app.request(req.scope.clone()).await {
-        Ok(routed) => routed,
-        Err(error) => {
-            let _ = req.reply.send(Err(error));
-            return;
-        }
-    };
-    // The guard pins the cell and releases the request on drop, so the else
-    // branch does not leak the just-acquired request.
-    let _activity = app.activity(routed.request, req.scope.clone());
-    let result = if routed.route == Route::Local {
-        app.gate_output(routed.request, req.ticket).await
-    } else {
-        // The owning isolate should route the cell locally; if it moved off the
-        // node mid-call, fail closed rather than acknowledge an unproven write.
-        Err(RequestError::NodeFenced)
-    };
-    let _ = req.reply.send(result);
 }
 
 /// A facet stream request from the isolate that runs the facet.
@@ -1088,36 +1039,10 @@ async fn internal_reload(app: AppHandle) -> HttpReply {
     response(status, body.to_string())
 }
 
-fn local_dispatch_request_id(
-    request_id: Option<celld::js::RequestId>,
-) -> Option<celld::js::RequestId> {
-    // Internal Queue, cron, alarm, and peer calls have no client request ID,
-    // but a local handler still needs an identity in the abort registry. The
-    // drain cancels by core request and resolves that identity through the
-    // activity pin; leaving it absent makes a busy internal handler impossible
-    // to stop before the process deadline.
-    Some(request_id.unwrap_or_else(celld::js::next_request_id))
-}
-
 async fn dispatch_do_call(app: AppHandle, call: DoCallReq) {
-    let DoCallReq {
-        request_id,
-        cancel,
-        deliver_abort_to_handler,
-        scope,
-        name,
-        url,
-        method,
-        body,
-        mut body_guard,
-        headers,
-        reply,
-        order,
-        parent,
-    } = call;
-    let mut cancel = cancel;
-    let mut order = order;
-    let mut websocket_timing = headers
+    let (mut call, mut payload, reply) = split_do_call(call);
+    let mut websocket_timing = payload
+        .headers
         .iter()
         .any(|(name, value)| {
             name.eq_ignore_ascii_case("upgrade") && value.eq_ignore_ascii_case("websocket")
@@ -1129,128 +1054,46 @@ async fn dispatch_do_call(app: AppHandle, call: DoCallReq) {
             attempts: 0,
         });
     let operation = async {
-        // Reclaims a streamed body abandoned by an early error below. A local
-        // target or the peer HTTP body takes ownership before this guard is
-        // disarmed.
-        anyhow::ensure!(
-            celld_logic::cell::valid_cell_scope(&scope),
-            "cell scope is malformed or exceeds the fleet storage limit"
-        );
         let mut dispatcher = RemoteRouteRetry::new(app.operation_deadline_ms);
         loop {
             if let Some(timing) = websocket_timing.as_mut() {
                 timing.attempts = timing.attempts.saturating_add(1);
             }
             let route_started = Instant::now();
-            // A disconnect before routing completes has executed no handler,
-            // so cancel the core request and release its activation admission.
-            // Once routing completes, the same signal moves into the local or
-            // remote dispatch below and aborts work that did start.
-            let route = app.request(scope.clone());
-            let routed = if deliver_abort_to_handler {
-                // Workerd delivers an explicit JavaScript AbortSignal to the
-                // target request. Resolve the route first, then give the
-                // already-fired receiver to fetch_cell so the handler sees
-                // request.signal and its waitUntil work can continue.
-                route.await
-            } else {
-                match cancel.as_mut() {
-                    Some(cancel) => celld::asyncrt::select_biased! {
-                        "a cancellation that ties route resolution prevents dispatch from starting";
-                        _ = cancel => break Err(anyhow::anyhow!("Durable Object call cancelled")),
-                        routed = route => routed,
-                    },
-                    None => route.await,
+            // The routed hook stamps the boundary between route resolution and
+            // local dispatch; the library owns that moment and cannot read the
+            // clock. A remote route leaves the stamp unused, because remote
+            // dispatch time starts after the stale-route pacing below.
+            let mut dispatch_started = route_started;
+            let attempt = dispatch_call_attempt(&app, &mut call, payload, || {
+                if let Some(timing) = websocket_timing.as_mut() {
+                    timing.route_resolution_us = timing
+                        .route_resolution_us
+                        .saturating_add(route_started.elapsed().as_micros() as u64);
                 }
-            };
-            let routed = match routed {
-                Ok(routed) => routed,
-                Err(error) => {
+                dispatch_started = Instant::now();
+            })
+            .await;
+            let (node, addr, epoch, peer_protocol) = match attempt {
+                CallAttempt::Unstarted(error) => break Err(error),
+                CallAttempt::RouteError(error) => {
                     if let Some(timing) = websocket_timing.as_mut() {
                         timing.route_resolution_us = timing
                             .route_resolution_us
                             .saturating_add(route_started.elapsed().as_micros() as u64);
-                        timing.emit(&app, &scope, request_id, "route_error", "", "");
+                        timing.emit(&app, &call.scope, call.request_id, "route_error", "", "");
                     }
-                    break Err(anyhow::Error::new(RoutedRequestError(error)));
+                    break Err(error);
                 }
-            };
-            if let Some(timing) = websocket_timing.as_mut() {
-                timing.route_resolution_us = timing
-                    .route_resolution_us
-                    .saturating_add(route_started.elapsed().as_micros() as u64);
-            }
-            let Routed { request, route } = routed;
-            let (node, addr, epoch, peer_protocol) = match route {
-                Route::Local => {
-                    let dispatch_started = Instant::now();
-                    let local_request_id = local_dispatch_request_id(request_id);
-                    let local =
-                        app.local_request(request, scope.clone(), local_request_id, "local");
-                    let completed = local
-                        .run(async {
-                            let runtime = app.runtime.as_ref().context("no cell runtime")?;
-                            let response = runtime
-                                .fetch_cell(
-                                    scope.clone(),
-                                    name,
-                                    RuntimeFetch {
-                                        url,
-                                        method,
-                                        body,
-                                        headers,
-                                        request_id: local_request_id,
-                                        // Moved on the first attempt and gone on
-                                        // a retry, which is right: a retry is a
-                                        // second delivery of a call whose place
-                                        // in the order was already taken.
-                                        order: order.take(),
-                                        parent,
-                                    },
-                                    cancel.take(),
-                                )
-                                .await?;
-                            // `fetch_cell` cannot return a response until the cell
-                            // has installed its request context. That context now
-                            // owns an unread tail through its waitUntil work.
-                            body_guard.disarm();
-                            if let Some(HttpResponseWebSocket::Cell(target)) = &response.websocket {
-                                let kind = if celld::js::ws_hibernatable(target.id).unwrap_or(false)
-                                {
-                                    WebSocketKind::Hibernatable
-                                } else {
-                                    WebSocketKind::Regular
-                                };
-                                app.websocket_opened(target.scope.clone(), target.id, kind)
-                                    .await?;
-                            }
-                            Ok(response)
-                        })
-                        .await;
-                    let activity = completed.activity;
-                    let result = completed.result.map_err(local_request_error);
-                    let result = match result {
-                        Ok(mut response) => {
-                            let body_active = response.stream.is_some();
-                            activity.set_phase("response_body", true, body_active);
-                            if let Some(stream) = response.stream.take() {
-                                response.stream =
-                                    Some(local_response_stream(stream, activity, || {}));
-                            } else {
-                                drop(activity);
-                            }
-                            Ok(response)
-                        }
-                        Err(error) => Err(error),
-                    };
+                CallAttempt::Local(result) => {
                     if let Some(timing) = websocket_timing.as_mut() {
                         timing.dispatch_us = timing
                             .dispatch_us
                             .saturating_add(dispatch_started.elapsed().as_micros() as u64);
                         timing.emit(
                             &app,
-                            &scope,
-                            request_id,
+                            &call.scope,
+                            call.request_id,
                             if result.is_ok() { "ok" } else { "error" },
                             "local",
                             app.runtime.as_ref().map_or("", |runtime| runtime.node()),
@@ -1258,13 +1101,31 @@ async fn dispatch_do_call(app: AppHandle, call: DoCallReq) {
                     }
                     break result;
                 }
-                Route::Remote {
+                CallAttempt::Remote {
                     node,
                     addr,
                     epoch,
                     peer_protocol,
-                } => (node, addr, epoch, peer_protocol),
+                    payload: returned,
+                } => {
+                    // The attempt hands the payload back with the route, so a
+                    // retry re-enters routing with the body it never lost.
+                    payload = returned;
+                    (node, addr, epoch, peer_protocol)
+                }
             };
+            let scope = &call.scope;
+            let request_id = call.request_id;
+            let deliver_abort_to_handler = call.deliver_abort_to_handler;
+            let cancel = &mut call.cancel;
+            let body_guard = &mut call.body_guard;
+            let CallPayload {
+                name,
+                url,
+                method,
+                body,
+                headers,
+            } = &payload;
             if dispatcher.observe(&node, epoch) {
                 let cancel = if deliver_abort_to_handler {
                     None
@@ -1273,7 +1134,7 @@ async fn dispatch_do_call(app: AppHandle, call: DoCallReq) {
                 };
                 match dispatcher.wait(cancel).await {
                     RemoteRetryOutcome::Ready => {
-                        dispatcher.invalidate(&app, &scope).await;
+                        dispatcher.invalidate(&app, scope).await;
                         continue;
                     }
                     RemoteRetryOutcome::Cancelled => {
@@ -1300,7 +1161,7 @@ async fn dispatch_do_call(app: AppHandle, call: DoCallReq) {
                         request_id,
                         capacity_handoff: epoch == 0,
                     };
-                    let attempt_body = match &body {
+                    let attempt_body = match body {
                         celld::js::RequestBody::Bytes(bytes) => {
                             celld::js::RequestBody::Bytes(bytes.clone())
                         }
@@ -1329,7 +1190,7 @@ async fn dispatch_do_call(app: AppHandle, call: DoCallReq) {
                         attempt_body,
                     )
                     .await
-                    .map_err(|error| owner_unreachable(&scope, &addr, error))?;
+                    .map_err(|error| owner_unreachable(scope, &addr, error))?;
                     // Only after the tunnel has taken the stream: `disarm`
                     // releases the guard's registry claim, and a claim that
                     // drops to zero deletes the entry, so disarming before
@@ -1344,7 +1205,7 @@ async fn dispatch_do_call(app: AppHandle, call: DoCallReq) {
                     {
                         abort.disarm();
                         return Err(owner_unreachable(
-                            &scope,
+                            scope,
                             &addr,
                             anyhow::Error::new(StalePeerRoute {
                                 scope: scope.clone(),
@@ -1435,7 +1296,7 @@ async fn dispatch_do_call(app: AppHandle, call: DoCallReq) {
             match remote {
                 Ok(response) => {
                     if let Some(timing) = websocket_timing.as_ref() {
-                        timing.emit(&app, &scope, request_id, "ok", "remote", &node);
+                        timing.emit(&app, scope, request_id, "ok", "remote", &node);
                     }
                     break Ok(response);
                 }
@@ -1472,7 +1333,7 @@ async fn dispatch_do_call(app: AppHandle, call: DoCallReq) {
                         cancel.as_mut()
                     };
                     match dispatcher
-                        .retry(&app, &scope, classify_remote_attempt(&error), cancel, None)
+                        .retry(&app, scope, classify_remote_attempt(&error), cancel, None)
                         .await
                     {
                         RemoteRetryOutcome::Ready => continue,
@@ -1482,7 +1343,7 @@ async fn dispatch_do_call(app: AppHandle, call: DoCallReq) {
                         RemoteRetryOutcome::Stop => {}
                     }
                     if let Some(timing) = websocket_timing.as_ref() {
-                        timing.emit(&app, &scope, request_id, "error", "remote", &node);
+                        timing.emit(&app, scope, request_id, "error", "remote", &node);
                     }
                     break Err(error);
                 }
@@ -1631,11 +1492,11 @@ async fn request_payload(
     request: Request<Incoming>,
     trust_forwarded_headers: bool,
     max_body_bytes: usize,
-) -> Result<(String, String, Vec<u8>, Vec<(String, String)>), HttpReply> {
+) -> Result<(String, String, Vec<u8>, Vec<(String, String)>), Box<HttpReply>> {
     let (parts, body) = request.into_parts();
     let body = collect_limited_body(body, max_body_bytes)
         .await
-        .map_err(|error| body_read_error("request", error))?;
+        .map_err(|error| Box::new(body_read_error("request", error)))?;
     let headers = parts
         .headers
         .iter()
@@ -1780,7 +1641,7 @@ async fn ingress_payload(
         celld::js::RequestBody,
         Vec<(String, String)>,
     ),
-    HttpReply,
+    Box<HttpReply>,
 > {
     let declared = request
         .headers()
@@ -1788,18 +1649,18 @@ async fn ingress_payload(
         .and_then(|value| value.to_str().ok())
         .and_then(|value| value.parse::<u64>().ok());
     if declared.is_some_and(|length| length > max_body_bytes as u64) {
-        return Err(response(
+        return Err(Box::new(response(
             StatusCode::PAYLOAD_TOO_LARGE,
             "request body too large",
-        ));
+        )));
     }
     let (url, method, body, headers, held) =
         ingress_payload_parts(request, trust_forwarded_headers, max_body_bytes).map_err(
             |error| {
-                response(
+                Box::new(response(
                     StatusCode::SERVICE_UNAVAILABLE,
                     format!("request body stream: {error}"),
-                )
+                ))
             },
         )?;
     // The host collects a small body here. A read failure at this point
@@ -1810,7 +1671,7 @@ async fn ingress_payload(
         None => body,
         Some(held) => match collect_limited_body(held, max_body_bytes).await {
             Ok(collected) => celld::js::RequestBody::Bytes(collected),
-            Err(error) => return Err(body_read_error("request", error)),
+            Err(error) => return Err(Box::new(body_read_error("request", error))),
         },
     };
     Ok((url, method, body, headers))
@@ -2430,7 +2291,7 @@ async fn handle_ingress(
     .await
     {
         Ok(payload) => payload,
-        Err(response) => return response,
+        Err(response) => return *response,
     };
     let preserve_representation_length = method.eq_ignore_ascii_case("HEAD");
     match app
@@ -3121,7 +2982,7 @@ async fn handle_internal(
             .await
             {
                 Ok(payload) => payload,
-                Err(response) => return Ok(response),
+                Err(response) => return Ok(*response),
             };
             dispatch_cell_fetch(cell, None, url, method, body, headers).await
         }
@@ -3591,7 +3452,8 @@ async fn async_main(
     };
     #[cfg(not(all(test, celld_internal_tests)))]
     let action = action_from_process()?;
-    celld::asyncrt::set_host_handle(tokio::runtime::Handle::current());
+    let host_runtime = tokio::runtime::Handle::current();
+    celld::asyncrt::set_host_handle(host_runtime.clone());
     // Docker and journald can stop consuming the process pipe during a log
     // burst. Logging must lose diagnostics under that backpressure rather
     // than block the Tokio workers that route requests and renew authority.
@@ -3754,6 +3616,14 @@ async fn async_main(
     if let Some(supervisor) = settings.dev_supervisor {
         celld::dev::exit_with_supervisor(supervisor)?;
     }
+    // Operators need the applied worker count to verify CELLD_TOKIO_THREADS;
+    // a count of process threads also includes unrelated, lazily started
+    // thread pools, so it cannot stand in for this value.
+    tracing::info!(
+        event = "host_runtime",
+        worker_count = host_runtime.metrics().num_workers(),
+        "host runtime initialized"
+    );
     celld::startup::raise_file_limit();
     let max_resident = celld::env_vars::optional("CELLD_MAX_RESIDENT_CELLS")?
         // celld has no resident ceiling unless the operator configures one.
@@ -4534,6 +4404,10 @@ async fn async_main(
     if let Ownership::Bucket(bucket_ownership) = &actor.ownership {
         celld::js::set_kv_blob_store(bucket_ownership.bucket_client());
     }
+    // Seed `/state` and the first lease before the core starts or the ticker posts a sample.
+    let services = celld::asyncrt::services();
+    let initial_sample = tokio::task::spawn_blocking(move || services.sample_metrics()).await?;
+    actor.store_load_sample(initial_sample);
     // The core is a serial ownership actor, not a Worker executor. It owns the
     // node lease timer, so ingress, proxy retries, and restore completions must
     // not consume every scheduler turn it needs. Its isolated single-thread
@@ -4559,6 +4433,10 @@ async fn async_main(
         celld::asyncrt::spawn(async move {
             let mut tick = celld::asyncrt::interval(LOAD_SAMPLE_PERIOD);
             tick.set_missed_tick_behavior(celld::asyncrt::MissedTickBehavior::Delay);
+            // The seed sample above takes the CPU baseline. Sampling again on
+            // the immediate tick divides CPU clock ticks by too little time and
+            // spikes the load.
+            tick.tick().await;
             loop {
                 tick.tick().await;
                 // What SQLite freed when a cell stopped stays on the C
@@ -4568,7 +4446,20 @@ async fn async_main(
                 // ahead of the sample, on a blocking thread because a trim
                 // walks every free chunk.
                 let _ = tokio::task::spawn_blocking(celld::memory::trim_c_heap_if_retained).await;
-                if sample_tx.send(Message::SampleLoad).is_err() {
+                let services = celld::asyncrt::services();
+                let sample =
+                    match tokio::task::spawn_blocking(move || services.sample_metrics()).await {
+                        Ok(sample) => sample,
+                        Err(error) => {
+                            tracing::warn!(
+                                event = "load_sample_failed",
+                                %error,
+                                "process load sample failed"
+                            );
+                            continue;
+                        }
+                    };
+                if sample_tx.send(Message::SampleLoad(sample)).is_err() {
                     return;
                 }
             }
@@ -5838,41 +5729,6 @@ fn forwarder_response_stream(
                     if let Some(mut abort) = abort.take() {
                         abort.disarm();
                     }
-                    None
-                }
-            }
-        },
-    ))
-}
-
-// The body owns the activity until EOF, cancellation, or drop. A forwarded
-// body also owns its peer-abort guard: disarm it at EOF, but retain it on a
-// dropped body so the owner cancels work for the disconnected peer.
-fn local_response_stream(
-    stream: celld::js::HttpChunkStream,
-    activity: ActivityGuard,
-    on_finish: impl FnOnce() + Send + 'static,
-) -> celld::js::HttpChunkStream {
-    let cancellation = activity.cancellation();
-    Box::pin(futures_util::stream::unfold(
-        (stream, activity, on_finish, cancellation),
-        |(mut stream, activity, on_finish, mut cancellation)| async move {
-            let chunk = if *cancellation.borrow() {
-                None
-            } else {
-                celld::asyncrt::select! {
-                    chunk = stream.next() => chunk,
-                    changed = cancellation.changed() => {
-                        let _ = changed;
-                        None
-                    }
-                }
-            };
-            match chunk {
-                Some(chunk) => Some((chunk, (stream, activity, on_finish, cancellation))),
-                None => {
-                    on_finish();
-                    drop(activity);
                     None
                 }
             }
