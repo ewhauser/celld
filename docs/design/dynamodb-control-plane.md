@@ -1,8 +1,8 @@
 # DynamoDB control plane: an optional home for fleet coordination
 
 Status: revision 2, 2026-09-29. The table, its selection, the routing of
-every coordination record, and `celld control init|show` are
-implemented. [Not built yet](#not-built-yet) lists what revision 1
+every coordination record, and `celld control init|show|repair-epochs`
+are implemented. [Not built yet](#not-built-yet) lists what revision 1
 proposed and this revision leaves for later; the
 [Decisions](#decisions) section records what changed and why.
 
@@ -413,7 +413,45 @@ The saving comes from per-cell traffic, not from the fleet size.
   bucket. Restore refuses to proceed when the newest non-empty epoch is
   at or above the claimed one, so a rolled-back epoch cannot overwrite
   data, but those cells then cannot activate until their epochs are
-  repaired.
+  repaired. See [Repairing epochs](#repairing-epochs).
+
+### Repairing epochs
+
+`celld control repair-epochs` applies the epoch-floor rule. It walks
+`cells/` a page at a time, and for each cell takes the newest epoch that
+holds LTX, counting the cell's facets, which replicate at their root's
+epoch. A record is behind when that epoch is at or above the epoch the next
+acquire would claim: one past the record's, or 1 for a cell with no record.
+A behind record is rewritten unowned at the newest epoch, with a conditional
+write on the token just read, and the next acquire claims the epoch after
+it.
+
+- A record at the newest epoch is the one that wrote it, so it is left
+  alone.
+- The record is written unowned rather than keeping the node it named.
+  After a restore that node need not be the newest epoch's writer, and a
+  record naming it at an epoch it never acquired would present another
+  node's stream as its own.
+- The fleet must be stopped. A running node is not proof against the
+  repair: a restore can leave it serving a cell at an epoch its record no
+  longer shows, and it can activate a root at an epoch below a dormant
+  facet's data, because facets restore on demand, so its record is behind
+  while it serves. Clearing either record lets a second node claim the cell
+  while the first still serves it. So the command refuses while any lease
+  is live.
+- An unowned record lets a takeover skip node-log recovery. So the command
+  also refuses while any expired lease holds a log that is open or
+  recovering, and names those nodes; one node started until the logs are
+  sealed recovers them. A sealed log, or none, has nothing left to write.
+- Those checks run once, before the walk, and a node can start during it.
+  So before each write the command reads the lease of the node the record
+  names, and leaves the record alone unless that lease expired with its log
+  sealed. An expired lease never renews, and a node can only take the cell
+  again by changing the record, which fails the conditional write. Records
+  left alone are listed and the command fails, to be run again.
+
+The command uses only routed reads and writes, so it repairs a bucket
+fleet's `own.json` records the same way.
 
 ## Security
 
@@ -440,6 +478,7 @@ bucket does. celld links no AWS SDK.
 ```
 celld control init --table NAME [--table-region REGION] [--no-create] --bucket s3://NAME
 celld control show --bucket s3://NAME [--json]
+celld control repair-epochs --bucket s3://NAME [--dry-run]
 ```
 
 ## Testing
@@ -477,8 +516,6 @@ These were proposed in revision 1 and are left for later:
 - **Migration.** `celld control migrate`, with a lazy copy of owner
   records, in either direction. Today a fleet chooses its store when it
   starts, and a bucket fleet with live leases cannot switch.
-- **Repairing epochs after a table restore**, `celld control
-  repair-epochs`.
 - **Splitting load telemetry out of the lease** into its own small item,
   which would cut the cost of every consistent lease scan by about two
   thirds.

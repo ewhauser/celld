@@ -29,7 +29,6 @@ Still to come:
 - **Moving an existing fleet.** There is no `celld control migrate`. A fleet
   chooses its store before it holds any state, so start a table fleet in an
   empty bucket or prefix.
-- **Repairing a table restored from a backup** (see [Recovery](#recovery)).
 - **Fleets of more than a few hundred nodes.** Every node reads every lease
   from one table partition; the work to spread those reads is listed in the
   [design](design/dynamodb-control-plane.md#not-built-yet).
@@ -167,7 +166,8 @@ dynamodb:DescribeTable
 dynamodb:DescribeTimeToLive
 ```
 
-`celld control init` also needs `dynamodb:CreateTable`,
+`celld control repair-epochs` needs `dynamodb:GetItem`, `dynamodb:PutItem`
+and `dynamodb:Query`. `celld control init` also needs `dynamodb:CreateTable`,
 `dynamodb:UpdateContinuousBackups` and `dynamodb:DescribeContinuousBackups`,
 and `celld control show` needs `dynamodb:DescribeContinuousBackups`.
 
@@ -211,9 +211,42 @@ peak, so pre-warm it before a large rollout or load test.
 
 Point-in-time recovery restores the ownership records to an earlier moment,
 when some cells may have moved to higher epochs since. celld does not
-overwrite data in that case, but those cells cannot activate until their
-epochs are repaired, and that repair command does not exist yet. Treat a
-table restore as a fleet-wide recovery event.
+overwrite data in that case: a cell whose ownership record is behind the
+data in the bucket refuses to activate. Treat a table restore as a
+fleet-wide recovery event: stop every node, restore the table, repair the
+epochs, then start the fleet again.
+
+1. Stop every node gracefully, so each seals its node log, and wait for
+   their leases to expire.
+2. Restore the table and point the fleet at it.
+3. Repair the epochs:
+
+   ```sh
+   celld control repair-epochs --bucket "$CELLD_BUCKET" --dry-run
+   celld control repair-epochs --bucket "$CELLD_BUCKET"
+   ```
+
+4. Start the fleet.
+
+The command walks every cell in the bucket, including its facets, and finds
+the newest epoch that holds data. Each ownership record below that epoch is
+rewritten as unowned at it, so the next activation claims the epoch after
+it and restores everything the bucket holds. Records that are already
+consistent are left alone, and each rewrite is a conditional write that
+never replaces a record a node changed since. It prints one line per
+repaired cell, and `--dry-run` prints them without writing.
+
+The command refuses while any node is running, because a running node can
+serve a cell at an epoch its restored record no longer shows, and clearing
+that record would let a second node take the cell while the first still
+serves it. It also refuses while a stopped node's log is still open or
+being recovered, as after a crash, and names those nodes: recovering such a
+log writes that node's acknowledged writes into the bucket, and a cell
+repaired before that would activate without them. Start one node until
+those logs are sealed, stop it, and run the command again. If a node starts
+while the command runs, the cells it owns are left alone and listed, and
+the command fails; stop that node and run it again. It is safe to run more
+than once, and it works on a bucket fleet as well.
 
 ## Test locally
 
@@ -271,6 +304,7 @@ AWS_REGION=us-east-1 CELLD_QUALIFY_DYNAMODB_BUCKET=s3://my-scratch-bucket \
 ```text
 celld control init --table NAME [--table-region REGION] [--no-create] --bucket s3://NAME[/PREFIX]
 celld control show --bucket s3://NAME[/PREFIX] [--json]
+celld control repair-epochs --bucket s3://NAME[/PREFIX] [--dry-run] [--json]
 ```
 
 ## Limitations
