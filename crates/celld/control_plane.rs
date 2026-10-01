@@ -6,7 +6,7 @@
 use crate::bucket::Bucket;
 use crate::note;
 use crate::protocol::{asset_blob_key, AssetIndex, DeployPointer, Manifest};
-use anyhow::{anyhow, Context};
+use anyhow::{anyhow, bail, Context};
 use celld_logic::PresenceSnapshot;
 use fastwebsockets::{Frame, OpCode};
 use hyper::header::HeaderMap;
@@ -1758,6 +1758,12 @@ pub async fn apply_deployment(
     // leaving a prefix that looks publishable.
     let queue_attachments =
         crate::deploy::prepare_queue_attachments(bucket, &deployment.manifest).await?;
+    let mut swaps = crate::deploy::queue_attachment_swaps(
+        &deployment.manifest,
+        &deployment.pointer.prefix,
+        queue_attachments,
+    )?;
+    crate::deploy::check_switch_fits(bucket, swaps.len()).await?;
 
     let mut asset_files = 0_u32;
     let mut asset_bytes = 0_u64;
@@ -1913,29 +1919,31 @@ pub async fn apply_deployment(
         .await?;
     // A producer can run in a different script, so the manifest is not a
     // discoverable consumer index. Publish the same fleet-wide attachment as
-    // `celld deploy`, after its exact deployment prefix is complete.
-    crate::deploy::publish_queue_attachments(
-        bucket,
-        &deployment.manifest,
-        &deployment.pointer.prefix,
-        queue_attachments,
-    )
-    .await?;
-    bucket
-        .put(
-            &format!("deploy/{}/current.json", deployment.script_name),
-            serde_json::to_vec_pretty(&deployment.pointer)?,
-        )
-        .await?;
-    // This fleet-wide pointer is the sole application selector. The named
-    // pointer above remains only for resolving service-binding components and
-    // for migrating buckets written by older celld releases.
-    bucket
-        .put(
-            "deploy/current.json",
-            serde_json::to_vec_pretty(&deployment.pointer)?,
-        )
-        .await?;
+    // `celld deploy`, after its exact deployment prefix is complete. The
+    // named pointer remains only for resolving service-binding components
+    // and for migrating buckets written by older celld releases; the
+    // fleet-wide pointer is the sole application selector, so it moves last.
+    // On a table fleet all of them switch in one transaction.
+    let pointer = serde_json::to_vec_pretty(&deployment.pointer)?;
+    for key in [
+        format!("deploy/{}/current.json", deployment.script_name),
+        "deploy/current.json".to_string(),
+    ] {
+        swaps.push(crate::control::Swap {
+            key,
+            body: pointer.clone(),
+            expect: crate::control::Expect::Any,
+        });
+    }
+    match bucket.swap_all(&swaps).await {
+        Ok(None) => {}
+        Ok(Some(key)) => {
+            bail!("{key} lost a race; another deploy may have landed first; retry the deployment")
+        }
+        Err(error) => {
+            return Err(error.context("a deployment write may have committed; retry the deployment"))
+        }
+    }
     info!(
         event = "control_plane_deployment_applied",
         script_name = %deployment.script_name,

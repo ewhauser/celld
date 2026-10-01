@@ -13,6 +13,7 @@
 //! model is refused, never silently dropped.
 use crate::bucket::Bucket;
 use crate::container::ContainerSpec;
+use crate::control::{Expect, Swap};
 use crate::note;
 use crate::protocol::{
     asset_blob_key, AssetConfig, AssetEntry, AssetIndex, AssetManifestRef, DeployPointer, Manifest,
@@ -865,6 +866,8 @@ pub async fn write(bucket: &Bucket, built: &Built) -> anyhow::Result<()> {
     // A competing consumer is a deploy refusal, so it must not leave a new
     // version in the bucket that an operator can mistake for a published one.
     let queue_attachments = prepare_queue_attachments(bucket, &built.manifest).await?;
+    let mut swaps = queue_attachment_swaps(&built.manifest, &built.prefix, queue_attachments)?;
+    check_switch_fits(bucket, swaps.len()).await?;
 
     // Images are fleet-wide and content-addressed like asset bodies, and
     // they are what a node loads before a container class can start.
@@ -903,11 +906,10 @@ pub async fn write(bucket: &Bucket, built: &Built) -> anyhow::Result<()> {
         )
         .await?;
 
-    // An attachment names this exact immutable prefix. Publish it only after
-    // the prefix is complete, so a node can never resolve a consumer to a
+    // An attachment names this exact immutable prefix. Publish it (`swaps`,
+    // built above) only after the prefix is complete, so a node can never resolve a consumer to a
     // half-uploaded deployment. The named and fleet pointers can move later
     // without tearing this queue-to-consumer relationship.
-    publish_queue_attachments(bucket, &built.manifest, &built.prefix, queue_attachments).await?;
 
     let pointer = DeployPointer {
         script_name: Some(built.script_name.clone()),
@@ -919,13 +921,59 @@ pub async fn write(bucket: &Bucket, built: &Built) -> anyhow::Result<()> {
     // The named pointer resolves service-binding components; the fleet-wide
     // one is the sole application selector, so it moves last. A concurrent
     // deploy must produce a loser, not a lost write.
-    put_pointer(
-        bucket,
-        &format!("deploy/{}/current.json", built.script_name),
-        encoded.clone(),
-    )
-    .await?;
-    put_pointer(bucket, "deploy/current.json", encoded).await?;
+    for key in [
+        format!("deploy/{}/current.json", built.script_name),
+        "deploy/current.json".to_string(),
+    ] {
+        let expect = match bucket.head(&key).await? {
+            Some((_, token)) => Expect::Token(token),
+            None => Expect::Absent,
+        };
+        swaps.push(Swap {
+            key,
+            body: encoded.clone(),
+            expect,
+        });
+    }
+    // On a table fleet the attachments and both pointers switch in one
+    // transaction; on the bucket they go in the order above.
+    match bucket.swap_all(&swaps).await {
+        Ok(None) => Ok(()),
+        Ok(Some(key)) => Err(anyhow!(
+            "write {}://{}/{key} lost a race\n\
+             Another deploy may have landed first; re-run `celld deploy`.",
+            bucket.scheme(),
+            bucket.name
+        )),
+        Err(error) => {
+            Err(error.context("Another deploy may have landed first; re-run `celld deploy`."))
+        }
+    }
+}
+
+/// The pointers every deploy switches beside its queue attachments.
+const POINTER_WRITES: usize = 2;
+
+/// Refuse, before anything is uploaded, a deploy whose switch the fleet
+/// cannot make: a table fleet switches the attachments and both pointers in
+/// one transaction, which has a size limit the bucket's ordered writes do
+/// not. `attachments` counts the attachment writes: every queue the
+/// deployment consumes, and every queue it stops consuming.
+pub(crate) async fn check_switch_fits(bucket: &Bucket, attachments: usize) -> anyhow::Result<()> {
+    let Some(limit) = bucket.swap_all_limit().await? else {
+        return Ok(());
+    };
+    let most = limit - POINTER_WRITES;
+    if attachments > most {
+        bail!(
+            "this deploy changes {attachments} queue consumer attachments, the queues it \
+             consumes plus those it stops consuming; a fleet on a DynamoDB control table \
+             switches them with both deployment pointers in one transaction, so a deploy \
+             can change at most {most}. Deploy in stages: first a version that stops \
+             consuming some of the old queues or consumes fewer of the new ones, then the \
+             rest. Nothing was uploaded."
+        );
+    }
     Ok(())
 }
 
@@ -1021,17 +1069,20 @@ async fn current_queue_consumers(
         .collect())
 }
 
-pub(crate) async fn publish_queue_attachments(
-    bucket: &Bucket,
+/// The attachment writes a deployment of `manifest` at `prefix` makes: claim
+/// every queue it consumes, and release every queue it no longer does, each
+/// conditional on the attachment it read.
+pub(crate) fn queue_attachment_swaps(
     manifest: &Manifest,
     prefix: &str,
     states: Vec<QueueAttachmentState>,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<Vec<Swap>> {
     let consumer = QueueConsumerDeployment {
         script_name: manifest.script_name.clone(),
         version: manifest.version.clone(),
         prefix: prefix.to_string(),
     };
+    let mut swaps = Vec::new();
     for state in states {
         let next_consumer = if state.desired {
             Some(consumer.clone())
@@ -1053,26 +1104,16 @@ pub(crate) async fn publish_queue_attachments(
         if state.current.as_ref() == Some(&next) {
             continue;
         }
-        let body = serde_json::to_vec_pretty(&next)?;
-        match bucket
-            .put_cas(&state.key, body, state.token.as_deref())
-            .await
-        {
-            Ok(Some(_)) => {}
-            Ok(None) => {
-                bail!(
-                    "queue consumer attachment {} lost a race; another deploy may have landed first; re-run `celld deploy`",
-                    state.key
-                )
-            }
-            Err(error) => {
-                return Err(error.context(
-                    "a queue consumer attachment write may have committed; re-run `celld deploy`",
-                ));
-            }
-        }
+        swaps.push(Swap {
+            key: state.key,
+            body: serde_json::to_vec_pretty(&next)?,
+            expect: match state.token {
+                Some(token) => Expect::Token(token),
+                None => Expect::Absent,
+            },
+        });
     }
-    Ok(())
+    Ok(swaps)
 }
 
 async fn ensure_asset_blob(bucket: &Bucket, sha256: &str, body: &[u8]) -> anyhow::Result<()> {
@@ -1085,24 +1126,6 @@ async fn ensure_asset_blob(bucket: &Bucket, sha256: &str, body: &[u8]) -> anyhow
     bucket
         .put_with_meta(&key, body.to_vec(), &[("sha256", sha256)])
         .await
-}
-
-/// Compare-and-swap on a pointer: create it if absent, otherwise replace
-/// exactly the value we read.
-async fn put_pointer(bucket: &Bucket, key: &str, body: Vec<u8>) -> anyhow::Result<()> {
-    let etag = bucket.head(key).await.ok().flatten().map(|(_, etag)| etag);
-    match bucket.put_cas(key, body, etag.as_deref()).await {
-        Ok(Some(_)) => Ok(()),
-        Ok(None) => Err(anyhow!(
-            "write {}://{}/{key} lost a race\n\
-             Another deploy may have landed first; re-run `celld deploy`.",
-            bucket.scheme(),
-            bucket.name
-        )),
-        Err(error) => {
-            Err(error.context("Another deploy may have landed first; re-run `celld deploy`."))
-        }
-    }
 }
 
 /// What `celld d1` needs out of a project: the declared databases, so a name

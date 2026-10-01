@@ -22,6 +22,8 @@ struct FakeTable {
     describe_extra: Mutex<Map<String, Value>>,
     ttl_status: Mutex<Option<String>>,
     calls: Mutex<Vec<&'static str>>,
+    /// Client request tokens of the transactions that applied.
+    transactions: Mutex<std::collections::BTreeSet<String>>,
 }
 
 fn condition_failed() -> TableError {
@@ -29,6 +31,7 @@ fn condition_failed() -> TableError {
         commit: Commit::No,
         code: Some("ConditionalCheckFailedException".into()),
         message: "The conditional request failed".into(),
+        reasons: Vec::new(),
     }
 }
 
@@ -184,6 +187,57 @@ impl Transport for FakeTable {
                     answer["LastEvaluatedKey"] = json!({ "pk": item["pk"], "sk": item["sk"] });
                 }
                 Ok(answer)
+            }
+            "TransactWriteItems" => {
+                let fault = self.write_fault();
+                if let Some(Fault::Throttled) = fault {
+                    return Err(TableError::from_response(
+                        400,
+                        br#"{"__type":"com.amazonaws.dynamodb.v20120810#ThrottlingException","message":"slow down"}"#,
+                    ));
+                }
+                let token = body["ClientRequestToken"].as_str().unwrap().to_string();
+                let mut items = self.items.lock().unwrap();
+                if !self.transactions.lock().unwrap().contains(&token) {
+                    let writes: Vec<&Value> = body["TransactItems"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .map(|item| &item["Put"])
+                        .collect();
+                    let reasons: Vec<Value> = writes
+                        .iter()
+                        .map(
+                            |put| match self.check(put, items.get(&key_of(&put["Item"]))) {
+                                Ok(()) => json!({ "Code": "None" }),
+                                Err(_) => json!({ "Code": "ConditionalCheckFailed" }),
+                            },
+                        )
+                        .collect();
+                    if reasons.iter().any(|reason| reason["Code"] != "None") {
+                        return Err(TableError::from_response(
+                            400,
+                            json!({
+                                "__type": "com.amazonaws.dynamodb.v20120810#TransactionCanceledException",
+                                "Message": "Transaction cancelled",
+                                "CancellationReasons": reasons,
+                            })
+                            .to_string()
+                            .as_bytes(),
+                        ));
+                    }
+                    for put in writes {
+                        items.insert(key_of(&put["Item"]), put["Item"].clone());
+                    }
+                    self.transactions.lock().unwrap().insert(token);
+                }
+                match fault {
+                    Some(Fault::AppliedThenServerError) => Err(TableError::from_response(
+                        500,
+                        br#"{"__type":"com.amazonaws.dynamodb.v20120810#InternalServerError","message":"oops"}"#,
+                    )),
+                    _ => Ok(json!({})),
+                }
             }
             "DescribeTable" => {
                 let mut table = json!({
@@ -976,6 +1030,211 @@ fn a_live_table_honors_the_contract() {
         assert_eq!(rest.len(), 1);
         assert!(!table.delete_record(&key, Some(&token)).await.unwrap());
         assert!(table.delete_record(&key, Some(&next)).await.unwrap());
+
+        let named = swap("deploy/api/current.json", r#"{"v":1}"#, Expect::Absent);
+        let fleet = swap("deploy/current.json", r#"{"v":1}"#, Expect::Absent);
+        let pair = |a: &Swap, b: &Swap| {
+            [
+                (ControlKey::parse(&a.key).unwrap(), a.clone()),
+                (ControlKey::parse(&b.key).unwrap(), b.clone()),
+            ]
+        };
+        let first = pair(&named, &fleet);
+        let first: Vec<_> = first
+            .iter()
+            .map(|(key, swap)| (key.clone(), swap))
+            .collect();
+        assert_eq!(table.transact(&first).await.unwrap(), None);
+        let stale = swap("deploy/api/current.json", r#"{"v":2}"#, Expect::Any);
+        let second = pair(&stale, &fleet);
+        let second: Vec<_> = second
+            .iter()
+            .map(|(key, swap)| (key.clone(), swap))
+            .collect();
+        assert_eq!(
+            table.transact(&second).await.unwrap().as_deref(),
+            Some("deploy/current.json")
+        );
+        let (body, _) = table
+            .get_record(&ControlKey::parse("deploy/api/current.json").unwrap())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            body.as_ref(),
+            br#"{"v":1}"#,
+            "a cancelled transaction applies nothing"
+        );
+    });
+}
+
+fn swap(key: &str, body: &str, expect: Expect) -> Swap {
+    Swap {
+        key: key.into(),
+        body: body.as_bytes().to_vec(),
+        expect,
+    }
+}
+
+#[test]
+fn deploy_pointers_switch_in_one_transaction_on_a_table() {
+    crate::asyncrt::test_block_on(async {
+        let (bucket, fake) = table_fleet().await;
+        let attachment = bucket
+            .put_cas(
+                "deploy/queues/jobs/consumer.json",
+                br#"{"a":0}"#.to_vec(),
+                None,
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        fake.calls.lock().unwrap().clear();
+        let swaps = [
+            swap(
+                "deploy/queues/jobs/consumer.json",
+                r#"{"a":1}"#,
+                Expect::Token(attachment.clone()),
+            ),
+            swap("deploy/api/current.json", r#"{"v":1}"#, Expect::Absent),
+            swap("deploy/current.json", r#"{"v":1}"#, Expect::Absent),
+        ];
+        assert_eq!(bucket.swap_all(&swaps).await.unwrap(), None);
+        assert_eq!(*fake.calls.lock().unwrap(), ["TransactWriteItems"]);
+        for (key, body) in [
+            ("deploy/queues/jobs/consumer.json", r#"{"a":1}"#),
+            ("deploy/api/current.json", r#"{"v":1}"#),
+            ("deploy/current.json", r#"{"v":1}"#),
+        ] {
+            assert_eq!(
+                bucket.get(key).await.unwrap().unwrap().0.as_ref(),
+                body.as_bytes()
+            );
+        }
+
+        // A stale expectation anywhere leaves every record as it was.
+        let (_, fleet_token) = bucket.get("deploy/current.json").await.unwrap().unwrap();
+        let lost = bucket
+            .swap_all(&[
+                swap("deploy/api/current.json", r#"{"v":2}"#, Expect::Any),
+                swap(
+                    "deploy/queues/jobs/consumer.json",
+                    r#"{"a":2}"#,
+                    Expect::Token(attachment),
+                ),
+                swap(
+                    "deploy/current.json",
+                    r#"{"v":2}"#,
+                    Expect::Token(fleet_token),
+                ),
+            ])
+            .await
+            .unwrap();
+        assert_eq!(lost.as_deref(), Some("deploy/queues/jobs/consumer.json"));
+        assert_eq!(
+            bucket
+                .get("deploy/api/current.json")
+                .await
+                .unwrap()
+                .unwrap()
+                .0
+                .as_ref(),
+            br#"{"v":1}"#
+        );
+        assert_eq!(
+            bucket
+                .get("deploy/current.json")
+                .await
+                .unwrap()
+                .unwrap()
+                .0
+                .as_ref(),
+            br#"{"v":1}"#
+        );
+    });
+}
+
+#[test]
+fn an_ambiguous_transaction_repeats_with_its_request_token() {
+    crate::asyncrt::test_block_on(async {
+        let (bucket, fake) = table_fleet().await;
+        fake.faults
+            .lock()
+            .unwrap()
+            .push_back(Fault::AppliedThenServerError);
+        fake.calls.lock().unwrap().clear();
+        let swaps = [
+            swap("deploy/api/current.json", r#"{"v":1}"#, Expect::Absent),
+            swap("deploy/current.json", r#"{"v":1}"#, Expect::Absent),
+        ];
+        // The first attempt applied and answered 500; the repeat carries
+        // the same token, so it reports the applied outcome instead of the
+        // lost race a second create would be.
+        assert_eq!(bucket.swap_all(&swaps).await.unwrap(), None);
+        assert_eq!(
+            *fake.calls.lock().unwrap(),
+            ["TransactWriteItems", "TransactWriteItems"]
+        );
+        assert_eq!(fake.transactions.lock().unwrap().len(), 1);
+
+        // A throttle is not committed and is repeated too.
+        fake.faults.lock().unwrap().push_back(Fault::Throttled);
+        let (_, token) = bucket.get("deploy/current.json").await.unwrap().unwrap();
+        assert_eq!(
+            bucket
+                .swap_all(&[swap(
+                    "deploy/current.json",
+                    r#"{"v":2}"#,
+                    Expect::Token(token)
+                )])
+                .await
+                .unwrap(),
+            None
+        );
+    });
+}
+
+#[test]
+fn deploy_pointers_switch_in_order_on_the_bucket() {
+    crate::asyncrt::test_block_on(async {
+        let bucket = bucket();
+        resolve_with(
+            &bucket,
+            Role::Node,
+            &Settings {
+                backend: Some(Backend::Bucket),
+                region: None,
+                endpoint: None,
+                lease_shards: None,
+            },
+            None,
+        )
+        .await
+        .unwrap();
+        bucket
+            .put_cas("deploy/current.json", br#"{"v":0}"#.to_vec(), None)
+            .await
+            .unwrap()
+            .unwrap();
+        let lost = bucket
+            .swap_all(&[
+                swap("deploy/api/current.json", r#"{"v":1}"#, Expect::Absent),
+                swap("deploy/current.json", r#"{"v":1}"#, Expect::Absent),
+            ])
+            .await
+            .unwrap();
+        assert_eq!(lost.as_deref(), Some("deploy/current.json"));
+        // The bucket has no transaction: the earlier write stays.
+        assert_eq!(
+            bucket
+                .get("deploy/api/current.json")
+                .await
+                .unwrap()
+                .unwrap()
+                .0
+                .as_ref(),
+            br#"{"v":1}"#
+        );
     });
 }
 
@@ -1948,5 +2207,28 @@ fn a_table_fleet_cannot_move_to_another_table() {
         assert_eq!(marker.migrating, None);
         assert_eq!(fake.items.lock().unwrap().len(), before);
         assert!(old.get("nodes/n1.json").await.unwrap().is_some());
+    });
+}
+
+#[test]
+fn a_deploy_switch_must_fit_one_transaction_on_a_table() {
+    crate::asyncrt::test_block_on(async {
+        // Two pointers ride beside the attachments in the transaction.
+        let (table, _fake) = table_fleet().await;
+        crate::deploy::check_switch_fits(&table, MAX_TRANSACT_WRITES - 2)
+            .await
+            .unwrap();
+        // Fifty queues released and fifty claimed: one hundred attachments.
+        let error = crate::deploy::check_switch_fits(&table, 100)
+            .await
+            .unwrap_err();
+        let message = format!("{error:#}");
+        assert!(message.contains("at most 98"), "{message}");
+        assert!(message.contains("Deploy in stages"), "{message}");
+        // The bucket writes in order and has no such limit.
+        let bucket = bucket_fleet_for_test().await;
+        crate::deploy::check_switch_fits(&bucket, 100)
+            .await
+            .unwrap();
     });
 }

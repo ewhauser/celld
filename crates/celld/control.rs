@@ -104,6 +104,9 @@ const PROBE_PK: &str = "probe";
 /// The partition of a cell's ownership record is this and the cell.
 const OWNER_PK_PREFIX: &str = "cell#";
 
+/// The most records one `TransactWriteItems` writes.
+pub(crate) const MAX_TRANSACT_WRITES: usize = 100;
+
 /// The DynamoDB JSON protocol version every request names.
 const TARGET_PREFIX: &str = "DynamoDB_20120810";
 
@@ -376,6 +379,9 @@ pub struct TableError {
     /// DynamoDB's error type, without its namespace.
     pub code: Option<String>,
     pub message: String,
+    /// A cancelled transaction's reason code for each of its writes, in
+    /// order, `None` for a write that was not the cause.
+    pub reasons: Vec<Option<String>>,
 }
 
 impl std::fmt::Display for TableError {
@@ -395,6 +401,7 @@ impl TableError {
             commit: Commit::No,
             code: None,
             message: message.into(),
+            reasons: Vec::new(),
         }
     }
 
@@ -403,6 +410,7 @@ impl TableError {
             commit: Commit::Maybe,
             code: None,
             message: message.into(),
+            reasons: Vec::new(),
         }
     }
 
@@ -426,6 +434,22 @@ impl TableError {
             .and_then(Value::as_str)
             .map(str::to_string)
             .unwrap_or_else(|| format!("HTTP {status}"));
+        let reasons = parsed
+            .get("CancellationReasons")
+            .and_then(Value::as_array)
+            .map(|reasons| {
+                reasons
+                    .iter()
+                    .map(|reason| {
+                        reason
+                            .get("Code")
+                            .and_then(Value::as_str)
+                            .filter(|code| *code != "None")
+                            .map(str::to_string)
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
         Self {
             commit: if (400..500).contains(&status) {
                 Commit::No
@@ -434,7 +458,15 @@ impl TableError {
             },
             code,
             message,
+            reasons,
         }
+    }
+
+    /// The first write of a cancelled transaction whose condition failed.
+    fn failed_condition(&self) -> Option<usize> {
+        self.reasons
+            .iter()
+            .position(|reason| reason.as_deref() == Some("ConditionalCheckFailed"))
     }
 
     fn is_condition_failure(&self) -> bool {
@@ -568,6 +600,30 @@ pub(crate) struct Listed {
     pub(crate) key: String,
     pub(crate) record: Record,
 }
+
+/// What one write of a transaction expects to find.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Expect {
+    /// Nothing: the write replaces whatever is there.
+    Any,
+    /// No record.
+    Absent,
+    /// The record with this token.
+    Token(String),
+}
+
+/// One record a [`crate::bucket::Bucket::swap_all`] writes.
+#[derive(Clone, Debug)]
+pub struct Swap {
+    pub key: String,
+    pub body: Vec<u8>,
+    pub expect: Expect,
+}
+
+/// Attempts of one transaction. A repeat carries the same client request
+/// token, which DynamoDB answers as the first attempt's outcome for ten
+/// minutes, so it cannot apply twice.
+const TRANSACT_ATTEMPTS: usize = 3;
 
 /// The precondition of a table write.
 enum Condition<'a> {
@@ -933,6 +989,103 @@ impl Table {
             Some(token) => Condition::Token(token),
         };
         self.put(&pk, &sk, body, condition).await
+    }
+
+    /// Write every record together, or none of them. `Ok(None)` applied;
+    /// `Ok(Some(key))` names the first record whose expectation failed, and
+    /// nothing changed.
+    pub(crate) async fn transact(
+        &self,
+        swaps: &[(ControlKey, &Swap)],
+    ) -> anyhow::Result<Option<String>> {
+        ensure!(
+            (1..=MAX_TRANSACT_WRITES).contains(&swaps.len()),
+            "a transaction writes 1 to {MAX_TRANSACT_WRITES} records, not {}",
+            swaps.len()
+        );
+        let now = crate::asyncrt::wall_ms().max(0).to_string();
+        let mut items = Vec::with_capacity(swaps.len());
+        for (record, swap) in swaps {
+            let (pk, sk) = self.item_key(record);
+            let doc = std::str::from_utf8(&swap.body).map_err(|_| {
+                anyhow!(TableError::not_committed(format!(
+                    "{}: a coordination record must be UTF-8 JSON",
+                    swap.key
+                )))
+            })?;
+            let mut put = json!({
+                "TableName": self.name,
+                "Item": {
+                    "pk": { "S": pk },
+                    "sk": { "S": sk },
+                    "doc": { "S": doc },
+                    "v": { "S": Self::new_token() },
+                    "updated_ms": { "N": now },
+                },
+            });
+            match &swap.expect {
+                Expect::Any => {}
+                Expect::Absent => put["ConditionExpression"] = json!("attribute_not_exists(pk)"),
+                Expect::Token(token) => {
+                    put["ConditionExpression"] = json!("v = :v");
+                    put["ExpressionAttributeValues"] = json!({ ":v": { "S": token } });
+                }
+            }
+            items.push(json!({ "Put": put }));
+        }
+        // The request is built once, tokens included, so a repeat is the
+        // identical request DynamoDB deduplicates by its request token.
+        let request = json!({
+            "TransactItems": items,
+            "ClientRequestToken": Self::new_token(),
+        });
+        let mut attempt = 0;
+        loop {
+            attempt += 1;
+            match self
+                .transport
+                .call("TransactWriteItems", request.clone())
+                .await
+            {
+                Ok(_) => return Ok(None),
+                Err(error) if error.code.as_deref() == Some("TransactionCanceledException") => {
+                    if let Some(index) = error.failed_condition() {
+                        return Ok(Some(swaps[index].1.key.clone()));
+                    }
+                    // Cancelled for a conflict or a throttle: nothing applied.
+                    if attempt >= TRANSACT_ATTEMPTS {
+                        return Err(anyhow!(error)
+                            .context(format!("transaction on dynamodb://{}", self.name)));
+                    }
+                }
+                // A throttle or a conflict applied nothing, and a server error
+                // may have applied all of it; the token makes either repeat
+                // safe.
+                Err(error)
+                    if attempt < TRANSACT_ATTEMPTS
+                        && (error.commit == Commit::Maybe
+                            || matches!(
+                                error.code.as_deref(),
+                                Some(
+                                    "ThrottlingException"
+                                        | "ProvisionedThroughputExceededException"
+                                        | "RequestLimitExceeded"
+                                        | "TransactionConflictException"
+                                        | "TransactionInProgressException"
+                                )
+                            )) => {}
+                Err(error) => {
+                    return Err(
+                        anyhow!(error).context(format!("transaction on dynamodb://{}", self.name))
+                    )
+                }
+            }
+            tracing::debug!(
+                attempt,
+                "repeating a DynamoDB transaction with its request token"
+            );
+            crate::asyncrt::sleep(Duration::from_millis(50 << attempt)).await;
+        }
     }
 
     pub(crate) async fn delete_record(
