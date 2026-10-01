@@ -255,6 +255,56 @@ struct NodeScan {
 async fn scan_nodes(bucket: &Bucket, now_ms: u64) -> NodeScan {
     let mut dead = Vec::new();
     let mut live = BTreeSet::new();
+    // A table fleet answers from the node's shared lease view, bodies
+    // included. The view judges each lease at the moment it was read, not
+    // now: a session whose lease had expired then has stopped itself and
+    // never renews again, while one that was live then may have renewed
+    // since, so judging a few-seconds-old body against the current clock
+    // could call a live node dead and collect its markers. A dead lease the
+    // view missed is caught by the next pass.
+    match bucket
+        .table_lease_view(crate::control::fleet_view_max_age())
+        .await
+    {
+        Ok(Some(view)) => {
+            let now_ms = now_ms.min(view.read_ms);
+            for listed in &view.leases {
+                let Some(node) = listed
+                    .key
+                    .strip_prefix("nodes/")
+                    .and_then(|value| value.strip_suffix(".json"))
+                else {
+                    continue;
+                };
+                match serde_json::from_slice::<NodeWire>(&listed.record.body) {
+                    Ok(record)
+                        if celld_logic::dead_node_reconciliation::node_record_is_dead(
+                            node,
+                            &record.node,
+                            record.expires_ms,
+                            now_ms,
+                        ) =>
+                    {
+                        dead.push(DeadNode {
+                            node: node.to_string(),
+                            generation: record.generation().to_string(),
+                        });
+                    }
+                    Ok(record) if record.node == node => {
+                        live.insert(node.to_string());
+                    }
+                    Ok(_) => {}
+                    Err(error) => warn!(%node, %error, "dead-node scan read failed"),
+                }
+            }
+            return NodeScan { dead, live };
+        }
+        Ok(None) => {}
+        Err(error) => {
+            warn!(%error, "dead-node scan list failed");
+            return NodeScan { dead, live };
+        }
+    }
     let objects = match bucket.list("nodes/").await {
         Ok(objects) => objects,
         Err(error) => {

@@ -1,7 +1,7 @@
 use super::*;
 use crate::bucket::StorageBackend;
 use object_store::memory::InMemory;
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::sync::Mutex;
 
 /// What the fake does to the next write.
@@ -206,6 +206,7 @@ fn table_settings() -> Settings {
         }),
         region: Some("us-east-1".into()),
         endpoint: None,
+        lease_shards: None,
     }
 }
 
@@ -704,7 +705,7 @@ fn an_interrupted_setup_adopts_its_own_claim() {
         // A setup claimed the table and stopped before it wrote the marker.
         let table = Table::with_transport("celld-test".into(), "us-east-1".into(), fake.clone());
         table
-            .claim("first-attempt", &bucket_identity(&bucket))
+            .claim("first-attempt", &bucket_identity(&bucket), 1)
             .await
             .unwrap();
         let resolved = resolve_with(&bucket, Role::Node, &table_settings(), Some(fake))
@@ -903,9 +904,15 @@ fn a_live_table_honors_the_contract() {
         assert!(table.create().await.unwrap());
         table.check_shape().await.unwrap();
         table.probe().await.unwrap();
-        assert_eq!(table.claim("fleet-1", "s3://a/").await.unwrap(), "fleet-1");
-        assert_eq!(table.claim("fleet-2", "s3://a/").await.unwrap(), "fleet-1");
-        assert!(table.claim("fleet-3", "s3://b/").await.is_err());
+        assert_eq!(
+            table.claim("fleet-1", "s3://a/", 1).await.unwrap(),
+            "fleet-1"
+        );
+        assert_eq!(
+            table.claim("fleet-2", "s3://a/", 1).await.unwrap(),
+            "fleet-1"
+        );
+        assert!(table.claim("fleet-3", "s3://b/", 1).await.is_err());
         table.verify_claim("fleet-1").await.unwrap();
         assert!(table.verify_claim("fleet-3").await.is_err());
 
@@ -936,4 +943,194 @@ fn a_live_table_honors_the_contract() {
         assert!(!table.delete_record(&key, Some(&token)).await.unwrap());
         assert!(table.delete_record(&key, Some(&next)).await.unwrap());
     });
+}
+
+#[test]
+fn lease_shards_are_stable() {
+    // A node's shard is part of the table's layout: these must never move.
+    assert_eq!(lease_pk(0, 1), "nodes");
+    assert_eq!(lease_pk(3, 8), "nodes#3");
+    assert_eq!(lease_shard_of_pk("nodes"), Some(0));
+    assert_eq!(lease_shard_of_pk("nodes#7"), Some(7));
+    assert_eq!(lease_shard_of_pk("nodesx"), None);
+    assert_eq!(lease_shard_of_pk("deploy"), None);
+    assert_eq!(lease_shard("anything", 1), 0);
+    let shards: Vec<u32> = ["n0", "n1", "n2", "n3"]
+        .iter()
+        .map(|node| lease_shard(node, 8))
+        .collect();
+    assert_eq!(shards, [3, 0, 1, 6]);
+}
+
+/// A table fleet whose leases spread over `shards` partitions.
+async fn sharded_fleet(shards: u32) -> (Bucket, Arc<FakeTable>) {
+    let bucket = bucket();
+    let fake = Arc::new(FakeTable::default());
+    let settings = Settings {
+        lease_shards: Some(shards),
+        ..table_settings()
+    };
+    resolve_with(&bucket, Role::Node, &settings, Some(fake.clone()))
+        .await
+        .unwrap();
+    (bucket, fake)
+}
+
+#[test]
+fn leases_spread_over_the_shards_the_claim_fixes() {
+    crate::asyncrt::test_block_on(async {
+        let (bucket, fake) = sharded_fleet(4).await;
+        let nodes: Vec<String> = (0..20).map(|n| format!("n{n:02}")).collect();
+        for node in &nodes {
+            bucket
+                .put_cas(
+                    &format!("nodes/{node}.json"),
+                    format!(r#"{{"node":"{node}"}}"#).into_bytes(),
+                    None,
+                )
+                .await
+                .unwrap()
+                .expect("create applies");
+        }
+        let partitions: BTreeSet<String> = fake
+            .items
+            .lock()
+            .unwrap()
+            .keys()
+            .filter(|(pk, _)| lease_shard_of_pk(pk).is_some())
+            .map(|(pk, _)| pk.clone())
+            .collect();
+        assert_eq!(
+            partitions,
+            BTreeSet::from(["nodes#0", "nodes#1", "nodes#2", "nodes#3"].map(String::from))
+        );
+
+        // Every way of reading the leases sees every shard.
+        let expected: Vec<String> = nodes.iter().map(|n| format!("nodes/{n}.json")).collect();
+        let listed: Vec<String> = bucket
+            .list("nodes/")
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|meta| meta.location.to_string())
+            .collect();
+        assert_eq!(listed, expected);
+        let table = bucket.control_route().resolved().unwrap().unwrap().clone();
+        let mut paged = Vec::new();
+        let mut cursor = None;
+        loop {
+            let (page, next) = table.lease_page(cursor, 3).await.unwrap();
+            assert!(page.len() <= 3);
+            paged.extend(page.into_iter().map(|listed| listed.key));
+            match next {
+                Some(next) => cursor = Some(next),
+                None => break,
+            }
+        }
+        paged.sort();
+        assert_eq!(paged, expected);
+        let all: Vec<String> = table
+            .leases()
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|listed| listed.key)
+            .collect();
+        assert_eq!(all, expected);
+
+        // Another client learns the shards from the claim, not its settings.
+        let other = bucket_sharing(&bucket);
+        resolve_with(&other, Role::Node, &table_settings(), Some(fake.clone()))
+            .await
+            .unwrap();
+        let (body, _) = other.get("nodes/n07.json").await.unwrap().unwrap();
+        assert_eq!(body.as_ref(), br#"{"node":"n07"}"#);
+        assert_eq!(other.list("nodes/").await.unwrap().len(), 20);
+
+        // The shards are fixed once claimed.
+        let error = init_with(
+            &bucket_sharing(&bucket),
+            &Settings {
+                lease_shards: Some(8),
+                ..table_settings()
+            },
+            false,
+            Some(fake.clone()),
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            format!("{error:#}").contains("claimed with 4 lease shards"),
+            "{error:#}"
+        );
+    });
+}
+
+#[test]
+fn the_lease_view_is_shared_until_it_ages() {
+    crate::asyncrt::test_block_on(async {
+        let (bucket, fake) = table_fleet().await;
+        let lease = |node: &str| format!(r#"{{"node":"{node}"}}"#).into_bytes();
+        bucket
+            .put_cas("nodes/a.json", lease("a"), None)
+            .await
+            .unwrap();
+        let queries = || {
+            fake.calls
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|op| **op == "Query")
+                .count()
+        };
+        let long = Duration::from_secs(3600);
+
+        let before = queries();
+        let first = bucket.table_lease_view(long).await.unwrap().unwrap();
+        assert_eq!(queries(), before + 1, "one query per shard");
+        assert_eq!(first.nodes().collect::<Vec<_>>(), ["a"]);
+
+        // A clone of the client shares the view.
+        bucket
+            .put_cas("nodes/b.json", lease("b"), None)
+            .await
+            .unwrap();
+        let shared = bucket
+            .clone()
+            .table_lease_view(long)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(Arc::ptr_eq(&first, &shared));
+        assert_eq!(queries(), before + 1);
+
+        // A caller that needs a fresh answer reads again.
+        let fresh = bucket
+            .table_lease_view(Duration::ZERO)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(fresh.nodes().collect::<Vec<_>>(), ["a", "b"]);
+        assert_eq!(queries(), before + 2);
+
+        // A bucket fleet has no view.
+        let plain = bucket_fleet_for_test().await;
+        assert!(plain.table_lease_view(long).await.unwrap().is_none());
+    });
+}
+
+async fn bucket_fleet_for_test() -> Bucket {
+    let bucket = bucket();
+    resolve_with(
+        &bucket,
+        Role::Node,
+        &Settings {
+            backend: Some(Backend::Bucket),
+            ..table_settings()
+        },
+        None,
+    )
+    .await
+    .unwrap();
+    bucket
 }

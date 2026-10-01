@@ -57,6 +57,39 @@ const META_SK: &str = "fleet";
 const NODES_PK: &str = "nodes";
 /// The partition that holds the node leases.
 pub(crate) const NODES_PARTITION: &str = NODES_PK;
+
+/// The most lease shards a fleet can have. Every lease scan queries every
+/// shard, so more shards spread renewals but cost a request each per scan.
+pub const MAX_LEASE_SHARDS: u32 = 64;
+
+/// The partition of lease shard `shard` of `shards`. One shard is the plain
+/// `nodes` partition, so a table created before shards keeps its layout.
+fn lease_pk(shard: u32, shards: u32) -> String {
+    if shards <= 1 {
+        NODES_PK.to_string()
+    } else {
+        format!("{NODES_PK}#{shard}")
+    }
+}
+
+/// The shard of a lease partition key, `None` for any other partition.
+fn lease_shard_of_pk(pk: &str) -> Option<u32> {
+    if pk == NODES_PK {
+        return Some(0);
+    }
+    pk.strip_prefix(NODES_PK)?.strip_prefix('#')?.parse().ok()
+}
+
+/// A node's lease shard: FNV-1a of its name, which is stable across
+/// releases and platforms, as the layout of a table must be.
+fn lease_shard(node: &str, shards: u32) -> u32 {
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    for byte in node.bytes() {
+        hash ^= u64::from(byte);
+        hash = hash.wrapping_mul(0x0100_0000_01b3);
+    }
+    (hash % u64::from(shards.max(1))) as u32
+}
 const FLEET_PK: &str = "fleet";
 const DEPLOY_PK: &str = "deploy";
 const PROBE_PK: &str = "probe";
@@ -135,6 +168,9 @@ pub struct Settings {
     /// `CELLD_CONTROL_ENDPOINT`: a DynamoDB endpoint override, for DynamoDB
     /// Local. It is per process and never recorded in the marker.
     pub endpoint: Option<String>,
+    /// `CELLD_CONTROL_LEASE_SHARDS`: how many partitions a new table spreads
+    /// the node leases over. Fixed when the fleet claims the table.
+    pub lease_shards: Option<u32>,
 }
 
 impl Settings {
@@ -148,8 +184,21 @@ impl Settings {
                 .transpose()?,
             region: non_empty("CELLD_CONTROL_REGION")?,
             endpoint: non_empty("CELLD_CONTROL_ENDPOINT")?,
+            lease_shards: non_empty("CELLD_CONTROL_LEASE_SHARDS")?
+                .map(|value| parse_lease_shards("CELLD_CONTROL_LEASE_SHARDS", &value))
+                .transpose()?,
         })
     }
+}
+
+/// A lease shard count from `source`, which names it in the error.
+pub fn parse_lease_shards(source: &str, value: &str) -> anyhow::Result<u32> {
+    value
+        .trim()
+        .parse::<u32>()
+        .ok()
+        .filter(|shards| (1..=MAX_LEASE_SHARDS).contains(shards))
+        .with_context(|| format!("{source} must be 1 to {MAX_LEASE_SHARDS}, not {value:?}"))
 }
 
 /// Validate the `CELLD_CONTROL*` group before the runtime starts.
@@ -238,8 +287,10 @@ impl ControlKey {
     /// The bucket key of a listed item, the inverse of [`Self::item_key`]
     /// for the partitions a listing reads.
     fn object_key(pk: &str, sk: &str) -> Option<String> {
+        if lease_shard_of_pk(pk).is_some() {
+            return Some(format!("nodes/{sk}.json"));
+        }
         match (pk, sk) {
-            (NODES_PK, node) => Some(format!("nodes/{node}.json")),
             (FLEET_PK, "drain") => Some("drain/token.json".to_string()),
             (FLEET_PK, "waker") => Some("wake/waker.json".to_string()),
             (DEPLOY_PK, "current") => Some("deploy/current.json".to_string()),
@@ -522,6 +573,9 @@ pub struct Table {
     name: String,
     region: String,
     transport: Arc<dyn Transport>,
+    /// The lease shards the table's claim fixes, learned when the claim is
+    /// read. Every lease address depends on it.
+    lease_shards: OnceLock<u32>,
 }
 
 impl std::fmt::Debug for Table {
@@ -543,6 +597,7 @@ impl Table {
             name,
             region,
             transport,
+            lease_shards: OnceLock::new(),
         }
     }
 
@@ -559,6 +614,28 @@ impl Table {
     fn new_token() -> String {
         let mut rng = crate::asyncrt::rng("control_table_token");
         format!("{:016x}{:016x}", rng.next_u64(), rng.next_u64())
+    }
+
+    /// The lease shards of this table: 1 until its claim says otherwise.
+    pub(crate) fn lease_shards(&self) -> u32 {
+        self.lease_shards.get().copied().unwrap_or(1)
+    }
+
+    /// Every lease partition of this table.
+    fn lease_pks(&self) -> Vec<String> {
+        let shards = self.lease_shards();
+        (0..shards).map(|shard| lease_pk(shard, shards)).collect()
+    }
+
+    /// The item a record lives in on this table.
+    fn item_key(&self, key: &ControlKey) -> (String, String) {
+        match key {
+            ControlKey::Lease(node) => {
+                let shards = self.lease_shards();
+                (lease_pk(lease_shard(node, shards), shards), node.clone())
+            }
+            other => other.item_key(),
+        }
     }
 
     fn key_attributes(pk: &str, sk: &str) -> Value {
@@ -725,7 +802,7 @@ impl Table {
         &self,
         key: &ControlKey,
     ) -> anyhow::Result<Option<(Bytes, String)>> {
-        let (pk, sk) = key.item_key();
+        let (pk, sk) = self.item_key(key);
         Ok(self
             .get(&pk, &sk)
             .await?
@@ -736,7 +813,7 @@ impl Table {
         &self,
         key: &ControlKey,
     ) -> anyhow::Result<Option<(u64, String)>> {
-        let (pk, sk) = key.item_key();
+        let (pk, sk) = self.item_key(key);
         Ok(self
             .get(&pk, &sk)
             .await?
@@ -744,7 +821,7 @@ impl Table {
     }
 
     pub(crate) async fn put_record(&self, key: &ControlKey, body: &[u8]) -> anyhow::Result<()> {
-        let (pk, sk) = key.item_key();
+        let (pk, sk) = self.item_key(key);
         self.put(&pk, &sk, body, Condition::None).await?;
         Ok(())
     }
@@ -755,7 +832,7 @@ impl Table {
         body: &[u8],
         token: Option<&str>,
     ) -> anyhow::Result<Option<String>> {
-        let (pk, sk) = key.item_key();
+        let (pk, sk) = self.item_key(key);
         let condition = match token {
             None => Condition::Absent,
             Some(token) => Condition::Token(token),
@@ -768,7 +845,7 @@ impl Table {
         key: &ControlKey,
         token: Option<&str>,
     ) -> anyhow::Result<bool> {
-        let (pk, sk) = key.item_key();
+        let (pk, sk) = self.item_key(key);
         self.delete(&pk, &sk, token).await
     }
 
@@ -780,7 +857,15 @@ impl Table {
         prefix: &str,
     ) -> anyhow::Result<Vec<Listed>> {
         let mut listed = Vec::new();
+        let mut partitions = Vec::new();
         for pk in &plan.partitions {
+            if *pk == NODES_PK {
+                partitions.extend(self.lease_pks());
+            } else {
+                partitions.push(pk.to_string());
+            }
+        }
+        for pk in &partitions {
             for (sk, record) in self.query(pk).await? {
                 let Some(key) = ControlKey::object_key(pk, &sk) else {
                     continue;
@@ -795,26 +880,64 @@ impl Table {
     }
 
     /// One bounded page of the node leases, resumable with the returned
-    /// cursor. The cursor is the last node name, which is exact because the
-    /// partition is ordered by it.
+    /// cursor. The cursor is the shard and the last node name, which is
+    /// exact because each shard is ordered by node name.
     pub(crate) async fn lease_page(
         &self,
         cursor: Option<String>,
         limit: usize,
     ) -> anyhow::Result<(Vec<Listed>, Option<String>)> {
-        let (records, next) = self
-            .query_page(NODES_PK, cursor.as_deref(), Some(limit))
-            .await?;
-        Ok((
-            records
+        let shards = self.lease_shards();
+        let (mut shard, mut after) = match cursor {
+            None => (0, None),
+            Some(cursor) => match cursor.split_once('/') {
+                Some((shard, node)) => (
+                    shard
+                        .parse()
+                        .context("a lease page cursor names no shard")?,
+                    (!node.is_empty()).then(|| node.to_string()),
+                ),
+                None => bail!("a lease page cursor names no shard"),
+            },
+        };
+        while shard < shards {
+            let (records, next) = self
+                .query_page(&lease_pk(shard, shards), after.as_deref(), Some(limit))
+                .await?;
+            let listed: Vec<Listed> = records
                 .into_iter()
                 .map(|(node, record)| Listed {
                     key: format!("nodes/{node}.json"),
                     record,
                 })
-                .collect(),
-            next,
-        ))
+                .collect();
+            let cursor = match next {
+                Some(next) => Some(format!("{shard}/{next}")),
+                None if shard + 1 < shards => Some(format!("{}/", shard + 1)),
+                None => None,
+            };
+            if !listed.is_empty() || cursor.is_none() {
+                return Ok((listed, cursor));
+            }
+            shard += 1;
+            after = None;
+        }
+        Ok((Vec::new(), None))
+    }
+
+    /// Every node lease with its body, from one consistent query per shard.
+    pub(crate) async fn leases(&self) -> anyhow::Result<Vec<Listed>> {
+        let mut leases = Vec::new();
+        for pk in self.lease_pks() {
+            for (node, record) in self.query(&pk).await? {
+                leases.push(Listed {
+                    key: format!("nodes/{node}.json"),
+                    record,
+                });
+            }
+        }
+        leases.sort_by(|a, b| a.key.cmp(&b.key));
+        Ok(leases)
     }
 
     // ── Administration ──
@@ -824,9 +947,23 @@ impl Table {
         let Some(record) = self.get(META_PK, META_SK).await? else {
             return Ok(None);
         };
-        Ok(Some(serde_json::from_slice(&record.body).with_context(
-            || format!("decode the meta item of dynamodb://{}", self.name),
-        )?))
+        let meta: Meta = serde_json::from_slice(&record.body)
+            .with_context(|| format!("decode the meta item of dynamodb://{}", self.name))?;
+        ensure!(
+            (1..=MAX_LEASE_SHARDS).contains(&meta.lease_shards),
+            "dynamodb://{} claims {} lease shards; celld supports 1 to {MAX_LEASE_SHARDS}",
+            self.name,
+            meta.lease_shards
+        );
+        let _ = self.lease_shards.set(meta.lease_shards);
+        ensure!(
+            self.lease_shards() == meta.lease_shards,
+            "dynamodb://{} changed its lease shards from {} to {}",
+            self.name,
+            self.lease_shards(),
+            meta.lease_shards
+        );
+        Ok(Some(meta))
     }
 
     /// Claim an unclaimed table for a new fleet in `bucket`, and answer the
@@ -836,10 +973,15 @@ impl Table {
     /// it recorded its marker, is adopted with the fleet id it holds, so the
     /// setup can simply run again. A table any other bucket claimed is
     /// refused.
-    async fn claim(&self, fleet: &str, bucket: &str) -> anyhow::Result<String> {
+    async fn claim(&self, fleet: &str, bucket: &str, lease_shards: u32) -> anyhow::Result<String> {
+        ensure!(
+            (1..=MAX_LEASE_SHARDS).contains(&lease_shards),
+            "lease shards must be 1 to {MAX_LEASE_SHARDS}, not {lease_shards}"
+        );
         let body = serde_json::to_vec(&Meta {
             format: MARKER_FORMAT,
             fleet: fleet.to_string(),
+            lease_shards,
             bucket: Some(bucket.to_string()),
         })?;
         if self
@@ -847,10 +989,20 @@ impl Table {
             .await?
             .is_some()
         {
+            let _ = self.lease_shards.set(lease_shards);
             return Ok(fleet.to_string());
         }
         match self.meta().await? {
-            Some(meta) if meta.bucket.as_deref() == Some(bucket) => Ok(meta.fleet),
+            Some(meta) if meta.bucket.as_deref() == Some(bucket) => {
+                ensure!(
+                    meta.lease_shards == lease_shards,
+                    "dynamodb://{} was claimed with {} lease shards, not {lease_shards}; the \
+                     shards are fixed when a fleet chooses its table",
+                    self.name,
+                    meta.lease_shards
+                );
+                Ok(meta.fleet)
+            }
             Some(meta) => bail!(
                 "dynamodb://{} serves fleet {} of {}, not {bucket}",
                 self.name,
@@ -1114,9 +1266,21 @@ impl Table {
 struct Meta {
     format: u8,
     fleet: String,
+    /// How many partitions the node leases are spread over, fixed when the
+    /// table is claimed. Absent means one.
+    #[serde(default = "one_shard", skip_serializing_if = "is_one_shard")]
+    lease_shards: u32,
     /// The bucket that claimed the table, as `scheme://name/prefix`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     bucket: Option<String>,
+}
+
+fn one_shard() -> u32 {
+    1
+}
+
+fn is_one_shard(shards: &u32) -> bool {
+    *shards == 1
 }
 
 fn string_attribute(item: &Value, name: &str) -> anyhow::Result<String> {
@@ -1214,6 +1378,9 @@ pub enum Role {
 /// opened bucket.
 pub(crate) struct Route {
     resolved: OnceLock<Option<Arc<Table>>>,
+    /// The last read of a table fleet's leases, shared by every loop on
+    /// every clone of this client. See [`Route::lease_view`].
+    lease_view: tokio::sync::Mutex<Option<Arc<LeaseView>>>,
     /// The transport a lazy resolution opens its table over, in place of
     /// HTTPS. Only tests set it.
     transport: Option<Arc<dyn Transport>>,
@@ -1225,6 +1392,7 @@ impl Route {
     pub(crate) fn unresolved() -> Arc<Self> {
         Arc::new(Self {
             resolved: OnceLock::new(),
+            lease_view: tokio::sync::Mutex::new(None),
             transport: None,
         })
     }
@@ -1233,6 +1401,7 @@ impl Route {
     pub(crate) fn unresolved_over(transport: Arc<dyn Transport>) -> Arc<Self> {
         Arc::new(Self {
             resolved: OnceLock::new(),
+            lease_view: tokio::sync::Mutex::new(None),
             transport: Some(transport),
         })
     }
@@ -1249,6 +1418,39 @@ impl Route {
     /// for a table, and `None` before resolution.
     pub(crate) fn resolved(&self) -> Option<Option<&Arc<Table>>> {
         self.resolved.get().map(Option::as_ref)
+    }
+
+    /// Every node lease of the table, read no more than `max_age` ago.
+    ///
+    /// Several loops on every node read every lease: the dead-node scan,
+    /// the dead-leader sweep, the node listing of operator commands. Each
+    /// used to list the leases and read them one by one, so a fleet's lease
+    /// reads grew with the square of its size. On a table the listing query
+    /// already returns every body, consistently, so one query per shard
+    /// serves all of them, and a node that keeps the answer for a few
+    /// seconds pays for it once per interval rather than once per loop. A
+    /// caller about to act on a lease's expiry reads that lease again on its
+    /// own, or passes a zero `max_age`.
+    pub(crate) async fn lease_view(
+        &self,
+        table: &Table,
+        max_age: Duration,
+    ) -> anyhow::Result<Arc<LeaseView>> {
+        let mut slot = self.lease_view.lock().await;
+        let now = crate::asyncrt::mono_ms();
+        if let Some(view) = slot.as_ref() {
+            if now.saturating_sub(view.read_mono_ms) < max_age.as_millis() as u64 {
+                return Ok(view.clone());
+            }
+        }
+        let read_ms = crate::ownership_store::now_ms();
+        let view = Arc::new(LeaseView {
+            read_mono_ms: now,
+            read_ms,
+            leases: table.leases().await?,
+        });
+        *slot = Some(view.clone());
+        Ok(view)
     }
 
     fn install(&self, table: Option<Arc<Table>>) -> anyhow::Result<()> {
@@ -1271,6 +1473,38 @@ impl Route {
             }
         }
     }
+}
+
+/// One read of every node lease of a table fleet.
+pub(crate) struct LeaseView {
+    read_mono_ms: u64,
+    /// The wall clock when the read started, at which a reader judges
+    /// whether a lease in the view had expired.
+    pub(crate) read_ms: u64,
+    /// Every lease, by bucket key, in key order.
+    pub(crate) leases: Vec<Listed>,
+}
+
+impl LeaseView {
+    /// The node names in the view.
+    pub(crate) fn nodes(&self) -> impl Iterator<Item = &str> {
+        self.leases.iter().filter_map(|listed| {
+            listed
+                .key
+                .strip_prefix("nodes/")
+                .and_then(|key| key.strip_suffix(".json"))
+        })
+    }
+}
+
+/// How old a shared lease view may be, `CELLD_FLEET_VIEW_MS`.
+pub(crate) fn fleet_view_max_age() -> Duration {
+    Duration::from_millis(
+        crate::env_vars::positive::<u64>("CELLD_FLEET_VIEW_MS")
+            .ok()
+            .flatten()
+            .unwrap_or(5_000),
+    )
 }
 
 /// What resolution found, for the startup banner and `celld control show`.
@@ -1534,7 +1768,11 @@ async fn establish(
             };
             table.check_shape().await?;
             let fleet = table
-                .claim(&random_fleet_id(), &bucket_identity(bucket))
+                .claim(
+                    &random_fleet_id(),
+                    &bucket_identity(bucket),
+                    settings.lease_shards.unwrap_or(1),
+                )
                 .await?;
             Marker {
                 format: MARKER_FORMAT,
@@ -1597,6 +1835,14 @@ pub(crate) async fn init_with(
     table.check_shape().await?;
     let fleet = marker.fleet.clone().context("the marker has no fleet id")?;
     table.verify_claim(&fleet).await?;
+    if let Some(shards) = settings.lease_shards {
+        ensure!(
+            shards == table.lease_shards(),
+            "dynamodb://{name} was claimed with {} lease shards, not {shards}; the shards are \
+             fixed when a fleet chooses its table",
+            table.lease_shards()
+        );
+    }
     table.probe().await?;
     Ok(Resolved {
         backend: marker.backend()?,
@@ -1635,18 +1881,17 @@ pub async fn show(bucket: &Bucket) -> anyhow::Result<Map<String, Value>> {
                 Err(error) => format!("{error:#}"),
             }),
         );
+        let meta = opened.meta().await?;
         out.insert(
-            "table_fleet".into(),
-            json!(opened.meta().await?.map(|meta| meta.fleet)),
+            "lease_shards".into(),
+            json!(meta.as_ref().map(|meta| meta.lease_shards)),
         );
+        out.insert("table_fleet".into(), json!(meta.map(|meta| meta.fleet)));
         out.insert(
             "point_in_time_recovery".into(),
             json!(opened.point_in_time_recovery().await.ok()),
         );
-        out.insert(
-            "node_leases".into(),
-            json!(opened.query(NODES_PK).await?.len()),
-        );
+        out.insert("node_leases".into(), json!(opened.leases().await?.len()));
     }
     Ok(out)
 }

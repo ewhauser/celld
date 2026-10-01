@@ -383,6 +383,7 @@ TUNING:
   CELLD_MAX_RSS_MB                Active-memory shed threshold (default: 80%; 0 disables)
   CELLD_ALARM_RESIDENT_MS         Near-alarm residency window
   CELLD_WAKER_TICK_MS             Orphan-alarm scan interval
+  CELLD_FLEET_VIEW_MS             Age of a table fleet's shared lease read (default: 5000)
   CELLD_V8_HEAP_LIMIT_MB          Per-isolate V8 heap limit
   CELLD_FETCH_TIMEOUT_S           Outbound fetch timeout
   CELLD_HANDLER_BUDGET_S          JavaScript handler budget

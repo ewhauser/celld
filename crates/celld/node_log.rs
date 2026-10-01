@@ -6538,10 +6538,37 @@ impl NodeLogManager {
     /// onto the CAS like every other recovery race.
     pub async fn sweep_dead_leaders(&self) -> anyhow::Result<()> {
         let now = crate::ownership_store::now_ms();
-        for meta in self.bucket.list("nodes/").await? {
-            let Some(node) = meta
-                .location
-                .as_ref()
+        // A table fleet lists from the node's shared lease view and reads
+        // again only the leases that view shows expired: a live session
+        // needs nothing from the sweep, and a lease renewed since the view
+        // was read shows up as live in the fresh read below. A bucket fleet
+        // lists and reads every lease, as it always did.
+        let nodes: Vec<String> = match self
+            .bucket
+            .table_lease_view(crate::control::fleet_view_max_age())
+            .await?
+        {
+            Some(view) => view
+                .leases
+                .iter()
+                .filter(|listed| {
+                    serde_json::from_slice::<crate::ownership_store::NodeLeaseWire>(
+                        &listed.record.body,
+                    )
+                    .map_or(true, |lease| lease.expires_ms <= view.read_ms.min(now))
+                })
+                .map(|listed| listed.key.clone())
+                .collect(),
+            None => self
+                .bucket
+                .list("nodes/")
+                .await?
+                .into_iter()
+                .map(|meta| meta.location.to_string())
+                .collect(),
+        };
+        for key in nodes {
+            let Some(node) = key
                 .strip_prefix("nodes/")
                 .and_then(|name| name.strip_suffix(".json"))
                 .filter(|name| !name.contains('/'))

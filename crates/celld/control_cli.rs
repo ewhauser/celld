@@ -35,6 +35,7 @@ enum Verb {
         table: Option<String>,
         table_region: Option<String>,
         create: bool,
+        lease_shards: Option<u32>,
     },
     Show,
 }
@@ -65,6 +66,9 @@ OPTIONS:
   --table-region REGION The table's region (or CELLD_CONTROL_REGION; default:
                         the bucket's region)
   --no-create           Adopt an existing table instead of creating it
+  --lease-shards N      Spread the node leases over N partitions, 1 to 64 (or
+                        CELLD_CONTROL_LEASE_SHARDS; default 1). Fixed when the
+                        fleet claims the table
   --json                Print one JSON object instead of text
 {FLEET_HELP}
 "
@@ -79,6 +83,7 @@ fn parse(arguments: Vec<String>) -> anyhow::Result<Option<Command>> {
             table: None,
             table_region: None,
             create: true,
+            lease_shards: None,
         },
         Some("show") => Verb::Show,
         Some(other) => bail!("unknown celld control command {other:?}; see celld control --help"),
@@ -110,6 +115,12 @@ fn parse(arguments: Vec<String>) -> anyhow::Result<Option<Command>> {
                 *table_region = Some(value("--table-region")?)
             }
             ("--no-create", Verb::Init { create, .. }) => *create = false,
+            ("--lease-shards", Verb::Init { lease_shards, .. }) => {
+                *lease_shards = Some(crate::control::parse_lease_shards(
+                    "--lease-shards",
+                    &value("--lease-shards")?,
+                )?)
+            }
             (other, _) => bail!("unknown option {other:?}; see celld control --help"),
         }
         index += 1;
@@ -131,6 +142,7 @@ pub async fn run(arguments: Vec<String>) -> anyhow::Result<()> {
             table,
             table_region,
             create,
+            lease_shards,
         } => {
             let mut settings = Settings::from_env()?;
             if let Some(table) = table {
@@ -138,6 +150,9 @@ pub async fn run(arguments: Vec<String>) -> anyhow::Result<()> {
             }
             if table_region.is_some() {
                 settings.region = table_region;
+            }
+            if lease_shards.is_some() {
+                settings.lease_shards = lease_shards;
             }
             let storage = command.fleet.resolve("celld control init")?;
             let bucket = crate::fleet::bucket_client(

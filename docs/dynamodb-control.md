@@ -30,9 +30,6 @@ Still to come:
   chooses its store before it holds any state, so start a table fleet in an
   empty bucket or prefix.
 - **Repairing a table restored from a backup** (see [Recovery](#recovery)).
-- **Fleets of more than a few hundred nodes.** Every node reads every lease
-  from one table partition; the work to spread those reads is listed in the
-  [design](design/dynamodb-control-plane.md#not-built-yet).
 
 ## When to use it
 
@@ -93,7 +90,9 @@ table uses the same credential chain as the bucket.
    table's shape, claims the table for this fleet, tests its conditional
    writes, and writes `fleet/control.json` to the bucket. It is safe to run
    again. Pass `--no-create` to adopt a table you created yourself, and
-   `--table-region` when the table is not in the bucket's region.
+   `--table-region` when the table is not in the bucket's region. For a
+   fleet of more than a couple of hundred nodes, also pass
+   `--lease-shards` (see [Large fleets](#large-fleets)).
 
 2. Deploy as usual. `celld deploy` reads `fleet/control.json` and writes the
    deployment pointer to the table:
@@ -193,6 +192,7 @@ celld control show --bucket "$CELLD_BUCKET"
     "region": "us-east-1",
     "table": "celld-prod"
   },
+  "lease_shards": 1,
   "node_leases": 3,
   "point_in_time_recovery": true,
   "shape": "ok",
@@ -206,6 +206,30 @@ Watch the table's `ThrottledRequests` and `SystemErrors` metrics. A
 throttled lease renewal is retried, but sustained throttling stops nodes.
 An on-demand table throttles traffic that more than doubles its previous
 peak, so pre-warm it before a large rollout or load test.
+
+### Large fleets
+
+Every node reads every lease every few seconds to find dead nodes and
+recover their logs. On a table it reads them all with one query per lease
+partition and shares that read across everything that needs it, but the
+reads still grow with the square of the fleet: about 19,000 read units a
+second for 500 nodes, against a limit of 3,000 per partition.
+
+Spread the leases when you set the fleet up:
+
+```sh
+celld control init --table celld-prod --lease-shards 8
+```
+
+Each shard is a partition of its own, so eight shards serve about eight
+times the reads and renewals. Choose up to 64; each one costs every node
+one more request per read. The count is fixed when the fleet claims the
+table, and `init` refuses a different count later. `celld control show`
+prints it.
+
+`CELLD_FLEET_VIEW_MS` sets how old a node's shared read may be, five
+seconds by default. Raising it cuts the reads in proportion and lets a
+node notice a dead peer that much later.
 
 ### Recovery
 
@@ -238,9 +262,11 @@ does not use a table.
 | `CELLD_CONTROL` | follow `fleet/control.json`; `bucket` for a new fleet | `bucket`, or `dynamodb://TABLE` |
 | `CELLD_CONTROL_REGION` | the bucket's region | The table's region, when it differs |
 | `CELLD_CONTROL_ENDPOINT` | none | A DynamoDB endpoint override, for DynamoDB Local |
+| `CELLD_CONTROL_LEASE_SHARDS` | 1 | Lease partitions of a new table, 1 to 64, when a node rather than `init` claims it |
+| `CELLD_FLEET_VIEW_MS` | 5000 | How old a node's shared read of the leases may be |
 
 ```text
-celld control init --table NAME [--table-region REGION] [--no-create] --bucket s3://NAME[/PREFIX]
+celld control init --table NAME [--table-region REGION] [--no-create] [--lease-shards N] --bucket s3://NAME[/PREFIX]
 celld control show --bucket s3://NAME[/PREFIX] [--json]
 ```
 
