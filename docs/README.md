@@ -1158,6 +1158,8 @@ For the full list, run `celld -h`. This table shows the primary settings:
 | `CELLD_CONTROL` | Where the fleet keeps its coordination records: `bucket` (the default) or `dynamodb://TABLE`. See [coordination records in DynamoDB](#coordination-records-in-dynamodb) |
 | `CELLD_CONTROL_REGION` | The DynamoDB table's region, when it differs from the bucket's |
 | `CELLD_CONTROL_ENDPOINT` | A DynamoDB endpoint override, for DynamoDB Local |
+| `CELLD_CONTROL_LEASE_SHARDS` | How many partitions a new DynamoDB table spreads the node leases over, 1 to 64 (default: 1). Fixed when the fleet claims the table |
+| `CELLD_FLEET_VIEW_MS` | How old a node's shared read of a DynamoDB fleet's leases may be (default: 5000) |
 | `CELLD_ACTIVATIONS` | The limit for concurrent cold-cell activations (default: 8 for each available CPU, at least 16 and at most 128). A cold activation waits on the object store for most of its time, so the default is above the CPU count |
 | `CELLD_DEPLOY_POLL_S` | The interval in seconds at which a node reads the deployment pointer and adopts a new deployment in place (default: 30) |
 | `CELLD_DEPLOY_MAX_AGE_S` | How long a resident Durable Object can keep the previous deployment's code after an adoption before celld forces the move (default: 60; 0 forces at once) |

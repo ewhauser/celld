@@ -175,7 +175,7 @@ recovery and deletion protection when `celld control init` creates it.
 |---|---|---|
 | Fleet meta | `meta` | `fleet` |
 | Cell owner | `cell#<cell>` | `own` |
-| Node lease | `nodes` | `<node>` |
+| Node lease | `nodes`, or `nodes#<shard>` | `<node>` |
 | Drain token | `fleet` | `drain` |
 | Waker role | `fleet` | `waker` |
 | Fleet pointer | `deploy` | `current` |
@@ -271,10 +271,32 @@ the unconditional delete it always was, and on the table the delete is
 conditioned on the token, so a delete that lands late cannot remove a
 record a successor wrote.
 
-Every loop that lists `nodes/` and reads each lease (the capacity scan,
-node-log maintenance, the dead-leader sweep, dead-node GC, the ready gate,
-the wake-format stop check, `fleet::node_lease_ids`) gets its listing from
-one `Query` on the `nodes` partition and then reads each lease as before.
+A fleet can spread its leases over up to 64 partitions, `nodes#0` to
+`nodes#<n-1>`, chosen when it claims the table (`celld control init
+--lease-shards N`, or `CELLD_CONTROL_LEASE_SHARDS` on the first node) and
+recorded in the meta item. A node's shard is FNV-1a of its name modulo the
+count, so every release and platform places it the same way; one shard is
+the plain `nodes` partition. Every client reads the count from the claim
+when it resolves, never from its own settings, and `init` refuses a count
+that differs from the claim's. A lease listing queries every shard and
+merges them in key order; a paged listing's cursor is the shard and the
+last node name.
+
+A `Query` on a lease partition already returns every lease body,
+consistently, so a table fleet does not list and then read. Each node
+keeps one **lease view**: every lease, read with one query per shard,
+shared by every loop and every clone of its bucket client, and read again
+once it is older than `CELLD_FLEET_VIEW_MS` (five seconds). The dead-node
+scan, the dead-leader sweep and `fleet::node_lease_ids` (the ready gate,
+node-log maintenance and the operator listings) answer from it. A view is
+judged at the moment it was read, not now: a lease that had expired then
+belongs to a session that has stopped itself and never renews, while one
+that was live then may have renewed since. So a view can only delay a
+retirement or a recovery by its age, never start one for a live node, and
+each one still rereads the lease it acts on and writes conditionally on
+that read. The wake-format stop check keeps its direct reads; it runs once,
+before a format change, and wants the freshest answer. A bucket fleet
+lists and reads as it always did.
 
 ### Fleet singletons and deploy pointers
 
@@ -343,16 +365,20 @@ point-in-time recovery is on, and the number of node leases.
 ## Partition limits and scan cost
 
 A DynamoDB partition serves up to 1,000 write units and 3,000 read units
-per second. All node leases share the `nodes` partition.
+per second. The node leases share the `nodes` partition, or spread over
+the fleet's lease shards.
 
 - **Writes.** A lease with its load telemetry is about 1.5 KB, two write
-  units, renewed every TTL/3. The partition carries renewals for roughly
-  1,500 nodes.
-- **Reads.** Every lease scan is a `Query` on that partition followed by a
-  `GetItem` per lease, and several loops on every node scan, so reads
-  grow with N². The bucket has the same shape, and the table answers it
-  faster and more cheaply, but past a few hundred nodes the scans need the
-  work under [Not built yet](#not-built-yet).
+  units, renewed every TTL/3. One partition carries renewals for roughly
+  1,500 nodes, and each shard adds as much.
+- **Reads.** Every node reads every lease once per `CELLD_FLEET_VIEW_MS`,
+  one query per shard, rather than once per loop with a `GetItem` per
+  lease. A consistent query costs one read unit per 4 KB returned, so a
+  fleet of N nodes reads about N × N × 1.5 KB / 4 KB units per view
+  interval, spread over the shards. At the default five seconds, 500
+  nodes read about 19,000 units a second, which needs eight shards or
+  more; raise `CELLD_FLEET_VIEW_MS` to trade freshness of dead-node
+  detection for reads.
 
 Owner items are keyed by cell, so activation traffic spreads across
 partitions without configuration.
@@ -474,9 +500,11 @@ bucket does. celld links no AWS SDK.
 | `CELLD_CONTROL` | follow the marker; `bucket` for a new fleet | `bucket`, or `dynamodb://TABLE` |
 | `CELLD_CONTROL_REGION` | the bucket's region | The table's region, when the marker does not name one |
 | `CELLD_CONTROL_ENDPOINT` | none | An endpoint override, for DynamoDB Local |
+| `CELLD_CONTROL_LEASE_SHARDS` | 1 | Lease partitions of a new table, 1 to 64; fixed by the claim |
+| `CELLD_FLEET_VIEW_MS` | 5000 | How old a node's shared lease view may be |
 
 ```
-celld control init --table NAME [--table-region REGION] [--no-create] --bucket s3://NAME
+celld control init --table NAME [--table-region REGION] [--no-create] [--lease-shards N] --bucket s3://NAME
 celld control show --bucket s3://NAME [--json]
 celld control repair-epochs --bucket s3://NAME [--dry-run]
 ```
@@ -487,7 +515,8 @@ celld control repair-epochs --bucket s3://NAME [--dry-run]
   sends and injects a throttle, or a write that applies and then answers
   500. The tests cover the key mapping, listing plans, the marker rules,
   table-shape refusals, the fleet claim, conditional deletes, the error
-  classes, and that a write is attempted once.
+  classes, that a write is attempted once, lease shards in every
+  listing and page, and the shared lease view.
 - **DynamoDB Local.** `a_live_table_honors_the_contract` runs the create,
   shape check, probe, claim, conditional writes, paging and conditional
   deletes against a real endpoint when `CELLD_TEST_DYNAMODB_ENDPOINT` is
@@ -514,8 +543,6 @@ These were proposed in revision 1 and are left for later:
   thirds.
 - **Replacing the capacity sample with a query.** The sample stays in the
   bucket; a table item could not hold it past a few hundred nodes.
-- **One shared lease view per node**, so the several loops that scan the
-  leases share one read, and lease shards past a few hundred nodes.
 - **Switching the deploy pointers in one transaction.**
 - **The wake index**, which keeps its bucket protocol of immutable entry
   names and retirement watermarks.

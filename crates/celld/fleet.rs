@@ -523,6 +523,17 @@ pub(crate) async fn live_node_lease(
 }
 
 pub(crate) async fn node_lease_ids(bucket: &Bucket) -> anyhow::Result<Vec<String>> {
+    if let Some(view) = bucket
+        .table_lease_view(crate::control::fleet_view_max_age())
+        .await
+        .context("enumerate node leases")?
+    {
+        return Ok(view
+            .nodes()
+            .filter(|node| !node.is_empty())
+            .map(str::to_string)
+            .collect());
+    }
     let mut nodes = Vec::new();
     for object in bucket
         .list("nodes/")

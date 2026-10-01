@@ -252,6 +252,7 @@ pub fn validate() -> anyhow::Result<()> {
         "CELLD_EXPORT_QUEUE_BYTES",
         "CELLD_EXPORT_RETRY_MS",
         "CELLD_FETCH_TIMEOUT_S",
+        "CELLD_FLEET_VIEW_MS",
         "CELLD_HANDLER_BUDGET_S",
         "CELLD_IDLE_EVICT_S",
         "CELLD_LOG_PIPELINE",

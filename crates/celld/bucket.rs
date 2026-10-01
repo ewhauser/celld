@@ -958,6 +958,20 @@ impl Bucket {
         Ok(self.control_table().await?.map(|table| (table, record)))
     }
 
+    /// Every node lease with its body, from a read shared by every loop on
+    /// this client and no older than `max_age`, on a fleet whose leases live
+    /// in a control table. `None` on a bucket fleet, whose callers list and
+    /// read the leases as they always did.
+    pub(crate) async fn table_lease_view(
+        &self,
+        max_age: std::time::Duration,
+    ) -> anyhow::Result<Option<Arc<crate::control::LeaseView>>> {
+        let Some(table) = self.control_table().await? else {
+            return Ok(None);
+        };
+        Ok(Some(self.control.lease_view(table, max_age).await?))
+    }
+
     /// Scope a caller's key to this client's prefix.
     fn key(&self, key: &str) -> String {
         format!("{}{key}", self.prefix)
