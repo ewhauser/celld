@@ -639,8 +639,10 @@ batch through the Snowpipe Streaming REST API to one pipe,
 `EXPORT_LANDING`; a task routes landed rows into the tables below. There is
 no stage and no Parquet on this path, and no warehouse runs to load:
 Snowpipe Streaming bills per GB ingested, and records land within seconds.
-Elastic channels acknowledge durably but do not order, so the loader
-advances its source offsets only after every record of a batch is
+Elastic channels acknowledge durably but do not order, so the loader keeps
+several appends in flight, across a batch's appends and across batches,
+while it reads and decodes the next. It advances its source offsets only
+after every record of a batch and of every batch before it is
 acknowledged, and it treats arrival order as meaningless: completeness comes
 from positions and watermarks, never from order.
 

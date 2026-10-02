@@ -124,7 +124,13 @@ impl Warehouse for NoSchemas {
 struct FakeLand(Shared);
 
 impl Land for FakeLand {
-    fn land(&mut self, rows: &[LandingRow]) -> Result<(), WarehouseError> {
+    type Append = Vec<LandingRow>;
+
+    fn encode(&self, rows: &[LandingRow]) -> Result<Vec<Vec<LandingRow>>, WarehouseError> {
+        Ok(vec![rows.to_vec()])
+    }
+
+    fn append(&self, rows: &Vec<LandingRow>) -> Result<(), WarehouseError> {
         self.0.attempts.fetch_add(1, Ordering::SeqCst);
         if self
             .0
@@ -134,7 +140,7 @@ impl Land for FakeLand {
         {
             return Err(WarehouseError::other("Snowpipe Streaming unavailable"));
         }
-        self.0.landed.lock().unwrap().push(rows.to_vec());
+        self.0.landed.lock().unwrap().push(rows.clone());
         Ok(())
     }
 }
@@ -155,7 +161,7 @@ fn start(settings: Settings, shared: Shared) -> Harness {
         next,
         calls: calls.clone(),
     });
-    let mut lander = FakeLand(shared.clone());
+    let lander = Arc::new(FakeLand(shared.clone()));
     let mut loader = Loader::new(
         NoSchemas,
         LoaderConfig {
@@ -170,7 +176,7 @@ fn start(settings: Settings, shared: Shared) -> Harness {
     let events = Arc::new(Mutex::new(Vec::new()));
     let (s, e) = (stop.clone(), events.clone());
     let done = tokio::spawn(async move {
-        run(iterator, &mut loader, &mut lander, &settings, s, |event| {
+        run(iterator, &mut loader, lander, &settings, s, |event| {
             e.lock().unwrap().push(format!("{event:?}"));
         })
         .await
@@ -257,6 +263,7 @@ fn settings(records: usize, linger: Duration) -> Settings {
             bytes: 1 << 20,
         },
         linger,
+        concurrency: 4,
         sync_every: Duration::from_secs(3600),
         retry: Duration::from_millis(10),
         retry_max: Duration::from_millis(20),

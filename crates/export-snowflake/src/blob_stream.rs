@@ -17,6 +17,7 @@
 //! brokers' config.
 
 use std::path::Path;
+use std::sync::Arc;
 
 use anyhow::{bail, Context as _};
 use blob_stream_consumer::iterator::{ConsumerIterator, NextResult, RevokedPartitions};
@@ -101,16 +102,21 @@ pub async fn connect(
 /// Consume the blob-stream topic until `stop` is cancelled or the consumer
 /// fails: [`crate::source::run`] over `iterator`.
 ///
-/// Must run on a multi-threaded Tokio runtime: Snowflake requests block,
-/// and run in place on this task's thread.
-pub async fn run<W: Warehouse, L: Land>(
+/// Must run on a multi-threaded Tokio runtime: the Dynamic Table sync
+/// blocks, and runs in place on this task's thread.
+pub async fn run<W, L>(
     iterator: Box<dyn ConsumerIterator>,
     loader: &mut Loader<W>,
-    lander: &mut L,
+    lander: Arc<L>,
     settings: &Settings,
     stop: CancellationToken,
     report: impl FnMut(Event<'_>),
-) -> anyhow::Result<()> {
+) -> anyhow::Result<()>
+where
+    W: Warehouse,
+    L: Land + Send + Sync + 'static,
+    L::Append: Send + 'static,
+{
     crate::source::run(BlobStream(iterator), loader, lander, settings, stop, report).await
 }
 

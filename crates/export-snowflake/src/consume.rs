@@ -4,11 +4,12 @@
 //! (blob-stream or Kafka), adds them to a [`Batch`], and lands the batch once it is full or
 //! old enough: through Snowpipe Streaming ([`crate::streaming`]), whose
 //! elastic channel acknowledges each append once the rows are durable in
-//! Snowflake, and does not order them. Only after every row of the batch is
-//! acknowledged does the loader commit the offsets the batch covered, so a crash replays at most the
-//! batch, and a replayed record is a duplicate every reader drops. Arrival
-//! order means nothing to the tables: completeness comes from positions and
-//! watermarks.
+//! Snowflake, and does not order them. Several batches land at once
+//! ([`crate::pipeline`]); only after every row of a batch and of every
+//! batch before it is acknowledged does the loader commit the offsets the
+//! batch covered, so a crash replays at most the batches in flight, and a
+//! replayed record is a duplicate every reader drops. Arrival order means
+//! nothing to the tables: completeness comes from positions and watermarks.
 //!
 //! A message that is not a record is never committed past on its own: the
 //! caller stops there, after landing what came before it, so the message is
@@ -25,11 +26,19 @@ use celld_export_format::Record;
 use crate::loader::{LoadError, WarehouseError};
 use crate::LandingRow;
 
-/// Somewhere to land rows in `EXPORT_LANDING`. `Ok` means every row is
-/// durable there; after an error, any of them may be, and landing them all
-/// again is harmless.
+/// Somewhere to land rows in `EXPORT_LANDING`, an append at a time. The
+/// loader encodes a batch's rows into appends and sends several at once,
+/// from several threads, so neither call may assume it is alone.
 pub trait Land {
-    fn land(&mut self, rows: &[LandingRow]) -> Result<(), WarehouseError>;
+    /// One append's rows, encoded.
+    type Append;
+
+    /// `rows` as appends, in order, each small enough to send on its own.
+    fn encode(&self, rows: &[LandingRow]) -> Result<Vec<Self::Append>, WarehouseError>;
+
+    /// Send one append. `Ok` means every row in it is durable; after an
+    /// error, any of them may be, and sending it again is harmless.
+    fn append(&self, append: &Self::Append) -> Result<(), WarehouseError>;
 }
 
 /// When a batch is full.
@@ -163,20 +172,32 @@ impl Batch {
         self.rows.len() >= limits.records || self.bytes >= limits.bytes
     }
 
-    /// Land the batch. On success the batch is empty again and the offsets
-    /// it covered, highest per partition, are returned for the caller to
-    /// commit. On failure nothing changes, so the same batch can be landed
-    /// again.
-    pub fn land(&mut self, to: &mut impl Land) -> Result<BTreeMap<u32, u64>, LoadError> {
+    /// Take what the batch holds, leaving it empty: its rows to land and
+    /// the offsets they cover, highest per partition, to commit once they
+    /// have.
+    pub fn take(&mut self) -> (Vec<LandingRow>, BTreeMap<u32, u64>) {
+        self.bytes = 0;
+        (
+            std::mem::take(&mut self.rows),
+            std::mem::take(&mut self.offsets),
+        )
+    }
+
+    /// Land the batch, one append after another. On success the batch is
+    /// empty again and the offsets it covered, highest per partition, are
+    /// returned for the caller to commit. On failure nothing changes, so the
+    /// same batch can be landed again.
+    pub fn land(&mut self, to: &impl Land) -> Result<BTreeMap<u32, u64>, LoadError> {
         if !self.rows.is_empty() {
-            to.land(&self.rows).map_err(|source| LoadError::Warehouse {
+            let failed = |source| LoadError::Warehouse {
                 statement: "land".to_string(),
                 source,
-            })?;
+            };
+            for append in to.encode(&self.rows).map_err(failed)? {
+                to.append(&append).map_err(failed)?;
+            }
         }
-        self.rows.clear();
-        self.bytes = 0;
-        Ok(std::mem::take(&mut self.offsets))
+        Ok(self.take().1)
     }
 }
 
@@ -187,16 +208,22 @@ mod tests {
 
     #[derive(Default)]
     struct Fake {
-        landed: Vec<Vec<LandingRow>>,
+        landed: std::sync::Mutex<Vec<Vec<LandingRow>>>,
         fail: bool,
     }
 
     impl Land for Fake {
-        fn land(&mut self, rows: &[LandingRow]) -> Result<(), WarehouseError> {
+        type Append = Vec<LandingRow>;
+
+        fn encode(&self, rows: &[LandingRow]) -> Result<Vec<Vec<LandingRow>>, WarehouseError> {
+            Ok(vec![rows.to_vec()])
+        }
+
+        fn append(&self, rows: &Vec<LandingRow>) -> Result<(), WarehouseError> {
             if self.fail {
                 return Err(WarehouseError::other("unavailable"));
             }
-            self.landed.push(rows.to_vec());
+            self.landed.lock().unwrap().push(rows.clone());
             Ok(())
         }
     }
@@ -248,14 +275,14 @@ mod tests {
         assert_eq!(batch.len(), 4);
 
         l.fail = true;
-        assert!(batch.land(&mut l).is_err());
+        assert!(batch.land(&l).is_err());
         assert_eq!(batch.len(), 4, "a failed landing keeps the batch");
 
         l.fail = false;
-        let offsets = batch.land(&mut l).unwrap();
+        let offsets = batch.land(&l).unwrap();
         assert_eq!(offsets, BTreeMap::from([(3, 12), (5, 7)]));
         assert!(batch.is_empty());
-        let landed = &l.landed[0];
+        let landed = &l.landed.lock().unwrap()[0];
         assert_eq!(landed.len(), 4);
         assert_eq!(landed[0].source, "blob-stream/3/10");
         assert_eq!(landed[3].to_record().unwrap(), record(4));
@@ -268,9 +295,9 @@ mod tests {
         assert_eq!(err.source, "kafka/2/40");
         assert!(batch.is_empty(), "nothing to land and no offset to commit");
         batch.skip(2, 40);
-        let mut l = Fake::default();
-        assert_eq!(batch.land(&mut l).unwrap(), BTreeMap::from([(2, 40)]));
-        assert!(l.landed.is_empty(), "nothing to insert");
+        let l = Fake::default();
+        assert_eq!(batch.land(&l).unwrap(), BTreeMap::from([(2, 40)]));
+        assert!(l.landed.lock().unwrap().is_empty(), "nothing to insert");
     }
 
     #[test]
@@ -309,9 +336,9 @@ mod tests {
             .push_json_line(&String::from_utf8(record(2).to_json()).unwrap(), "stdin:2")
             .unwrap();
         assert!(batch.push_json_line("{}", "stdin:3").is_err());
-        let mut l = Fake::default();
-        batch.land(&mut l).unwrap();
-        let landed = &l.landed[0];
+        let l = Fake::default();
+        batch.land(&l).unwrap();
+        let landed = &l.landed.lock().unwrap()[0];
         assert_eq!(
             landed[0].source,
             "export/changes/node-a/2026/09/29/02/1-a.parquet (ingest 1)"

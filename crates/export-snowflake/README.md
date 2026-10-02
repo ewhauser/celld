@@ -15,6 +15,7 @@ per transport.
 | `sql/dynamic_table.sql` | the Dynamic Table per `(script, class, table)` |
 | `src/landing.rs` | `LandingRow`: a record as one `EXPORT_LANDING` row |
 | `src/consume.rs` | `Batch` and `Land`: records batched to land, and the offsets a landed batch covers |
+| `src/pipeline.rs` | (`sql-api`, `blob-stream` or `kafka`) `Pipeline`: batches landing several appends at a time, reported landed in order |
 | `src/loader.rs` | `Loader`: deploy, Dynamic Table sync, routing, erasure, the read side |
 | `src/sql_api.rs` | (`sql-api`) a `Warehouse` on Snowflake's SQL API with key-pair auth |
 | `src/streaming.rs` | (`sql-api`) `Streaming`: appends to the landing pipe's elastic channel over Snowpipe Streaming's REST API |
@@ -35,10 +36,12 @@ per transport.
    envelope field, `body` (the kind-specific fields as a JSON string) and
    `source` (`blob-stream/<partition>/<offset>` or
    `kafka/<partition>/<offset>`). Snowpipe Streaming bills
-   per GB ingested; no warehouse runs for it. Once every row of a batch is
-   acknowledged, which means it is durable, the loader commits the batch's
-   offsets. A crash replays at most the uncommitted batches, and every reader
-   drops the duplicates. The channel does not order rows, and nothing needs
+   per GB ingested; no warehouse runs for it. Up to
+   `EXPORT_APPEND_CONCURRENCY` appends are in flight at once, across
+   batches, while the loader reads on. Once every row of a batch and of
+   every batch before it is acknowledged, which means it is durable, the
+   loader commits the batch's offsets. A crash replays at most the
+   uncommitted batches, and every reader drops the duplicates. The channel does not order rows, and nothing needs
    it to: completeness comes from positions and watermarks.
 3. The route task reads new landed rows through a stream and, in one
    transaction, puts `rows` and `snapshot` records into `CELL_CHANGES` and
@@ -94,6 +97,10 @@ warehouse), optionally `SNOWFLAKE_ROLE` and `SNOWFLAKE_URL`.
 `EXPORT_BATCH_RECORDS` records (default 10000), `EXPORT_BATCH_BYTES`
 (default 8 MiB; appends are split at Snowpipe Streaming's 4 MB limit), or,
 for `run`, `EXPORT_BATCH_MS` after its first record (default 5000).
+`EXPORT_APPEND_CONCURRENCY` (default 8) is how many appends are in flight
+at once, for `run` and `ingest`, and how many batches may be landing at
+once; while that many are, `run` reads nothing more. At an append latency
+of L, the loader lands at most about that many 4 MB appends every L.
 
 `run` reads the transport `EXPORT_SOURCE` names, `blob-stream` (the
 default) or `kafka`, and needs a member id that stays the same across
@@ -106,8 +113,9 @@ needs `EXPORT_BLOB_STREAM_CONFIG`, a blob-stream
 `snowflake`) and `EXPORT_KAFKA_PROPERTIES`, a file of librdkafka consumer
 properties for TLS and SASL; the member id is its client id. The Kafka
 consumer never commits on its own, and when the group revokes partitions
-it lands and commits what it holds before letting go. A batch that fails to land is
-retried with backoff (1s doubling to 60s) and its offsets stay uncommitted,
+it lands and commits what it holds before letting go. An append that fails
+is sent again on its own, with backoff (1s doubling to 60s), and neither
+its batch's offsets nor any later batch's are committed until it lands,
 so a Snowflake outage stalls the consumer rather than losing records. A
 message that is not a record stops `run` with an error naming it, after
 what came before it lands; nothing at or past it in its partition is
@@ -148,11 +156,18 @@ Python 3 and the packages in `sqltest/requirements.txt`, and CI runs it in
   side, a rejected statement, a rejected append, and a key Snowflake would
   refuse. `sqlapi.py`'s docstring lists what it emulates.
 
-The consumer loop (`src/blob_stream/tests.rs`) runs against a fake
-iterator: batches land on linger or when full, a failed batch is retried
-and its offsets are not committed until it lands, stopping while the
-warehouse is down commits nothing, and revoked partitions are let go only
-after their batch lands. `src/kafka/tests.rs` runs the same loop against a
+The consumer loop (`src/source/tests.rs`) runs against a fake source and a
+lander whose appends wait for the test to acknowledge or fail them: offsets
+commit in order when acknowledgements arrive out of order, a failed append
+is sent again on its own while the others land, nothing more is read while
+the pipeline is full, a revocation waits for the appends in flight, and a
+stop lands what was read, commits up to the first failure and retries
+nothing. `src/pipeline/tests.rs` checks the pipeline itself: the append
+limit across batches, in-order reporting, and backoff. `src/blob_stream/tests.rs`
+runs the loop over a fake blob-stream iterator: batches land on linger or
+when full, a failed batch is retried and its offsets are not committed
+until it lands, stopping while the warehouse is down commits nothing, and
+revoked partitions are let go only after their batch lands. `src/kafka/tests.rs` runs the same loop against a
 real Kafka broker when `CELLD_TEST_KAFKA_BROKERS` names one (CI runs one):
 records land and their offsets commit, a message that is not a record is
 named for `EXPORT_SKIP`, and a member the group rebalances away lands what

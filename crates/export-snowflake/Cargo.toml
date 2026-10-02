@@ -38,7 +38,8 @@ tokio = { workspace = true, optional = true, features = ["macros", "rt-multi-thr
 tokio-util = { workspace = true, optional = true }
 
 [features]
-sql-api = ["dep:base64", "dep:getrandom", "dep:pkcs8", "dep:rsa", "dep:sha2", "dep:ureq"]
+# tokio: appends are sent several at a time, on its blocking threads.
+sql-api = ["dep:base64", "dep:getrandom", "dep:pkcs8", "dep:rsa", "dep:sha2", "dep:tokio", "dep:ureq"]
 # The consumer that feeds the loader from the blob-stream topic. Off by
 # default for the same reason as celld's `export-blob-stream`: the bitdrift
 # crates, a patched protobuf, and protoc to build them. Without it,

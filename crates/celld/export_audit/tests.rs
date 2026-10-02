@@ -1432,9 +1432,18 @@ impl celld_export_snowflake::Warehouse for FakeSnowflake {
 }
 
 impl celld_export_snowflake::consume::Land for FakeSnowflake {
-    fn land(
-        &mut self,
+    type Append = Vec<celld_export_snowflake::LandingRow>;
+
+    fn encode(
+        &self,
         rows: &[celld_export_snowflake::LandingRow],
+    ) -> Result<Vec<Self::Append>, celld_export_snowflake::WarehouseError> {
+        Ok(vec![rows.to_vec()])
+    }
+
+    fn append(
+        &self,
+        rows: &Self::Append,
     ) -> Result<(), celld_export_snowflake::WarehouseError> {
         let mut records = self.records.lock().unwrap();
         records.extend(rows.iter().map(|r| r.to_record().unwrap()));
