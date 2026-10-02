@@ -53,6 +53,7 @@ pub struct Streaming {
     pub pause: fn(Duration),
     /// The largest append payload; tests make it small.
     pub max_request_bytes: usize,
+    buffers: Buffers,
 }
 
 struct Ingest {
@@ -91,6 +92,7 @@ impl Streaming {
             ingest: None,
             pause: std::thread::sleep,
             max_request_bytes: MAX_REQUEST_BYTES,
+            buffers: Buffers::default(),
         }
     }
 
@@ -254,8 +256,10 @@ impl Streaming {
 
 impl Land for Streaming {
     fn land(&mut self, rows: &[LandingRow]) -> Result<(), WarehouseError> {
-        for payload in payloads(rows, self.max_request_bytes)? {
-            self.append(&payload)?;
+        for payload in payloads_from(rows, self.max_request_bytes, &mut self.buffers)? {
+            let appended = self.append(&payload);
+            self.buffers.give(payload);
+            appended?;
         }
         Ok(())
     }
@@ -263,28 +267,95 @@ impl Land for Streaming {
 
 /// `rows` as NDJSON payloads of at most `limit` bytes each, in order.
 pub fn payloads(rows: &[LandingRow], limit: usize) -> Result<Vec<Vec<u8>>, WarehouseError> {
-    let mut out: Vec<Vec<u8>> = Vec::new();
-    let mut current: Vec<u8> = Vec::new();
+    payloads_from(rows, limit, &mut Buffers::default())
+}
+
+/// [`payloads`], written into `buffers`' spares where it has them. A
+/// payload closes when the next row would take it past `limit`.
+///
+/// Each row is written straight into its payload, which is allocated once,
+/// for what is left of the rows up to `limit`, and never grows. Only a row
+/// that might not fit in what is left of its payload is written apart
+/// first, to see which payload it goes in.
+pub fn payloads_from(
+    rows: &[LandingRow],
+    limit: usize,
+    buffers: &mut Buffers,
+) -> Result<Vec<Vec<u8>>, WarehouseError> {
+    if rows.is_empty() {
+        return Ok(Vec::new());
+    }
+    let line_bound = |row: &LandingRow| row.json_len_bound() + 1;
+    // What the rows not yet written may take.
+    let mut left: usize = rows.iter().map(line_bound).sum();
+    let mut out = Vec::new();
+    let mut current = buffers.take(left.min(limit));
+    let mut line = Vec::new();
     for row in rows {
-        let mut line = Vec::with_capacity(row.body.len() + 512);
-        row.write_json(&mut line);
-        line.push(b'\n');
-        if line.len() > limit {
-            return Err(WarehouseError::other(format!(
-                "the record from {} is {} bytes, more than one append may carry ({limit})",
-                row.source,
-                line.len()
-            )));
+        let bound = line_bound(row);
+        if current.len() + bound <= current.capacity().min(limit) {
+            row.write_json(&mut current);
+            current.push(b'\n');
+        } else {
+            line.clear();
+            line.reserve(bound);
+            row.write_json(&mut line);
+            line.push(b'\n');
+            if line.len() > limit {
+                return Err(WarehouseError::other(format!(
+                    "the record from {} is {} bytes, more than one append may carry ({limit})",
+                    row.source,
+                    line.len()
+                )));
+            }
+            if current.len() + line.len() > limit {
+                let next = buffers.take(left.min(limit));
+                out.push(std::mem::replace(&mut current, next));
+            }
+            current.extend_from_slice(&line);
         }
-        if current.len() + line.len() > limit {
-            out.push(std::mem::take(&mut current));
-        }
-        current.extend_from_slice(&line);
+        left -= bound;
     }
-    if !current.is_empty() {
-        out.push(current);
-    }
+    out.push(current);
     Ok(out)
+}
+
+/// The most payload buffers [`Buffers`] keeps between batches: enough for
+/// a batch of the default `EXPORT_BATCH_BYTES`, 8 MiB, in appends of
+/// [`MAX_REQUEST_BYTES`].
+const SPARE_BUFFERS: usize = 3;
+
+/// Payload buffers kept from one batch for the next, so a payload is
+/// written into memory already allocated and touched. A buffer is the
+/// pool's again only once its append is done with it: [`Buffers::give`].
+#[derive(Default)]
+pub struct Buffers(Vec<Vec<u8>>);
+
+impl Buffers {
+    /// An empty buffer of at least `capacity` bytes: the smallest spare
+    /// that holds that many, or a new one.
+    fn take(&mut self, capacity: usize) -> Vec<u8> {
+        let spare = (0..self.0.len())
+            .filter(|&i| self.0[i].capacity() >= capacity)
+            .min_by_key(|&i| self.0[i].capacity());
+        match spare {
+            Some(i) => self.0.swap_remove(i),
+            None => Vec::with_capacity(capacity),
+        }
+    }
+
+    /// Keep `buffer` for a later payload, in place of a smaller one once
+    /// [`SPARE_BUFFERS`] are kept.
+    pub fn give(&mut self, mut buffer: Vec<u8>) {
+        buffer.clear();
+        if self.0.len() < SPARE_BUFFERS {
+            self.0.push(buffer);
+        } else if let Some(smallest) = self.0.iter_mut().min_by_key(|b| b.capacity()) {
+            if smallest.capacity() < buffer.capacity() {
+                *smallest = buffer;
+            }
+        }
+    }
 }
 
 fn answer(
@@ -372,6 +443,131 @@ mod tests {
         assert!(std::str::from_utf8(&out[0])
             .unwrap()
             .contains(&format!("\"body\":{{\"x\":\"{}\"}}", "x".repeat(100))));
+    }
+
+    /// `payloads` as it was: each row encoded on its own, then copied in.
+    fn payloads_as_they_were(
+        rows: &[LandingRow],
+        limit: usize,
+    ) -> Result<Vec<Vec<u8>>, WarehouseError> {
+        let mut out: Vec<Vec<u8>> = Vec::new();
+        let mut current: Vec<u8> = Vec::new();
+        for row in rows {
+            let mut line = serde_json::to_vec(row).unwrap();
+            line.push(b'\n');
+            if line.len() > limit {
+                return Err(WarehouseError::other(format!(
+                    "the record from {} is {} bytes, more than one append may carry ({limit})",
+                    row.source,
+                    line.len()
+                )));
+            }
+            if current.len() + line.len() > limit {
+                out.push(std::mem::take(&mut current));
+            }
+            current.extend_from_slice(&line);
+        }
+        if !current.is_empty() {
+            out.push(current);
+        }
+        Ok(out)
+    }
+
+    #[test]
+    fn payloads_are_the_bytes_they_were() {
+        // Mixed sizes, escapes, and options, from a fixed seed.
+        let mut seed = 0x9e37_79b9_7f4a_7c15_u64;
+        let mut next = move |n: u64| {
+            seed = seed
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            (seed >> 33) % n
+        };
+        let rows: Vec<LandingRow> = (0..2_000)
+            .map(|i| {
+                let size = match next(10) {
+                    0 => next(8_000),
+                    1 => 0,
+                    _ => next(1_500),
+                } as usize;
+                let mut r = row(&format!("kafka/{}/{i}", next(16)), size);
+                if next(4) == 0 {
+                    r.cell = format!("c\"\\\n\u{1}é{i}");
+                    r.cell_name = Some("名前".repeat(next(5) as usize));
+                    r.facet = Some(String::new());
+                }
+                r.incarnation = next(u64::MAX);
+                r
+            })
+            .collect();
+        let longest = rows
+            .iter()
+            .map(|r| serde_json::to_vec(r).unwrap().len() + 1);
+        let longest = longest.max().unwrap();
+        let mut buffers = Buffers::default();
+        for limit in [
+            longest,
+            longest + 1,
+            9_000,
+            20_011,
+            100_000,
+            MAX_REQUEST_BYTES,
+        ] {
+            let old = payloads_as_they_were(&rows, limit).unwrap();
+            let new = payloads(&rows, limit).unwrap();
+            assert_eq!(new, old, "limit {limit}");
+            // Never grown past what was allocated for them.
+            for p in &new {
+                assert!(p.capacity() <= limit, "limit {limit}");
+            }
+            // Again into buffers kept from earlier batches.
+            for _ in 0..2 {
+                let again = payloads_from(&rows, limit, &mut buffers).unwrap();
+                assert_eq!(again, old, "limit {limit}");
+                again.into_iter().for_each(|p| buffers.give(p));
+            }
+        }
+        // One row exactly at the limit is a payload of its own.
+        let at = longest;
+        let big = rows
+            .iter()
+            .position(|r| serde_json::to_vec(r).unwrap().len() + 1 == at)
+            .unwrap();
+        let out = payloads(&rows[big - 1..=big + 1], at).unwrap();
+        assert_eq!(
+            out,
+            payloads_as_they_were(&rows[big - 1..=big + 1], at).unwrap()
+        );
+        assert_eq!(out.len(), 3);
+        assert_eq!(out[1].len(), at);
+        // One byte over is the same error, even after payloads that fit.
+        let new = payloads_from(&rows, at - 1, &mut buffers).unwrap_err();
+        let old = payloads_as_they_were(&rows, at - 1).unwrap_err();
+        assert_eq!(new.message, old.message);
+        assert!(
+            new.message.contains(&format!("is {at} bytes")),
+            "{}",
+            new.message
+        );
+        assert!(payloads(&[], 10).unwrap().is_empty());
+    }
+
+    #[test]
+    fn spare_buffers_are_bounded_and_keep_the_largest() {
+        let mut buffers = Buffers::default();
+        for capacity in [10, 1_000, 100, 5_000, 1] {
+            buffers.give(Vec::with_capacity(capacity));
+        }
+        let mut kept: Vec<usize> = buffers.0.iter().map(Vec::capacity).collect();
+        kept.sort();
+        assert_eq!(kept, [100, 1_000, 5_000]);
+        let mut taken = buffers.take(2_000);
+        assert!(taken.capacity() >= 5_000 && taken.is_empty());
+        taken.extend_from_slice(b"x");
+        buffers.give(taken);
+        assert_eq!(buffers.take(1).capacity(), 100);
+        assert!(buffers.take(2_000).capacity() >= 5_000);
+        assert_eq!(buffers.take(9_000).capacity(), 9_000);
     }
 
     #[test]

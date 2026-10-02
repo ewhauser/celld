@@ -281,6 +281,73 @@ fn a_row_cut_from_a_message_holds_the_whole_record() {
 }
 
 #[test]
+fn a_rows_json_len_bound_holds_and_is_tight() {
+    let written = |row: &LandingRow| {
+        let mut out = Vec::new();
+        row.write_json(&mut out);
+        out.len()
+    };
+    // Every fixed part at its widest: the bound is exact.
+    let widest = LandingRow {
+        kind: String::new(),
+        script: String::new(),
+        class: String::new(),
+        cell: String::new(),
+        cell_name: None,
+        facet: None,
+        incarnation: u64::MAX,
+        epoch: u64::MAX,
+        txid: u64::MAX,
+        commit: u64::MAX,
+        committed_at: i64::MIN,
+        node: String::new(),
+        origin: String::new(),
+        fragment: u32::MAX,
+        fragments: u32::MAX,
+        body: "{}".into(),
+        source: String::new(),
+    };
+    assert_eq!(widest.json_len_bound(), written(&widest));
+    // Escapes, control characters, and non-ASCII never pass it.
+    let odd = "q\"b\\s\n\u{1}\u{1f}\u{7f}é😀";
+    let mut rows: Vec<LandingRow> = every_record()
+        .iter()
+        .map(|r| LandingRow::from_record(r, "kafka/0/1"))
+        .collect();
+    for mut row in rows.clone() {
+        for s in [
+            &mut row.kind,
+            &mut row.script,
+            &mut row.class,
+            &mut row.cell,
+            &mut row.node,
+            &mut row.origin,
+            &mut row.source,
+        ] {
+            s.push_str(odd);
+        }
+        row.cell_name = Some(odd.into());
+        row.facet = Some(odd.repeat(3));
+        rows.push(row);
+    }
+    for row in &rows {
+        let (bound, len) = (row.json_len_bound(), written(row));
+        assert!(bound >= len, "{bound} < {len}");
+        // Loose only for the envelope's strings, not the body.
+        let strings = row.kind.len()
+            + row.script.len()
+            + row.class.len()
+            + row.cell.len()
+            + row.cell_name.as_ref().map_or(0, String::len)
+            + row.facet.as_ref().map_or(0, String::len)
+            + row.node.len()
+            + row.origin.len()
+            + row.source.len();
+        assert!(bound - len <= 6 * strings + 400, "{bound} - {len}");
+    }
+}
+
+#[test]
 fn a_row_keeps_the_messages_own_bytes() {
     // Whitespace, field order, and escapes as the message has them, and a
     // field this loader does not know, which a newer celld may add.

@@ -159,6 +159,25 @@ impl LandingRow {
         out.push(b'}');
     }
 
+    /// No less than the length of [`write_json`](Self::write_json)'s
+    /// output: room to write the row into that is never outgrown. Counted
+    /// from lengths, without reading the strings, so it is cheap, and loose
+    /// by at most a few times the strings' lengths, never by the body.
+    pub fn json_len_bound(&self) -> usize {
+        let option = |o: &Option<String>| o.as_ref().map_or(0, String::len);
+        let strings = self.kind.len()
+            + self.script.len()
+            + self.class.len()
+            + self.cell.len()
+            + option(&self.cell_name)
+            + option(&self.facet)
+            + self.node.len()
+            + self.origin.len()
+            + self.source.len();
+        // Each string byte is at most an escape, `\u00XX`.
+        JSON_FIXED_BOUND + 6 * strings + self.body.len()
+    }
+
     /// The record this row holds.
     pub fn to_record(&self) -> Result<Record, DecodeError> {
         let mut fields: Map<String, Json> = serde_json::from_str(&self.body)?;
@@ -206,6 +225,11 @@ struct Head<'a> {
     fragment: u32,
     fragments: u32,
 }
+
+/// A row's JSON less its strings' contents and its body: the keys, the
+/// quotes and punctuation, `null` for each option, and each number at its
+/// widest.
+const JSON_FIXED_BOUND: usize = 319;
 
 /// A `kind` or `origin` as the record's JSON names it.
 fn name(v: &impl Serialize) -> String {
