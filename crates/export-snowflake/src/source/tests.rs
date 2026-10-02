@@ -120,6 +120,16 @@ struct Harness {
 /// A loop that closes a batch at `records`, with `concurrency` appends in
 /// flight at most, landing `per_append` rows an append.
 fn start(records: usize, concurrency: usize, per_append: usize) -> (Harness, Script) {
+    start_with(records, concurrency, per_append, Duration::from_millis(10))
+}
+
+/// [`start`], with failed appends first sent again after `retry`.
+fn start_with(
+    records: usize,
+    concurrency: usize,
+    per_append: usize,
+    retry: Duration,
+) -> (Harness, Script) {
     let (feed, next) = mpsc::unbounded_channel();
     let calls = Arc::new(Mutex::new(Vec::new()));
     let read = Arc::new(AtomicUsize::new(0));
@@ -137,8 +147,8 @@ fn start(records: usize, concurrency: usize, per_append: usize) -> (Harness, Scr
         linger: Duration::from_secs(3600),
         concurrency,
         sync_every: Duration::from_secs(3600),
-        retry: Duration::from_millis(10),
-        retry_max: Duration::from_millis(20),
+        retry,
+        retry_max: retry * 2,
         skip: Default::default(),
     };
     let events = Arc::new(Mutex::new(Vec::new()));
@@ -424,7 +434,9 @@ async fn stopping_lands_what_was_read_and_commits_up_to_the_first_failure() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn stopping_while_appends_wait_to_be_retried_commits_nothing_past_them() {
-    let (h, mut script) = start(1, 4, 10);
+    // A backoff that cannot run out before the stop: an append sent again
+    // would wait for an answer the test never gives.
+    let (h, mut script) = start_with(1, 4, 10, Duration::from_secs(3600));
     h.record(0, 1);
     h.record(0, 2);
     let [a, b] = appends(&mut script).await;
@@ -432,11 +444,9 @@ async fn stopping_while_appends_wait_to_be_retried_commits_nothing_past_them() {
     b.ack();
     h.until("the failure", |h| h.events("LandFailed") == 1)
         .await;
-    // Let the retry go out once and fail again, then stop while it waits.
-    script.sent().await.fail();
-    h.until("the second failure", |h| h.events("LandFailed") == 2)
-        .await;
     let calls = h.stop().await;
+    // Nothing is sent again, and the second batch, landed behind the
+    // first, is not committed.
     script.quiet().await;
     assert_eq!(calls, [Call::Start, Call::Shutdown]);
 }

@@ -307,7 +307,10 @@ async fn a_full_batch_lands_at_once() {
     for (offset, txid) in [(1, 1), (2, 2), (3, 3)] {
         h.record(0, offset, txid);
     }
-    h.until("the first batch", |h| !h.landed().is_empty()).await;
+    h.until("the first batch's commit", |h| {
+        h.calls().contains(&Call::Commit)
+    })
+    .await;
     assert_eq!(txids(&h.landed()[0]), [1, 2]);
     assert_eq!(&h.calls()[1..], [Call::Store(0, 2), Call::Commit]);
     // Stopping lands what is left.
@@ -326,7 +329,7 @@ async fn a_failed_batch_is_retried_and_nothing_commits_until_it_lands() {
     let h = start(settings(2, Duration::from_secs(3600)), shared);
     h.record(0, 1, 1);
     h.record(0, 2, 2);
-    h.until("the batch to land", |h| !h.landed().is_empty())
+    h.until("the batch's commit", |h| h.calls().contains(&Call::Commit))
         .await;
     assert_eq!(h.shared.attempts.load(Ordering::SeqCst), 4);
     assert_eq!(h.landed().len(), 1, "the same batch, landed once");
@@ -404,7 +407,8 @@ async fn a_message_listed_in_skip_is_dropped_and_committed() {
     let _ = h.feed.send(Next::Record(0, 1, b"{\"kind\":".to_vec()));
     h.record(0, 2, 2);
     h.record(0, 3, 3);
-    h.until("the batch", |h| !h.landed().is_empty()).await;
+    h.until("the batch's commit", |h| h.calls().contains(&Call::Commit))
+        .await;
     assert_eq!(txids(&h.landed()[0]), [2, 3]);
     assert_eq!(&h.calls()[1..], [Call::Store(0, 3), Call::Commit]);
     assert!(h.events.lock().unwrap()[0].starts_with("Skipped"));
