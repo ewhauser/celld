@@ -87,8 +87,18 @@ jobs:
   # The Dockerfile must build and its test stage pass before anything can
   # be published; nothing is pushed at candidate time.
   container-check:
-    name: Container smoke build
+    name: Container smoke build${{ matrix.variant && format(' ({0})', matrix.variant) || '' }}
     if: github.event_name != 'release'
+    strategy:
+      fail-fast: false
+      matrix:
+        # The default image, and the `-kafka` variant with the Kafka change
+        # export sink compiled in.
+        include:
+          - variant: ""
+            features: ""
+          - variant: kafka
+            features: export-kafka
     runs-on: ubuntu-22.04
     timeout-minutes: 60
     permissions:
@@ -114,7 +124,8 @@ jobs:
             --platform linux/amd64 \
             --build-arg "CELLD_COMMIT=$GITHUB_SHA" \
             --build-arg "CELLD_VERSION=$version" \
-            --cache-from "type=registry,ref=$IMAGE:buildcache-amd64" \
+            --build-arg "CELLD_FEATURES=${{ matrix.features }}" \
+            --cache-from "type=registry,ref=$IMAGE:buildcache-amd64${{ matrix.variant && format('-{0}', matrix.variant) || '' }}" \
             .
 
   draft-release:
@@ -232,11 +243,23 @@ jobs:
           - runner: ubuntu-22.04
             platform: linux/amd64
             suffix: amd64
+            features: ""
           - runner: ubuntu-22.04-arm
             platform: linux/arm64
             suffix: arm64
+            features: ""
+          # The `-kafka` variant compiles in the Kafka change export sink,
+          # which the default image leaves out.
+          - runner: ubuntu-22.04
+            platform: linux/amd64
+            suffix: amd64-kafka
+            features: export-kafka
+          - runner: ubuntu-22.04-arm
+            platform: linux/arm64
+            suffix: arm64-kafka
+            features: export-kafka
     runs-on: ${{ matrix.runner }}
-    timeout-minutes: 60
+    timeout-minutes: 90
     permissions:
       contents: read
       packages: write
@@ -273,6 +296,7 @@ jobs:
             --platform "${{ matrix.platform }}" \
             --build-arg "CELLD_COMMIT=$TAG_SHA" \
             --build-arg "CELLD_VERSION=$CELLD_VERSION" \
+            --build-arg "CELLD_FEATURES=${{ matrix.features }}" \
             --cache-from "type=registry,ref=$cache" \
             --cache-to "type=registry,ref=$cache,mode=max" \
             --provenance=mode=max \
@@ -282,9 +306,15 @@ jobs:
             .
 
   publish-container:
-    name: Publish multi-architecture image
+    name: Publish multi-architecture image${{ matrix.variant && format(' ({0})', matrix.variant) || '' }}
     if: github.event_name == 'release'
     needs: build-container
+    strategy:
+      fail-fast: false
+      matrix:
+        # Every tag of the `kafka` variant carries a `-kafka` suffix, and the
+        # variant never takes `latest`.
+        variant: ["", kafka]
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     permissions:
@@ -316,22 +346,25 @@ jobs:
         env:
           RELEASE_TAG: ${{ github.event.release.tag_name }}
           PRERELEASE: ${{ github.event.release.prerelease }}
+          VARIANT: ${{ matrix.variant }}
         run: |
           set -euo pipefail
-          tags=(--tag "$IMAGE:sha-$TAG_SHA" --tag "$IMAGE:$RELEASE_TAG" \
-            --tag "$IMAGE:$CELLD_VERSION")
-          if [ "$PRERELEASE" != "true" ]; then
+          v=${VARIANT:+-$VARIANT}
+          echo "VARIANT_SUFFIX=$v" >> "$GITHUB_ENV"
+          tags=(--tag "$IMAGE:sha-$TAG_SHA$v" --tag "$IMAGE:$RELEASE_TAG$v" \
+            --tag "$IMAGE:$CELLD_VERSION$v")
+          if [ "$PRERELEASE" != "true" ] && [ -z "$VARIANT" ]; then
             tags+=(--tag "$IMAGE:latest")
           fi
           docker buildx imagetools create "${tags[@]}" \
-            "$IMAGE:$TAG_SHA-amd64" \
-            "$IMAGE:$TAG_SHA-arm64"
+            "$IMAGE:$TAG_SHA-amd64$v" \
+            "$IMAGE:$TAG_SHA-arm64$v"
 
       - name: Resolve manifest digest
         id: digest
         run: |
           set -euo pipefail
-          digest=$(docker buildx imagetools inspect "$IMAGE:sha-$TAG_SHA" \
+          digest=$(docker buildx imagetools inspect "$IMAGE:sha-$TAG_SHA$VARIANT_SUFFIX" \
             --format '{{json .Manifest.Digest}}' | tr -d '"')
           echo "digest=$digest" >> "$GITHUB_OUTPUT"
 
@@ -352,4 +385,4 @@ jobs:
         run: |
           set -euo pipefail
           docker logout ghcr.io
-          docker buildx imagetools inspect "$IMAGE:sha-$TAG_SHA"
+          docker buildx imagetools inspect "$IMAGE:sha-$TAG_SHA$VARIANT_SUFFIX"
