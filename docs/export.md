@@ -961,12 +961,13 @@ metadata or advance records. This prevents a sink outage from accumulating
 one gap record per transaction. A later activation resumes capture; repair
 and reconciliation cover the missing tail.
 
-Delivery bookkeeping keeps at most 256 stream entries in memory and spills
-older entries to a process-local SQLite file. It evaluates only streams
-changed by the current acknowledgement batch. Spilled watermark counts
-survive same-epoch reopenings. If the spill fails, export stops and
-`/state` reports `export.delivery_failed: true`; restart after correcting
-the local disk problem, then reconcile and repair.
+Delivery bookkeeping keeps the 8,192 most recently acknowledged streams in
+memory, about 1 KiB each (8-10 MiB in all), and spills the least recently
+used to a process-local SQLite file. It evaluates only streams changed by
+the current acknowledgement batch. Spilled watermark counts survive
+same-epoch reopenings. If the spill fails, export stops and `/state` reports
+`export.delivery_failed: true`; restart after correcting the local disk
+problem, then reconcile and repair.
 
 ## Failure modes
 
