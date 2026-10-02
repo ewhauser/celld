@@ -825,6 +825,44 @@ fn a_table_with_generated_columns_is_bulk() {
     assert_eq!(commit.bulk.len(), 1);
 }
 
+/// A column named `_rowid_`, in any case, shadows the name the session reads
+/// a rowid-only table's rowid back through, so the filter leaves such a
+/// table untracked and its writes become `bulk`. A declared key makes the
+/// column an ordinary one.
+#[test]
+fn a_rowid_only_table_shadowing_the_session_rowid_is_bulk() {
+    let mut f = Fixture::new(
+        "CREATE TABLE upper (_ROWID_ TEXT, v INTEGER);
+         CREATE TABLE keyed (_rowid_ TEXT PRIMARY KEY, v INTEGER);
+         CREATE TABLE plain (v INTEGER);",
+    );
+    f.run(
+        "INSERT INTO upper VALUES ('x', 1);
+         INSERT INTO keyed VALUES ('x', 1);
+         INSERT INTO plain VALUES (1);",
+    );
+    let commit = f.pull();
+    let bulk: Vec<_> = commit.bulk.iter().map(|t| t.table.as_str()).collect();
+    assert_eq!(bulk, ["upper"]);
+    assert_eq!(table(&commit, "keyed").rows.len(), 1);
+    assert_eq!(table(&commit, "plain").rows.len(), 1);
+
+    // A column added later is covered by the alteration's snapshot, and the
+    // table is untracked from the next session on.
+    f.run(
+        "ALTER TABLE plain ADD COLUMN _rowid_ TEXT;
+         INSERT INTO plain VALUES (2, 'y');",
+    );
+    let commit = f.pull();
+    assert_eq!(snapshotted(&commit, "plain").rows.len(), 2);
+    assert!(commit.tables.is_empty() && commit.bulk.is_empty());
+    f.run("INSERT INTO plain VALUES (3, 'z');");
+    let commit = f.pull();
+    assert!(commit.tables.is_empty());
+    let bulk: Vec<_> = commit.bulk.iter().map(|t| t.table.as_str()).collect();
+    assert_eq!(bulk, ["plain"]);
+}
+
 #[test]
 fn quoted_names_round_trip() {
     let mut f =
@@ -2173,7 +2211,8 @@ fn pinned_records_of_insert_update_and_mixed_commits() {
 }
 
 /// A rowid-only table with a column named `_rowid_`, which shadows the
-/// alias the session reads the rowid through.
+/// alias the session reads the rowid through. Its writes are `bulk`, never
+/// rows the session keyed by the column's value.
 #[test]
 fn pinned_records_of_a_table_shadowing_the_session_rowid() {
     let mut f = Fixture::new(

@@ -65,6 +65,10 @@ pub(crate) const GENERATIONS_TABLE: &str = "_cf_EXPORT";
 /// changed while nothing watched it.
 const COOKIE_ROW: &str = "sqlite_schema";
 
+/// The name through which the session addresses a rowid-only table's rowid
+/// (`SESSIONS_ROWID` in SQLite), whatever columns the table has.
+const SESSION_ROWID: &str = "_rowid_";
+
 /// How capture behaves on every cell of one isolate.
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct Settings {
@@ -306,12 +310,11 @@ struct FilterState {
     excluded: RefCell<HashSet<String>>,
     /// Tables the operator's `CELLD_EXPORT_TABLES` denies for this class.
     denied: HashSet<String>,
-    /// Per table seen since the last refresh, whether it has generated
-    /// columns. The session cannot track such a table: its changeset fails
-    /// as a whole with `SQLITE_SCHEMA`.
-    generated: RefCell<HashMap<String, bool>>,
-    /// Tables with generated columns the transaction wrote. They are
-    /// exported as `bulk`.
+    /// Per table seen since the last refresh, whether the session cannot
+    /// track it; see [`untrackable_table`].
+    untrackable: RefCell<HashMap<String, bool>>,
+    /// Untrackable tables the transaction wrote. They are exported as
+    /// `bulk`.
     untracked: RefCell<Vec<String>>,
     /// Tables the session tracks changes to since it started. When the
     /// changeset fails, these are snapshotted first.
@@ -322,16 +325,18 @@ struct FilterState {
 }
 
 impl FilterState {
-    fn has_generated_columns(&self, table: &str) -> bool {
-        if let Some(&known) = self.generated.borrow().get(table) {
+    fn is_untrackable(&self, table: &str) -> bool {
+        if let Some(&known) = self.untrackable.borrow().get(table) {
             return known;
         }
         // SAFETY: the connection is live while its session is, and SQLite
         // runs its own table-info query at this point too.
-        let found = unsafe { generated_columns(self.database, table) };
+        let found = unsafe { untrackable_table(self.database, table) };
         // A table that cannot be inspected is treated as untrackable.
         let found = found.unwrap_or(true);
-        self.generated.borrow_mut().insert(table.to_string(), found);
+        self.untrackable
+            .borrow_mut()
+            .insert(table.to_string(), found);
         found
     }
 
@@ -342,12 +347,19 @@ impl FilterState {
     }
 }
 
-/// Whether `table` has a generated column, read with `PRAGMA table_xinfo`.
+/// Whether the session cannot track `table`, read with `PRAGMA table_xinfo`:
+///
+/// - A table with a generated column fails the whole changeset with
+///   `SQLITE_SCHEMA`.
+/// - A rowid-only table with a column named `_rowid_` yields a wrong one.
+///   The session reads the rowid back through that name when the changeset
+///   is taken, and the column shadows it, so the changeset keys rows by the
+///   column's value and omits inserts whose value is no row's rowid.
 ///
 /// # Safety
 ///
 /// `database` is a live connection.
-unsafe fn generated_columns(database: *mut ffi::sqlite3, table: &str) -> Option<bool> {
+unsafe fn untrackable_table(database: *mut ffi::sqlite3, table: &str) -> Option<bool> {
     let sql = std::ffi::CString::new(format!("PRAGMA main.table_xinfo({})", quote(table))).ok()?;
     let mut statement = ptr::null_mut();
     let rc = unsafe {
@@ -356,12 +368,21 @@ unsafe fn generated_columns(database: *mut ffi::sqlite3, table: &str) -> Option<
     if rc != ffi::SQLITE_OK {
         return None;
     }
-    let mut found = false;
+    let (mut generated, mut keyed, mut shadowed) = (false, false, false);
     let result = loop {
         match unsafe { ffi::sqlite3_step(statement) } {
-            // `hidden` is 2 for a virtual and 3 for a stored generated column.
-            ffi::SQLITE_ROW => found |= unsafe { ffi::sqlite3_column_int(statement, 6) } >= 2,
-            ffi::SQLITE_DONE => break Some(found),
+            ffi::SQLITE_ROW => {
+                // `hidden` is 2 for a virtual and 3 for a stored generated
+                // column.
+                generated |= unsafe { ffi::sqlite3_column_int(statement, 6) } >= 2;
+                keyed |= unsafe { ffi::sqlite3_column_int(statement, 5) } > 0;
+                let name = unsafe { ffi::sqlite3_column_text(statement, 1) };
+                shadowed |= !name.is_null()
+                    && unsafe { CStr::from_ptr(name.cast()) }
+                        .to_bytes()
+                        .eq_ignore_ascii_case(SESSION_ROWID.as_bytes());
+            }
+            ffi::SQLITE_DONE => break Some(generated || (shadowed && !keyed)),
             _ => break None,
         }
     };
@@ -385,7 +406,7 @@ unsafe extern "C" fn table_filter(context: *mut c_void, table: *const c_char) ->
         return 0;
     }
     state.mark_dirty();
-    if state.has_generated_columns(&table) {
+    if state.is_untrackable(&table) {
         let mut untracked = state.untracked.borrow_mut();
         if !untracked.iter().any(|t| t == table.as_ref()) {
             untracked.push(table.into_owned());
@@ -412,11 +433,10 @@ struct Shape {
     key_columns: Vec<String>,
     /// Reads one row by its key, as materializing an update does.
     lookup: String,
-    /// Whether a changeset insert's values are the row the lookup would
-    /// read. The session reads them from the table when the changeset is
-    /// taken, through `_rowid_` for a rowid-only table, which a column of
-    /// that name shadows.
-    inserts_whole: bool,
+    /// Whether a column shadows the name the session reads the rowid back
+    /// through, which makes the session's changes to the table wrong. The
+    /// table filter leaves such a table untracked.
+    shadows_session_rowid: bool,
 }
 
 impl Shape {
@@ -532,7 +552,7 @@ impl Capture {
             scope: scope.to_string(),
             excluded: RefCell::new(HashSet::new()),
             denied,
-            generated: RefCell::new(HashMap::new()),
+            untrackable: RefCell::new(HashMap::new()),
             untracked: RefCell::new(Vec::new()),
             touched: RefCell::new(Vec::new()),
             dirty: Cell::new(false),
@@ -1044,7 +1064,7 @@ impl Capture {
             }
         }
         *self.filter.excluded.borrow_mut() = excluded;
-        self.filter.generated.borrow_mut().clear();
+        self.filter.untrackable.borrow_mut().clear();
         self.shapes.clear();
         self.schema_version = Some(version);
         Ok(())
@@ -1529,6 +1549,11 @@ impl Capture {
         budget: &mut u64,
     ) -> anyhow::Result<TableRows> {
         let shape = self.shape(connection, table)?;
+        // The filter saw the table before a column began to shadow the rowid.
+        anyhow::ensure!(
+            !shape.shadows_session_rowid,
+            "a column shadows the session's rowid"
+        );
         let width = shape.changeset_columns();
         let offset = usize::from(shape.rowid_only());
         // Kept on the connection, so it is parsed once per table shape.
@@ -1566,7 +1591,7 @@ impl Capture {
                 // recorded. Under a collation that key can name the row by
                 // another spelling, but the values are still the row's, and
                 // its key among them.
-                Op::Insert if shape.inserts_whole && new[offset..].iter().all(Option::is_some) => {
+                Op::Insert if new[offset..].iter().all(Option::is_some) => {
                     take_present(&mut new[offset..])?
                 }
                 // A key change reaches the changeset as a delete and an
@@ -1860,7 +1885,7 @@ fn read_shape(connection: &Connection, table: &str) -> anyhow::Result<Shape> {
     };
     let lookup = lookup_sql(table, &columns, &key, rowid);
     Ok(Shape {
-        inserts_whole: !key.is_empty() || !all.contains("_rowid_"),
+        shadows_session_rowid: key.is_empty() && all.contains(SESSION_ROWID),
         columns,
         key,
         rowid,
