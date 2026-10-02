@@ -91,6 +91,8 @@ fixture. It sends requests one at a time and asserts what the node counted:
   one output gate;
 - a lone node proves each write with at most one upload and exactly one
   ownership read;
+- with change export on, a write and the export of its commit share that
+  ownership read: at most 1.05 reads per write;
 - 64 concurrent writes to one cell share their uploads, at least two to an
   upload;
 - a cell activated into an existing isolate compiles nothing;

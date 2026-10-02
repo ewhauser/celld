@@ -50,6 +50,11 @@ fn fixture() -> PathBuf {
 
 impl Node {
     async fn start() -> Node {
+        Self::start_with(&[]).await
+    }
+
+    /// A node with `env` set on top of a clean `CELLD_` environment.
+    async fn start_with(env: &[(&str, &str)]) -> Node {
         let dir = tempfile::tempdir().unwrap();
         for file in ["wrangler.json", "index.js"] {
             std::fs::copy(fixture().join(file), dir.path().join(file)).unwrap();
@@ -67,6 +72,7 @@ impl Node {
                 command.env_remove(name);
             }
         }
+        command.envs(env.iter().copied());
         let child = command
             .args(["dev", "--no-watch", "--logs", "--port", &port.to_string()])
             .current_dir(dir.path())
@@ -293,6 +299,33 @@ async fn a_bucket_proof_write_is_one_upload_and_one_ownership_read() {
         other,
         0,
         "unexpected cell requests; after: {}",
+        after.cell_rows()
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_exported_write_shares_its_ownership_read_with_the_export() {
+    const WRITES: u64 = 40;
+    let node = Node::start_with(&[("CELLD_EXPORT", "1")]).await;
+    node.get("/do/write?cell=exported&bytes=10").await;
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    let before = node.metrics().await;
+    for _ in 0..WRITES {
+        node.get("/do/write?cell=exported&bytes=100").await;
+    }
+    // An export ticket that proves itself settles after the response; let
+    // the last one land so it is counted.
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    let after = node.metrics().await;
+    let owner_reads = after.bucket(&["cell_owner"], Some(&["get"]))
+        - before.bucket(&["cell_owner"], Some(&["get"]));
+    eprintln!("{WRITES} exported writes: {owner_reads} owner reads");
+    // The export of a commit rides the ownership read of the write that made
+    // it, so export costs no read of its own. A ticket that arrives after
+    // the write's read was asked still reads for itself, hence the margin.
+    assert!(
+        owner_reads as f64 <= WRITES as f64 * 1.05,
+        "{owner_reads} owner reads for {WRITES} exported writes; after: {}",
         after.cell_rows()
     );
 }
