@@ -159,11 +159,10 @@ tempfile = "3"
 thiserror = "2"
 # `stats` makes `stats.allocated` and `stats.resident` readable. The pressure
 # classifier needs their difference: the pages jemalloc keeps but no cell uses.
-# `background_threads` makes the shipped allocator purge those freed pages on
-# its timer. Runtime enablement alone failed in the Linux image, so the cgroup
-# hard-cap latch stayed closed after a node shed its cells.
+# `background_threads` is added per target in `crates/celld/Cargo.toml`, only
+# where jemalloc can run the thread: elsewhere it fails jemalloc's init.
 tikv-jemalloc-ctl = { version = "0.6", features = ["stats"] }
-tikv-jemallocator = { version = "0.6", features = ["background_threads", "stats"] }
+tikv-jemallocator = { version = "0.6", features = ["stats"] }
 tokio = "1"
 tokio-rustls = { version = "0.26", default-features = false, features = ["ring"] }
 tokio-stream = "0.1"
