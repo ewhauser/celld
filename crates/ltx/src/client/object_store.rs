@@ -713,14 +713,28 @@ impl ObjectStoreClient {
     /// Build the S3 key for an LTX file: `{path}/{level:04x}/{min}-{max}.ltx`.
     /// Ported from s3/replica_client.go:629, 677, 1040-1042.
     fn ltx_key(&self, level: i32, min_txid: TXID, max_txid: TXID) -> String {
-        let filename = ltx::format_filename(min_txid, max_txid);
-        format!("{}/{:04x}/{}", self.config.path, level, filename)
+        let mut key = self.level_prefix_with_room(level, crate::LTX_FILENAME_LEN);
+        crate::push_ltx_filename(&mut key, min_txid, max_txid);
+        key
     }
 
     /// Prefix for listing a level: `{path}/{level:04x}/`.
     /// Ported from s3/replica_client.go:1363.
     fn level_prefix(&self, level: i32) -> String {
-        format!("{}/{:04x}/", self.config.path, level)
+        self.level_prefix_with_room(level, 0)
+    }
+
+    /// [`Self::level_prefix`] in a buffer with `room` more bytes reserved, so
+    /// a caller appending a filename allocates once. The level is written as
+    /// `{:04x}` would write the `i32`: two's complement for a negative level.
+    fn level_prefix_with_room(&self, level: i32, room: usize) -> String {
+        let path = &self.config.path;
+        let mut prefix = String::with_capacity(path.len() + 1 + 8 + 1 + room);
+        prefix.push_str(path);
+        prefix.push('/');
+        crate::push_hex(&mut prefix, u64::from(level as u32), 4);
+        prefix.push('/');
+        prefix
     }
 
     /// Root prefix for delete-all: `{path}/`. (s3/replica_client.go:1114).
@@ -783,7 +797,9 @@ impl ReplicaClient for ObjectStoreClient {
         // supported production stores return each page in lexical order. The
         // compactor validates continuity and fails closed for an unordered
         // custom store.
-        let offset = ObjPath::from(format!("{}{:016x}", self.level_prefix(level), seek.0));
+        let mut offset = self.level_prefix_with_room(level, 16);
+        crate::push_hex(&mut offset, seek.0, 16);
+        let offset = ObjPath::from(offset);
         let mut listed = store.list_with_offset(Some(&prefix), &offset);
         let mut infos = Vec::with_capacity(limit.min(256));
         while let Some(meta) = listed.try_next().await.map_err(map_os_error)? {
