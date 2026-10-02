@@ -428,7 +428,7 @@ fn put(f: &Fixture, scope: &str, key: &str, value: &Value) {
         .execute(
             "INSERT INTO _cf_KV(scope, k, v) VALUES (?1, ?2, ?3) \
              ON CONFLICT(scope, k) DO UPDATE SET v = excluded.v",
-            rusqlite::params![scope, key, to_sql(value)],
+            rusqlite::params![scope, key, Param(value)],
         )
         .unwrap();
 }
@@ -2054,4 +2054,213 @@ fn kv_deny_rules_address_the_two_exported_names_independently() {
             [expected]
         );
     }
+}
+
+/// Compare `actual` with the golden file `name` under `testdata/`, or
+/// rewrite the file when `CELLD_BLESS` is set.
+fn golden(name: &str, actual: &str) {
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("storage/export_capture/testdata")
+        .join(name);
+    if std::env::var_os("CELLD_BLESS").is_some() {
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, actual).unwrap();
+        return;
+    }
+    let expected = std::fs::read_to_string(&path)
+        .unwrap_or_else(|error| panic!("{}: {error}; run with CELLD_BLESS=1", path.display()));
+    // Line by line, so a failure names the record that moved.
+    let (expected, actual): (Vec<&str>, Vec<&str>) =
+        (expected.lines().collect(), actual.lines().collect());
+    for (i, (expected, actual)) in expected.iter().zip(&actual).enumerate() {
+        assert_eq!(actual, expected, "{name}: line {}", i + 1);
+    }
+    assert_eq!(actual.len(), expected.len(), "{name}: line count");
+}
+
+/// The records a commit becomes, one JSON object per line.
+fn encoded(commit: &CapturedCommit) -> String {
+    records(commit)
+        .iter()
+        .map(|record| serde_json::to_string(record).unwrap() + "\n")
+        .collect()
+}
+
+const PINNED: &str = r#"
+    CREATE TABLE keyed (id TEXT PRIMARY KEY, n INTEGER, r REAL, num NUMERIC, b BLOB, t TEXT);
+    CREATE TABLE plain (v INTEGER, w TEXT);
+    CREATE TABLE norowid (a INTEGER, b TEXT, v BLOB, PRIMARY KEY (b, a)) WITHOUT ROWID;
+    CREATE TABLE nocase (k TEXT PRIMARY KEY COLLATE NOCASE, v TEXT);
+    CREATE TABLE alias (id INTEGER PRIMARY KEY, v TEXT);
+    CREATE TABLE kv (id INTEGER PRIMARY KEY, v TEXT);
+    CREATE TABLE _cf_KV (scope TEXT, k TEXT, v, PRIMARY KEY (scope, k)) WITHOUT ROWID;
+"#;
+
+/// The exact records of an insert-heavy, an update-heavy and a mixed commit
+/// over every table shape, so that any change to what capture emits, down
+/// to row order, shows up here.
+#[test]
+fn pinned_records_of_insert_update_and_mixed_commits() {
+    let mut f = Fixture::new(PINNED);
+    let mut out = String::new();
+
+    // Insert-heavy, including rows changed again or rekeyed before the pull.
+    f.run(
+        "INSERT INTO keyed VALUES
+            ('a', 1, 1, '1.0', x'00ff', 'tab' || char(9) || 'and \"quotes\" \\ ü'),
+            ('b', -9223372036854775808, 2.5, 'text', NULL, char(1) || 'é'),
+            ('c', NULL, 1e300, 3, x'', ''),
+            ('d', 4, 4, 4, NULL, 'before');
+         UPDATE keyed SET t = 'after', n = 40 WHERE id = 'd';
+         INSERT INTO plain VALUES (1, 'one'), (2, NULL), (3.5, 'three');
+         INSERT INTO norowid VALUES (1, 'x', x'01'), (2, 'x', NULL), (1, 'y', x'02');
+         INSERT INTO nocase VALUES ('Mixed', 'v1'), ('lower', 'v2'), ('x', 'vx');
+         UPDATE nocase SET k = 'X' WHERE k = 'x';
+         INSERT INTO alias VALUES (10, 'ten'), (NULL, 'auto');
+         INSERT INTO kv VALUES (1, 'sql kv');",
+    );
+    put(&f, SCOPE, "legacy", &text(r#"{ "x": [1, 2] }"#));
+    put(&f, SCOPE, "num", &int(7));
+    put(&f, SCOPE, "real", &Value::Real(0.5));
+    put(&f, SCOPE, "v8", &v8("({a: 1, b: [true, null]})"));
+    put(&f, SCOPE, "bad", &Value::Blob(vec![0xff, 0x0f]));
+    put(&f, SCOPE, "notjson", &text("{oops"));
+    put(&f, "other-scope", "hidden", &int(1));
+    out += "# insert-heavy\n";
+    out += &encoded(&f.pull());
+
+    // Update-heavy: partial updates, affinity, key and rowid changes, a
+    // collated key change, and KV overwrites.
+    f.run(
+        "UPDATE keyed SET n = n + 1 WHERE id IN ('a', 'c');
+         UPDATE keyed SET r = 7 WHERE id = 'c';
+         UPDATE keyed SET id = 'z' WHERE id = 'd';
+         UPDATE keyed SET b = x'abcdef', t = NULL WHERE id = 'b';
+         UPDATE plain SET w = 'uno' WHERE v = 1;
+         UPDATE plain SET rowid = 100 WHERE v = 2;
+         UPDATE norowid SET v = x'09' WHERE b = 'x';
+         UPDATE nocase SET k = 'MIXED', v = 'v1b' WHERE k = 'mixed';
+         UPDATE alias SET v = 'TEN' WHERE id = 10;
+         UPDATE kv SET v = 'sql kv 2';",
+    );
+    put(&f, SCOPE, "legacy", &text("[3]"));
+    put(&f, SCOPE, "v8", &v8("new Map([['k', 1n]])"));
+    out += "# update-heavy\n";
+    out += &encoded(&f.pull());
+
+    // Mixed inserts, updates and deletes.
+    f.run(
+        "INSERT INTO keyed VALUES ('e', 5, 5.5, 5, x'05', 'five');
+         DELETE FROM keyed WHERE id = 'a';
+         UPDATE keyed SET t = 'changed' WHERE id = 'b';
+         INSERT INTO plain VALUES (4, 'four');
+         DELETE FROM plain WHERE v = 3.5;
+         DELETE FROM norowid WHERE a = 1 AND b = 'y';
+         INSERT INTO norowid VALUES (3, 'y', x'03');
+         INSERT INTO alias VALUES (20, 'twenty');
+         DELETE FROM alias WHERE id = 10;
+         DELETE FROM kv;",
+    );
+    put(&f, SCOPE, "new", &v8("'fresh'"));
+    put(&f, SCOPE, "num", &int(8));
+    f.run(&format!(
+        "DELETE FROM _cf_KV WHERE scope = '{SCOPE}' AND k = 'bad'"
+    ));
+    out += "# mixed\n";
+    out += &encoded(&f.pull());
+
+    golden("pinned_records.jsonl", &out);
+}
+
+/// A rowid-only table with a column named `_rowid_`, which shadows the
+/// alias the session reads the rowid through.
+#[test]
+fn pinned_records_of_a_table_shadowing_the_session_rowid() {
+    let mut f = Fixture::new(
+        "CREATE TABLE shadowed (_rowid_ TEXT, v INTEGER);
+         CREATE TABLE other (id INTEGER PRIMARY KEY, v INTEGER);",
+    );
+    let mut out = String::new();
+    f.run(
+        "INSERT INTO shadowed VALUES ('col', 1), (NULL, 2), ('3', 3);
+         INSERT INTO other VALUES (1, 1);",
+    );
+    out += "# insert\n";
+    out += &encoded(&f.pull());
+    f.run("UPDATE shadowed SET v = v + 10; DELETE FROM shadowed WHERE v = 12;");
+    out += "# update\n";
+    out += &encoded(&f.pull());
+    golden("pinned_shadowed_rowid.jsonl", &out);
+}
+
+/// Which tables keep their rows and which become `bulk` at every budget
+/// across the thresholds of a two-table commit. The second table fits only
+/// in what the first one's encoded records left, so this pins the exact
+/// byte accounting, not only that a budget is enforced.
+#[test]
+fn pinned_budget_thresholds() {
+    const LO: u64 = 6_000;
+    const HI: u64 = 11_000;
+    let long = "a_column_name_long_enough_to_weigh_on_the_encoded_header";
+    let schema = format!(
+        "CREATE TABLE first (id INTEGER PRIMARY KEY, {long}_1 TEXT, {long}_2 TEXT);
+         CREATE TABLE second (id TEXT PRIMARY KEY, payload TEXT);"
+    );
+    let first = "\"quoted\" \\ é\n".repeat(70);
+    let write = |f: &Fixture| {
+        for id in 0..3 {
+            f.connection
+                .execute(
+                    "INSERT INTO first VALUES (?1, ?2, ?3)",
+                    rusqlite::params![id, first, format!("{id}{first}")],
+                )
+                .unwrap();
+        }
+        for id in ["p", "q"] {
+            f.connection
+                .execute(
+                    "INSERT INTO second VALUES (?1, ?2)",
+                    rusqlite::params![id, "x".repeat(900)],
+                )
+                .unwrap();
+        }
+    };
+    let outcome = |budget: u64| {
+        let mut f = Fixture::with_settings(
+            &schema,
+            Settings {
+                max_tx_bytes: budget,
+            },
+        );
+        write(&f);
+        // Below this the session overflows instead, at a point that
+        // depends on the platform's allocator.
+        assert!(f.capture.memory_used() < LO, "{}", f.capture.memory_used());
+        let commit = f.pull();
+        let rows: Vec<String> = commit
+            .tables
+            .iter()
+            .map(|t| format!("{}:{}", t.table, t.rows.len()))
+            .collect();
+        let bulk: Vec<&str> = commit.bulk.iter().map(|t| t.table.as_str()).collect();
+        let snapshot: Vec<String> = commit
+            .snapshot
+            .iter()
+            .flat_map(|s| &s.tables)
+            .map(|t| format!("{}:{}", t.table, t.rows.len()))
+            .collect();
+        format!("rows={rows:?} bulk={bulk:?} snapshot={snapshot:?}")
+    };
+    let mut out = String::new();
+    let mut from = LO;
+    let mut last = outcome(LO);
+    for budget in LO + 1..=HI {
+        let now = outcome(budget);
+        if now != last {
+            out += &format!("{from}..{budget}: {last}\n");
+            (from, last) = (budget, now);
+        }
+    }
+    out += &format!("{from}..={HI}: {last}\n");
+    golden("pinned_budget_thresholds.txt", &out);
 }

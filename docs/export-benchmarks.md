@@ -23,14 +23,16 @@ fixtures only for this target; ordinary node builds do not include them.
 | `export_json` | 1, 128 and 1,024 rows; mixed SQLite values | JSON serialization/deserialization; encoded bytes |
 | `export_fragments` | 1,024 rows with 128-byte or 4-KiB text payloads, 64-KiB record cap | Split and reassemble separately; original encoded bytes |
 | `export_consumer` | 128/1,024 commits, 1/32 streams, duplicate delivery, optional complete repair snapshot | Ingest and state derivation separately; delivered records, including duplicates and metadata |
-| `capture` | 1/64/512 rows, 128-byte/4-KiB blobs; 64 oversized 32-KiB rows | Plain SQLite write, write plus checkpoint, checkpoint alone; updated rows |
+| `capture` | 1/64/512 rows, 128-byte/4-KiB blobs; 64 oversized 32-KiB rows | Plain SQLite write, write plus checkpoint, checkpoint alone; updated rows. Checkpoint of reinserted rows alone; inserted rows |
 | `parquet` | 64/1,024 mixed-value records over 32 streams | Production Parquet encoding/decoding; records |
 | `delivery_cache` | 64 historical/64 active streams, 4,096/64, 1,024/1,024 | Production cache lookups, position updates and spill within a transaction; 64 acknowledgements per iteration |
 | `audit_cache` | 16/128 Parquet objects, one stream and 64 commits per object | Cold/warm index refresh and stream summaries; objects. One-cell state derivation; delivered records for that cell |
 
 Capture fixtures update a fixed-size in-memory table. Capture sessions and schema
 caches are warmed first. Checkpoint-only timing excludes the preceding write;
-every write is immediately followed by a checkpoint. The oversize case verifies
+every write is immediately followed by a checkpoint. The insert case deletes and
+reinserts every row outside the timed region, pulling the deletes there too, and
+times only the pull of the inserts. The oversize case verifies
 that capture returns a bulk marker instead of row afterimages. Compare plain
 writes with writes plus checkpoint to estimate capture overhead for these cases.
 This does not include LTX publication or a durable SQLite commit to disk.

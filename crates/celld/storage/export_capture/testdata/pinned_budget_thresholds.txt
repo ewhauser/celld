@@ -1,0 +1,4 @@
+6000..7772: rows=[] bulk=["second"] snapshot=["first:3"]
+7772..7824: rows=[] bulk=["first", "second"] snapshot=[]
+7824..9756: rows=["first:3"] bulk=["second"] snapshot=[]
+9756..=11000: rows=["first:3", "second:2"] bulk=[] snapshot=[]

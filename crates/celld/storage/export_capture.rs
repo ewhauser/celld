@@ -397,7 +397,7 @@ unsafe extern "C" fn table_filter(context: *mut c_void, table: *const c_char) ->
 }
 
 /// A table's columns as the session records them, and how to key it.
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 struct Shape {
     /// Ordinary columns in declared order: the columns the changeset carries
     /// after any leading rowid. Generated and hidden columns are not in a
@@ -408,6 +408,15 @@ struct Shape {
     key: Vec<usize>,
     /// The name that addresses the rowid of a rowid-only table.
     rowid: Option<&'static str>,
+    /// The exported key: the declared key's columns, or [`ROWID_KEY_COLUMN`].
+    key_columns: Vec<String>,
+    /// Reads one row by its key, as materializing an update does.
+    lookup: String,
+    /// Whether a changeset insert's values are the row the lookup would
+    /// read. The session reads them from the table when the changeset is
+    /// taken, through `_rowid_` for a rowid-only table, which a column of
+    /// that name shadows.
+    inserts_whole: bool,
 }
 
 impl Shape {
@@ -418,14 +427,6 @@ impl Shape {
     /// The column count a changeset reports for the table.
     fn changeset_columns(&self) -> usize {
         self.columns.len() + usize::from(self.rowid_only())
-    }
-
-    fn key_columns(&self) -> Vec<String> {
-        if self.rowid_only() {
-            vec![ROWID_KEY_COLUMN.to_string()]
-        } else {
-            self.key.iter().map(|&i| self.columns[i].clone()).collect()
-        }
     }
 }
 
@@ -483,7 +484,7 @@ pub(crate) struct Capture {
     /// `max_tx_bytes`.
     overflowed: bool,
     seq: u64,
-    shapes: HashMap<String, Shape>,
+    shapes: HashMap<String, Rc<Shape>>,
     /// The schema cookie `shapes` and the excluded set were read at.
     schema_version: Option<i64>,
     /// Every table name this cell has exported, with its generation.
@@ -810,12 +811,12 @@ impl Capture {
                 return self.bulk_everything(connection, now_ms, changes);
             }
             match self.changeset() {
-                Ok(rows) => {
-                    let rows = rows
+                Ok(changed) => {
+                    let changed = changed
                         .into_iter()
-                        .filter(|change| self.carries_rows(&change.table, &whole))
+                        .filter(|table| self.carries_rows(&table.table, &whole))
                         .collect();
-                    let (materialized, failed) = self.materialize(connection, rows);
+                    let (materialized, failed) = self.materialize(connection, changed);
                     tables = materialized;
                     for table in failed {
                         // Changes recorded under an earlier shape of the
@@ -929,11 +930,12 @@ impl Capture {
         // stream: announced once per capture, and again with each snapshot.
         let snapshotted = snapshot.iter().flat_map(|s| s.tables.iter());
         let carried: Vec<(TableGen, bool)> = snapshotted
-            .map(|t| (t.table_gen(), true))
-            .chain(tables.iter().map(|t| (t.table_gen(), false)))
-            .map(|(tg, always)| {
-                let table = self.storage_name(&tg.table).to_string();
-                (TableGen { table, ..tg }, always)
+            .map(|t| (t, true))
+            .chain(tables.iter().map(|t| (t, false)))
+            .map(|(t, always)| {
+                let table = self.storage_name(&t.table).to_string();
+                let generation = t.generation;
+                (TableGen { table, generation }, always)
             })
             .chain(bulk.iter().map(|tg| (tg.clone(), false)))
             .collect();
@@ -1387,7 +1389,7 @@ impl Capture {
         table: &str,
         budget: &mut u64,
     ) -> anyhow::Result<Option<TableRows>> {
-        let shape = self.shape(connection, table)?.clone();
+        let shape = self.shape(connection, table)?;
         let mut statement = connection.prepare(&scan_sql(table, &shape))?;
         let mut rows = statement.query([])?;
         // A rowid-only table's scan leads with the rowid, its key.
@@ -1416,22 +1418,23 @@ impl Capture {
             table: table.to_string(),
             generation: self.generation(table),
             columns: shape.columns.clone(),
-            key_columns: shape.key_columns(),
+            key_columns: shape.key_columns.clone(),
             rows: changes,
         }))
     }
 
-    fn shape(&mut self, connection: &Connection, table: &str) -> anyhow::Result<&Shape> {
-        if !self.shapes.contains_key(table) {
-            let shape = read_shape(connection, table)?;
-            self.shapes.insert(table.to_string(), shape);
+    fn shape(&mut self, connection: &Connection, table: &str) -> anyhow::Result<Rc<Shape>> {
+        if let Some(shape) = self.shapes.get(table) {
+            return Ok(Rc::clone(shape));
         }
-        Ok(&self.shapes[table])
+        let shape = Rc::new(read_shape(connection, table)?);
+        self.shapes.insert(table.to_string(), Rc::clone(&shape));
+        Ok(shape)
     }
 
     /// Take the session's changeset. The session is left as it was; the
     /// caller recreates it.
-    fn changeset(&self) -> anyhow::Result<Vec<Change>> {
+    fn changeset(&self) -> anyhow::Result<Vec<TableChanges>> {
         struct Output {
             bytes: Vec<u8>,
             limit: usize,
@@ -1477,39 +1480,24 @@ impl Capture {
     fn materialize(
         &mut self,
         connection: &Connection,
-        changes: Vec<Change>,
+        changed: Vec<TableChanges>,
     ) -> (Vec<TableRows>, Vec<String>) {
-        let mut order: Vec<String> = Vec::new();
-        let mut by_table: HashMap<String, Vec<Change>> = HashMap::new();
-        {
-            let excluded = self.filter.excluded.borrow();
-            for change in changes {
-                // The excluded set may have grown since the filter saw the
-                // table, when a virtual table was created mid-session.
-                if excluded.contains(&change.table) {
-                    continue;
-                }
-                if !by_table.contains_key(&change.table) {
-                    order.push(change.table.clone());
-                }
-                by_table
-                    .entry(change.table.clone())
-                    .or_default()
-                    .push(change);
-            }
-        }
         let mut tables = Vec::new();
         let mut bulk = Vec::new();
         let mut budget = self.settings.max_tx_bytes;
-        for table in order {
-            let changes = by_table.remove(&table).unwrap_or_default();
+        for TableChanges { table, changes } in changed {
+            // The excluded set may have grown since the filter saw the
+            // table, when a virtual table was created mid-session.
+            if self.filter.excluded.borrow().contains(&table) {
+                continue;
+            }
             let before = budget;
             let rows = self
                 .materialize_table(connection, &table, changes, &mut budget)
                 .and_then(|rows| kv::reshape(rows, &self.filter.scope, crate::export_kv::decode))
                 .and_then(|rows| {
                     if let Some(rows) = &rows {
-                        let bytes = serde_json::to_vec(rows)?.len() as u64;
+                        let bytes = json_len(rows)?;
                         anyhow::ensure!(
                             bytes <= before,
                             "reshaped rows exceed export transaction budget"
@@ -1540,25 +1528,27 @@ impl Capture {
         changes: Vec<Change>,
         budget: &mut u64,
     ) -> anyhow::Result<TableRows> {
-        let shape = self.shape(connection, table)?.clone();
+        let shape = self.shape(connection, table)?;
         let width = shape.changeset_columns();
         let offset = usize::from(shape.rowid_only());
-        let mut lookup = connection.prepare(&lookup_sql(table, &shape)?)?;
+        // Kept on the connection, so it is parsed once per table shape.
+        let mut lookup = connection.prepare_cached(&shape.lookup)?;
         let mut rows = Vec::with_capacity(changes.len());
-        for change in changes {
+        for Change {
+            op,
+            columns,
+            mut old,
+            mut new,
+        } in changes
+        {
             // A mismatch means the table's schema changed under the session.
             anyhow::ensure!(
-                change.old.len() == width && change.new.len() == width,
-                "changeset has {} columns, the table has {width}",
-                change.old.len()
+                columns == width,
+                "changeset has {columns} columns, the table has {width}"
             );
             // An insert's key is in its new values; an update's and a
             // delete's are in the old ones.
-            let keyed = if change.op == Op::Insert {
-                &change.new
-            } else {
-                &change.old
-            };
+            let keyed = if op == Op::Insert { &new } else { &old };
             let key: Vec<Value> = if shape.rowid_only() {
                 vec![present(&keyed[0])?]
             } else {
@@ -1568,16 +1558,20 @@ impl Capture {
                     .map(|&i| present(&keyed[i + offset]))
                     .collect::<anyhow::Result<_>>()?
             };
-            let row = if change.op == Op::Delete {
+            let row = match op {
                 // The session stores a deleted row's full pre-image.
-                change.old[offset..]
-                    .iter()
-                    .map(present)
-                    .collect::<anyhow::Result<_>>()?
-            } else {
+                Op::Delete => take_present(&mut old[offset..])?,
+                // The session read an insert's values from the table as the
+                // changeset was taken, after the commit, by the key it
+                // recorded. Under a collation that key can name the row by
+                // another spelling, but the values are still the row's, and
+                // its key among them.
+                Op::Insert if shape.inserts_whole && new[offset..].iter().all(Option::is_some) => {
+                    take_present(&mut new[offset..])?
+                }
                 // A key change reaches the changeset as a delete and an
                 // insert, so an update's row is still found by its old key.
-                read_row(&mut lookup, &key)?
+                _ => read_row(&mut lookup, &key)?,
             };
             let bytes: u64 = key.iter().chain(&row).map(encoded_size).sum();
             anyhow::ensure!(
@@ -1585,13 +1579,13 @@ impl Capture {
                 "materialized rows exceed export transaction budget"
             );
             *budget -= bytes;
-            if change.op == Op::Update && !shape.key.is_empty() {
+            if op == Op::Update && !shape.key.is_empty() {
                 let current_key: Vec<Value> = shape.key.iter().map(|&i| row[i].clone()).collect();
                 if current_key != key {
                     // Non-binary collations may let SQLite match an old key to
                     // a different spelling. Retire the exact exported old key.
                     let extra: u64 = current_key.iter().map(encoded_size).sum::<u64>()
-                        + change.old[offset..]
+                        + old[offset..]
                             .iter()
                             .zip(&row)
                             .map(|(old, now)| encoded_size(old.as_ref().unwrap_or(now)))
@@ -1601,7 +1595,7 @@ impl Capture {
                         "key update exceeds export transaction budget"
                     );
                     *budget -= extra;
-                    let old_row = change.old[offset..]
+                    let old_row = old[offset..]
                         .iter()
                         .zip(&row)
                         .map(|(old, now)| old.as_ref().unwrap_or(now).clone())
@@ -1611,13 +1605,13 @@ impl Capture {
                     continue;
                 }
             }
-            rows.push(RowChange(change.op, key, row));
+            rows.push(RowChange(op, key, row));
         }
         Ok(TableRows {
             table: table.to_string(),
             generation: self.generation(table),
             columns: shape.columns.clone(),
-            key_columns: shape.key_columns(),
+            key_columns: shape.key_columns.clone(),
             rows,
         })
     }
@@ -1637,30 +1631,52 @@ impl Drop for Capture {
     }
 }
 
-/// One changeset entry. `old` and `new` hold one slot per changeset column;
-/// a slot is `None` where the changeset carries no value (an insert's old
-/// values, a delete's new values, an update's unchanged columns).
+/// The changes of one table, in changeset order.
+#[derive(Debug)]
+struct TableChanges {
+    table: String,
+    changes: Vec<Change>,
+}
+
+/// One changeset entry. `old` and `new` hold one slot per changeset column,
+/// or none where the operation has no such image: an insert's old values, a
+/// delete's new values. A slot is `None` where the changeset carries no
+/// value, as for an update's unchanged columns.
 #[derive(Debug)]
 struct Change {
-    table: String,
     op: Op,
+    /// The changeset's column count for the table.
+    columns: usize,
     old: Vec<Option<Value>>,
     new: Vec<Option<Value>>,
 }
 
 fn present(value: &Option<Value>) -> anyhow::Result<Value> {
-    value
-        .clone()
-        .ok_or_else(|| anyhow::anyhow!("changeset lacks a key or pre-image value"))
+    value.clone().ok_or_else(lacking)
 }
 
+/// Move the values out of `values`, which must all be present.
+fn take_present(values: &mut [Option<Value>]) -> anyhow::Result<Vec<Value>> {
+    values
+        .iter_mut()
+        .map(|value| value.take().ok_or_else(lacking))
+        .collect()
+}
+
+fn lacking() -> anyhow::Error {
+    anyhow::anyhow!("changeset lacks a key or pre-image value")
+}
+
+/// The changes of each table, in the order the changeset first names the
+/// tables.
+///
 /// # Safety
 ///
 /// `buffer` must hold `size` bytes of changeset.
-unsafe fn decode_changeset(size: c_int, buffer: *mut c_void) -> anyhow::Result<Vec<Change>> {
-    let mut changes = Vec::new();
+unsafe fn decode_changeset(size: c_int, buffer: *mut c_void) -> anyhow::Result<Vec<TableChanges>> {
+    let mut changed: Vec<TableChanges> = Vec::new();
     if size == 0 {
-        return Ok(changes);
+        return Ok(changed);
     }
     let mut iter = ptr::null_mut();
     let rc = unsafe { ffi::sqlite3changeset_start(&mut iter, size, buffer) };
@@ -1686,8 +1702,9 @@ unsafe fn decode_changeset(size: c_int, buffer: *mut c_void) -> anyhow::Result<V
             other => anyhow::bail!("unexpected changeset op {other}"),
         };
         let columns = usize::try_from(columns)?;
-        let mut old = vec![None; columns];
-        let mut new = vec![None; columns];
+        let image = |has: bool| if has { vec![None; columns] } else { Vec::new() };
+        let mut old = image(op != Op::Insert);
+        let mut new = image(op != Op::Delete);
         for i in 0..columns {
             let column = c_int::try_from(i)?;
             if op != Op::Insert {
@@ -1703,11 +1720,28 @@ unsafe fn decode_changeset(size: c_int, buffer: *mut c_void) -> anyhow::Result<V
                 new[i] = unsafe { from_sqlite(value) };
             }
         }
-        changes.push(Change {
-            table: unsafe { CStr::from_ptr(table) }
-                .to_string_lossy()
-                .into_owned(),
+        // A table's changes come together, so its name is compared, not
+        // copied, for all but the first.
+        let table = unsafe { CStr::from_ptr(table) };
+        let at = match changed.last() {
+            Some(last) if last.table.as_bytes() == table.to_bytes() => changed.len() - 1,
+            _ => {
+                let table = table.to_string_lossy();
+                match changed.iter().position(|t| t.table == table) {
+                    Some(at) => at,
+                    None => {
+                        changed.push(TableChanges {
+                            table: table.into_owned(),
+                            changes: Vec::new(),
+                        });
+                        changed.len() - 1
+                    }
+                }
+            }
+        };
+        changed[at].changes.push(Change {
             op,
+            columns,
             old,
             new,
         });
@@ -1718,7 +1752,7 @@ unsafe fn decode_changeset(size: c_int, buffer: *mut c_void) -> anyhow::Result<V
         rc == ffi::SQLITE_OK,
         "sqlite3changeset_finalize failed: {rc}"
     );
-    Ok(changes)
+    Ok(changed)
 }
 
 /// # Safety
@@ -1767,14 +1801,19 @@ fn from_row(value: rusqlite::types::ValueRef<'_>) -> Value {
     }
 }
 
-fn to_sql(value: &Value) -> rusqlite::types::Value {
-    use rusqlite::types::Value as Sql;
-    match value {
-        Value::Null => Sql::Null,
-        Value::Integer(i) => Sql::Integer(*i),
-        Value::Real(r) => Sql::Real(*r),
-        Value::Text(t) => Sql::Text(t.clone()),
-        Value::Blob(b) => Sql::Blob(b.clone()),
+/// A value bound as a statement parameter without copying it first.
+struct Param<'a>(&'a Value);
+
+impl rusqlite::ToSql for Param<'_> {
+    fn to_sql(&self) -> rusqlite::Result<rusqlite::types::ToSqlOutput<'_>> {
+        use rusqlite::types::ValueRef;
+        Ok(rusqlite::types::ToSqlOutput::Borrowed(match self.0 {
+            Value::Null => ValueRef::Null,
+            Value::Integer(i) => ValueRef::Integer(*i),
+            Value::Real(r) => ValueRef::Real(*r),
+            Value::Text(t) => ValueRef::Text(t.as_bytes()),
+            Value::Blob(b) => ValueRef::Blob(b),
+        }))
     }
 }
 
@@ -1814,30 +1853,38 @@ fn read_shape(connection: &Connection, table: &str) -> anyhow::Result<Shape> {
     } else {
         None
     };
+    let key_columns = if key.is_empty() {
+        vec![ROWID_KEY_COLUMN.to_string()]
+    } else {
+        key.iter().map(|&i| columns[i].clone()).collect()
+    };
+    let lookup = lookup_sql(table, &columns, &key, rowid);
     Ok(Shape {
+        inserts_whole: !key.is_empty() || !all.contains("_rowid_"),
         columns,
         key,
         rowid,
+        key_columns,
+        lookup,
     })
 }
 
-fn lookup_sql(table: &str, shape: &Shape) -> anyhow::Result<String> {
-    let columns: Vec<String> = shape.columns.iter().map(|c| quote(c)).collect();
-    let predicate = match shape.rowid {
+fn lookup_sql(table: &str, columns: &[String], key: &[usize], rowid: Option<&str>) -> String {
+    let selected: Vec<String> = columns.iter().map(|c| quote(c)).collect();
+    let predicate = match rowid {
         Some(rowid) => format!("{rowid} = ?1"),
-        None => shape
-            .key
+        None => key
             .iter()
             .enumerate()
-            .map(|(n, &i)| format!("{} = ?{}", quote(&shape.columns[i]), n + 1))
+            .map(|(n, &i)| format!("{} = ?{}", quote(&columns[i]), n + 1))
             .collect::<Vec<_>>()
             .join(" AND "),
     };
-    Ok(format!(
+    format!(
         "SELECT {} FROM main.{} WHERE {predicate}",
-        columns.join(", "),
+        selected.join(", "),
         quote(table)
-    ))
+    )
 }
 
 /// The key-value tables are exported in another shape than they are stored
@@ -1938,9 +1985,25 @@ fn encoded_size(value: &Value) -> u64 {
     bytes as u64 + 1
 }
 
+/// The length of `rows` encoded as JSON, without keeping the JSON.
+fn json_len(rows: &TableRows) -> serde_json::Result<u64> {
+    struct Count(u64);
+    impl std::io::Write for Count {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0 += bytes.len() as u64;
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    let mut count = Count(0);
+    serde_json::to_writer(&mut count, rows)?;
+    Ok(count.0)
+}
+
 fn read_row(lookup: &mut rusqlite::Statement<'_>, key: &[Value]) -> anyhow::Result<Vec<Value>> {
-    let params: Vec<rusqlite::types::Value> = key.iter().map(to_sql).collect();
-    let mut rows = lookup.query(rusqlite::params_from_iter(params))?;
+    let mut rows = lookup.query(rusqlite::params_from_iter(key.iter().map(Param)))?;
     let row = rows
         .next()?
         .ok_or_else(|| anyhow::anyhow!("changed row is missing after its commit"))?;
@@ -1968,9 +2031,9 @@ pub(crate) fn table_scan(connection: &Connection, table: &str) -> anyhow::Result
         None => columns.join(", "),
     };
     Ok(TableScan {
-        key_columns: shape.key_columns(),
+        key_columns: shape.key_columns,
         sql: format!("SELECT {selected} FROM main.{}", quote(table)),
-        key: shape.key.clone(),
+        key: shape.key,
         columns: shape.columns,
     })
 }
