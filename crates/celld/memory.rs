@@ -321,10 +321,12 @@ fn trim_c_heap() {}
 /// only when a thread next calls the allocator, which a node that just shed its
 /// working set does not do. This repairs what RSS reports, not the decision.
 ///
-/// macOS has no background thread, so the failure is expected there and is
-/// logged rather than raised. It matters to an operator: without the thread,
-/// retention is never purged, and the absolute cap in `PressureConfig` is the
-/// only thing between the process and a kill by the operating system.
+/// jemalloc runs the thread only on Linux and FreeBSD, where the build also
+/// enables it at startup (`crates/celld/Cargo.toml`). Elsewhere, macOS
+/// included, there is nothing to tune: freed pages return only when a thread
+/// next allocates, and the absolute cap in `PressureConfig` is the only thing
+/// between the process and a kill by the operating system.
+#[cfg(any(target_os = "linux", target_os = "freebsd"))]
 pub fn tune_allocator() {
     if let Err(error) = tikv_jemalloc_ctl::background_thread::write(true) {
         tracing::warn!(
@@ -334,6 +336,9 @@ pub fn tune_allocator() {
         );
     }
 }
+
+#[cfg(not(any(target_os = "linux", target_os = "freebsd")))]
+pub fn tune_allocator() {}
 
 #[cfg(all(test, celld_internal_tests))]
 mod internal_tests {
