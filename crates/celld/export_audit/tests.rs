@@ -1441,10 +1441,7 @@ impl celld_export_snowflake::consume::Land for FakeSnowflake {
         Ok(vec![rows.to_vec()])
     }
 
-    fn append(
-        &self,
-        rows: &Self::Append,
-    ) -> Result<(), celld_export_snowflake::WarehouseError> {
+    fn append(&self, rows: &Self::Append) -> Result<(), celld_export_snowflake::WarehouseError> {
         let mut records = self.records.lock().unwrap();
         records.extend(rows.iter().map(|r| r.to_record().unwrap()));
         Ok(())
