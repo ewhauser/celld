@@ -185,8 +185,9 @@ mod sink {
             }
             let pending: Vec<Pending> = records
                 .into_iter()
-                .map(|SinkRecord { seq, record }| {
-                    let message = message(&record).map_err(|error| Arc::from(format!("{error:#}")));
+                .map(|SinkRecord { seq, record, json }| {
+                    let message = encoded_message(&record, json)
+                        .map_err(|error| Arc::from(format!("{error:#}")));
                     let bytes = message
                         .as_ref()
                         .map_or(0, |m| (m.key.len() + m.payload.len()) as u64);
@@ -236,10 +237,22 @@ mod sink {
 
     /// The topic message for one record.
     pub fn message(record: &Record) -> anyhow::Result<Message> {
-        let payload = serde_json::to_vec(record)?;
+        encoded_message(record, None)
+    }
+
+    /// The topic message for one record whose JSON may already be encoded:
+    /// those bytes are the payload, and the record is not encoded again.
+    fn encoded_message(record: &Record, json: Option<bytes::Bytes>) -> anyhow::Result<Message> {
+        let payload = match json {
+            Some(json) => {
+                debug_assert_eq!(json, serde_json::to_vec(record)?, "stale record JSON");
+                json
+            }
+            None => serde_json::to_vec(record)?.into(),
+        };
         Ok(Message {
             key: stream_key(&record.envelope.stream),
-            payload: payload.into(),
+            payload,
             event_ts_ms: record.envelope.committed_at,
         })
     }

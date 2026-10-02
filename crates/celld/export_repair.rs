@@ -811,7 +811,11 @@ impl Tracker {
                 state.next_seq += 1;
                 let seq = state.next_seq;
                 state.owner.insert(seq, job);
-                SinkRecord { seq, record }
+                SinkRecord {
+                    seq,
+                    record,
+                    json: None,
+                }
             })
             .collect()
     }

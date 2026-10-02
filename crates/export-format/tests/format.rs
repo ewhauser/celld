@@ -220,6 +220,49 @@ fn other_kinds_are_never_split() {
 }
 
 #[test]
+fn split_encoded_is_split_with_each_piece_json() {
+    let big: Vec<RowChange> = (0..200).map(|i| put(i, &"x".repeat(50))).collect();
+    let mut stale = rows(pos(2, 1), "t", 1, vec![put(1, "a")]);
+    // Counters the split overwrites must not reach the JSON.
+    stale.envelope.fragment = 2;
+    stale.envelope.fragments = 3;
+    let gap = live(
+        pos(1, 1),
+        Body::Gap(GapBody {
+            from: pos(1, 1),
+            to: pos(2, 1),
+            reason: "z".repeat(5000),
+        }),
+    );
+    let cases = [
+        rows(pos(1, 1), "t", 1, vec![put(1, "a")]),
+        rows(pos(1, 1), "t", 1, Vec::new()),
+        stale,
+        rows(pos(4, 2), "t", 1, big),
+        gap,
+        rows(
+            pos(4, 2),
+            "t",
+            3,
+            vec![put(1, "small"), put(2, &"y".repeat(4000))],
+        ),
+    ];
+    for r in cases {
+        match (split(r.clone(), 1024), split_encoded(r, 1024)) {
+            (Split::Fragments(plain), Split::Fragments(encoded)) => {
+                assert_eq!(plain.len(), encoded.len());
+                for (p, e) in plain.iter().zip(&encoded) {
+                    assert_eq!(&e.record, p);
+                    assert_eq!(e.json, serde_json::to_vec(p).unwrap());
+                }
+            }
+            (Split::Bulk(plain), Split::Bulk(encoded)) => assert_eq!(plain, encoded),
+            (plain, encoded) => panic!("split {plain:?} but split_encoded {encoded:?}"),
+        }
+    }
+}
+
+#[test]
 fn mismatched_fragments_are_refused() {
     let changes: Vec<RowChange> = (0..50).map(|i| put(i, &"x".repeat(50))).collect();
     let Split::Fragments(parts) = split(rows(pos(1, 1), "t", 1, changes), 1024) else {
