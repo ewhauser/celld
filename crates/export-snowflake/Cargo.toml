@@ -26,6 +26,8 @@ pkcs8 = { workspace = true, optional = true }
 rsa = { workspace = true, optional = true }
 sha2 = { workspace = true, optional = true }
 ureq = { version = "3.4.0", optional = true }
+# The loader binary's allocator; see its `global_allocator`.
+tikv-jemallocator = { workspace = true, optional = true }
 anyhow = { workspace = true, optional = true }
 bd-server-stats = { workspace = true, optional = true }
 blob-stream-consumer = { workspace = true, optional = true }
@@ -38,7 +40,15 @@ tokio = { workspace = true, optional = true, features = ["macros", "rt-multi-thr
 tokio-util = { workspace = true, optional = true }
 
 [features]
-sql-api = ["dep:base64", "dep:getrandom", "dep:pkcs8", "dep:rsa", "dep:sha2", "dep:ureq"]
+sql-api = [
+    "dep:base64",
+    "dep:getrandom",
+    "dep:pkcs8",
+    "dep:rsa",
+    "dep:sha2",
+    "dep:tikv-jemallocator",
+    "dep:ureq",
+]
 # The consumer that feeds the loader from the blob-stream topic. Off by
 # default for the same reason as celld's `export-blob-stream`: the bitdrift
 # crates, a patched protobuf, and protoc to build them. Without it,
