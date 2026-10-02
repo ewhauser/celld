@@ -20,6 +20,7 @@ use std::path::Path;
 use std::path::PathBuf;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::AtomicU64;
+use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::sync::Mutex;
@@ -808,8 +809,192 @@ struct Cell {
     fleet_credit_receipts: Mutex<Vec<LtxFleetCreditReceiptForWorldV1>>,
     #[cfg(all(test, celld_internal_tests))]
     fleet_capture_receipts: Mutex<Vec<LtxFleetCaptureReceiptForWorld>>,
+    /// The registry key, which ship and bundle entries name.
+    key: (String, u64),
+    /// The cell's class is `QUEUE_CLASS`, which opens the ship loop's
+    /// group-commit window.
+    is_queue: bool,
+    /// Cleared, under the registry lock, when the handle leaves the active
+    /// registry. A dirty set can still hold the handle, and drops it on drain
+    /// as a registry scan would never have found it.
+    resident: AtomicBool,
+    /// Membership in each loop's `DirtySet` (or that loop's own deferral).
+    sync_queued: AtomicBool,
+    ship_queued: AtomicBool,
+    bundle_queued: AtomicBool,
 }
 type CellHandle = Arc<Cell>;
+
+fn is_queue_cell(cell: &str) -> bool {
+    cell.split_once(':')
+        .is_some_and(|(class, _)| class == crate::deploy::QUEUE_CLASS)
+}
+
+/// The cells one replication loop has yet to look at, so a wake costs
+/// O(dirty cells) instead of a walk of every resident cell — the walk was
+/// measurable at 2,000 cells and grows with both residency and write rate.
+///
+/// A cell enters when a durability ticket raises its `req_seq`, and at most
+/// once: its per-set flag (`Cell::{sync,ship,bundle}_queued`) says it is
+/// already tracked, here or in the loop's own deferral. The consumer clears
+/// the flag BEFORE it reads the cell's watermarks, and a producer raises
+/// `req_seq` before it tests the flag, so a ticket either lands in the
+/// consumer's read or re-queues the cell: no write is left untracked. A loop
+/// that skips a cell it took (a failed capture, a busy sync) re-queues it
+/// itself; nothing rediscovers it by scanning.
+struct DirtySet {
+    flag: fn(&Cell) -> &AtomicBool,
+    /// A set no loop drains (no bundle loop without a flush interval) must
+    /// not retain every cell it ever saw.
+    enabled: bool,
+    notify: Notify,
+    queue: Mutex<Vec<CellHandle>>,
+    /// Queue-class cells in `queue`. The ship loop's group-commit window
+    /// opens only for pending Queue writes, and this makes that test one load.
+    queue_cells: AtomicUsize,
+}
+
+impl DirtySet {
+    fn new(flag: fn(&Cell) -> &AtomicBool, enabled: bool) -> Self {
+        Self {
+            flag,
+            enabled,
+            notify: Notify::new(),
+            queue: Mutex::new(Vec::new()),
+            queue_cells: AtomicUsize::new(0),
+        }
+    }
+
+    /// Track `cell` unless it already is. The caller decides whether to
+    /// wake the loop: a loop re-queuing its own retries does not.
+    fn mark(&self, cell: &CellHandle) {
+        let flag = (self.flag)(cell);
+        if !self.enabled || flag.load(Ordering::SeqCst) || flag.swap(true, Ordering::SeqCst) {
+            return;
+        }
+        // Count before the push: `take` only ever sees counted entries.
+        if cell.is_queue {
+            self.queue_cells.fetch_add(1, Ordering::SeqCst);
+        }
+        self.queue.lock().unwrap().push(cell.clone());
+    }
+
+    /// Move every tracked cell into `into` (empty; its buffer is swapped in,
+    /// so the steady state does not allocate) and release their flags. The
+    /// caller then reads each cell's watermarks to decide what it is owed.
+    fn take(&self, into: &mut Vec<CellHandle>) {
+        debug_assert!(into.is_empty());
+        std::mem::swap(&mut *self.queue.lock().unwrap(), into);
+        for cell in into.iter() {
+            if cell.is_queue {
+                self.queue_cells.fetch_sub(1, Ordering::SeqCst);
+            }
+            (self.flag)(cell).store(false, Ordering::SeqCst);
+        }
+    }
+
+    /// Hold a taken cell in the caller's own deferral. `false` means a new
+    /// ticket re-queued it meanwhile, and that entry already tracks it.
+    fn hold(&self, cell: &Cell) -> bool {
+        !(self.flag)(cell).swap(true, Ordering::SeqCst)
+    }
+
+    /// Release a held cell, as `take` does, before reading its watermarks.
+    fn release(&self, cell: &Cell) {
+        (self.flag)(cell).store(false, Ordering::SeqCst);
+    }
+
+    /// Forget every tracked cell. The loop must re-seed from the registry
+    /// (`mark_where`) before it next drains.
+    fn clear(&self) {
+        let mut taken = Vec::new();
+        self.take(&mut taken);
+    }
+
+    /// Track every resident cell matching `owed`: the one full scan, run
+    /// only when a loop resumes after `clear`.
+    fn mark_where(
+        &self,
+        cells: &Mutex<BTreeMap<(String, u64), CellHandle>>,
+        owed: impl Fn(&Cell) -> bool,
+    ) {
+        for cell in cells.lock().unwrap().values() {
+            if owed(cell) {
+                self.mark(cell);
+            }
+        }
+    }
+
+    /// Take the tracked cells that are still resident and still `owed`,
+    /// keyed for a capture. `scratch` keeps the drain buffer across wakes.
+    fn drain_owed(
+        &self,
+        scratch: &mut Vec<CellHandle>,
+        owed: fn(&Cell) -> bool,
+    ) -> Vec<((String, u64), CellHandle)> {
+        self.take(scratch);
+        scratch
+            .drain(..)
+            .filter(|cell| cell.resident.load(Ordering::SeqCst) && owed(cell))
+            .map(|cell| (cell.key.clone(), cell))
+            .collect()
+    }
+
+    /// Re-queue the cells a pass took but left `owed`, without a wake: the
+    /// retry rides the next ticket or the fallback tick.
+    fn requeue_owed(&self, taken: Vec<CellHandle>, owed: fn(&Cell) -> bool) {
+        for cell in taken {
+            if owed(&cell) {
+                self.mark(&cell);
+            }
+        }
+    }
+
+    fn queue_pending(&self) -> bool {
+        self.queue_cells.load(Ordering::SeqCst) > 0
+    }
+}
+
+/// The node's three dirty sets, one per replication loop. Each loop drains
+/// its own: a cell the sync loop has uploaded can still owe the fleet a
+/// round, and the reverse.
+struct DirtySets {
+    sync: DirtySet,
+    ship: DirtySet,
+    bundle: DirtySet,
+}
+
+impl DirtySets {
+    fn new(bundle: bool) -> Self {
+        Self {
+            sync: DirtySet::new(|cell| &cell.sync_queued, true),
+            ship: DirtySet::new(|cell| &cell.ship_queued, true),
+            bundle: DirtySet::new(|cell| &cell.bundle_queued, bundle),
+        }
+    }
+
+    /// A durability ticket raised `req_seq`. The bundle loop runs on its
+    /// flush tick, so only the other two are woken.
+    fn ticket(&self, cell: &CellHandle) {
+        self.sync.mark(cell);
+        self.ship.mark(cell);
+        self.bundle.mark(cell);
+        self.sync.notify.notify_one();
+        self.ship.notify.notify_one();
+    }
+}
+
+/// The sync loop owes `cell` an upload.
+fn sync_owed(cell: &Cell) -> bool {
+    cell.req_seq.load(Ordering::SeqCst) > cell.synced_seq.load(Ordering::SeqCst)
+}
+
+/// The ship loop owes `cell` a fleet round: tickets no round has taken and
+/// the bucket has not already covered.
+fn ship_owed(cell: &Cell) -> bool {
+    let req = cell.req_seq.load(Ordering::SeqCst);
+    req > cell.submitted_seq.load(Ordering::SeqCst) && req > cell.synced_seq.load(Ordering::SeqCst)
+}
 
 /// The successor still needs a per-cell fold, but epoch replacement needs
 /// only bucket coverage. Keep the ending bound and both live proofs together:
@@ -1095,9 +1280,10 @@ pub struct LtxRepl {
     replica_close_tasks: TaskGroup,
     /// The node's root task group, for the per-cell background hydration.
     tasks: TaskGroup,
-    /// Woken when a cell's `committed` advances, so the background loop syncs
-    /// without polling; a slow tick backstops any missed notification.
-    dirty: Arc<Notify>,
+    /// The cells each background loop owes work, woken when a durability
+    /// ticket arrives, so the loops neither poll nor walk the registry; a
+    /// slow tick backstops any missed notification.
+    dirty: Arc<DirtySets>,
     /// Shared by every activation, so the restore bound is per node, not per
     /// cell. The generic LTX restore keeps its sequential compatibility path.
     restore_slots: Arc<Semaphore>,
@@ -1129,9 +1315,6 @@ pub struct LtxRepl {
     /// prune answers without walking the data directory. See
     /// [`crate::replication::PreservedCache`].
     preserved: Mutex<crate::replication::PreservedCache>,
-    /// Woken when a gate ticket arrives, so the ship loop group-commits
-    /// without polling.
-    dirty_ship: Arc<Notify>,
     /// Cells whose last epoch ended quietly with acked rows outside the
     /// per-cell layout (`note_undrained_tail`'s predicate). The ending
     /// itself cannot write — release serves fenced nodes — so the
@@ -1364,8 +1547,7 @@ impl LtxRepl {
         durability_timeout_ms: u64,
     ) -> Self {
         let cells: Arc<Mutex<BTreeMap<(String, u64), CellHandle>>> = Arc::default();
-        let dirty = Arc::new(Notify::new());
-        let dirty_ship = Arc::new(Notify::new());
+        let dirty = Arc::new(DirtySets::new(flush_ms > 0));
         let registration: Arc<Mutex<RegistrationState>> = Arc::default();
         let stop = StopToken::new();
         let tasks = TaskGroup::new(stop.clone());
@@ -1393,7 +1575,7 @@ impl LtxRepl {
             "ltx_ship",
             ship_loop(
                 cells.clone(),
-                dirty_ship.clone(),
+                dirty.clone(),
                 registration.clone(),
                 stop.clone(),
                 crate::queue_batching::timing().log_ms,
@@ -1401,7 +1583,13 @@ impl LtxRepl {
         );
         tasks.spawn_owned(
             "ltx_bundle",
-            bundle_loop(cells.clone(), registration.clone(), stop.clone(), flush_ms),
+            bundle_loop(
+                cells.clone(),
+                dirty.clone(),
+                registration.clone(),
+                stop.clone(),
+                flush_ms,
+            ),
         );
         let compaction_queue =
             compaction.map(|config| start_compaction_loop(config, tasks.clone()));
@@ -1444,7 +1632,6 @@ impl LtxRepl {
                 .saturating_mul(1 << 20),
             hydrations: Arc::new(Semaphore::new(1)),
             preserved,
-            dirty_ship,
             dirty_tails: Mutex::new(BTreeMap::new()),
             registration,
             stop: stop.clone(),
@@ -1497,12 +1684,18 @@ impl LtxRepl {
         // awaited shutdown can close it after all admitted workers have joined.
         // The close gate makes this snapshot atomic with release admission.
         let cells = std::mem::take(&mut *self.cells.lock().unwrap());
+        for handle in cells.values() {
+            handle.resident.store(false, Ordering::SeqCst);
+        }
         self.stopped_cells.lock().unwrap().extend(cells);
     }
 
     pub(crate) fn start_close_local_replicas(&self) -> Option<asyncrt::TaskHandle<()>> {
         let _close_gate = self.replica_close_gate.lock().unwrap();
         let mut cells = std::mem::take(&mut *self.cells.lock().unwrap());
+        for handle in cells.values() {
+            handle.resident.store(false, Ordering::SeqCst);
+        }
         cells.append(&mut *self.stopped_cells.lock().unwrap());
         let mut failed_release_closes = self.failed_release_closes.lock().unwrap();
         for key in cells.keys() {
@@ -1566,8 +1759,8 @@ impl LtxRepl {
             targets: Arc::downgrade(&targets),
         });
         drop(state);
-        self.dirty_ship.notify_one();
-        self.dirty.notify_one();
+        self.dirty.ship.notify.notify_one();
+        self.dirty.sync.notify.notify_one();
         Some(DurabilityRegistration {
             registration: Arc::downgrade(&self.registration),
             generation,
@@ -2054,10 +2247,7 @@ impl LtxRepl {
     }
 
     fn truncate_pages_for_cell(&self, cell: &str) -> Option<u32> {
-        let queue = cell
-            .split_once(':')
-            .is_some_and(|(class, _)| class == crate::deploy::QUEUE_CLASS);
-        if queue {
+        if is_queue_cell(cell) {
             // A Queue database grows with its backlog. A fixed WAL threshold
             // therefore turns every TRUNCATE boundary into an allocation and
             // LTX object proportional to every undelivered message (#472).
@@ -2625,6 +2815,12 @@ impl LtxRepl {
             fleet_credit_receipts: Mutex::new(Vec::new()),
             #[cfg(all(test, celld_internal_tests))]
             fleet_capture_receipts: Mutex::new(Vec::new()),
+            key: (cell.to_string(), epoch),
+            is_queue: is_queue_cell(cell),
+            resident: AtomicBool::new(true),
+            sync_queued: AtomicBool::new(false),
+            ship_queued: AtomicBool::new(false),
+            bundle_queued: AtomicBool::new(false),
             compaction: self.compaction_queue.as_ref().map(|queue| {
                 let fetcher = Arc::new(SinkFetcher {
                     registration: self.registration.clone(),
@@ -2913,8 +3109,7 @@ impl LtxRepl {
         let ticket = handle.req_seq.fetch_add(1, Ordering::SeqCst) + 1;
         #[cfg(all(test, celld_internal_tests))]
         handle.record_durability_ticket_for_world(position, ticket);
-        self.dirty.notify_one();
-        self.dirty_ship.notify_one();
+        self.dirty.ticket(&handle);
         let source = self
             .wait_for_durability_ticket(&handle, cell, epoch, ticket)
             .await?;
@@ -2960,8 +3155,7 @@ impl LtxRepl {
             anyhow::bail!("ltx cell not resident: {cell} epoch {epoch}");
         };
         let ticket = handle.req_seq.fetch_add(1, Ordering::SeqCst) + 1;
-        self.dirty.notify_one();
-        self.dirty_ship.notify_one();
+        self.dirty.ticket(&handle);
         self.wait_for_durability_ticket(&handle, cell, epoch, ticket)
             .await
     }
@@ -3491,7 +3685,9 @@ impl LtxRepl {
         let mut cells = self.cells.lock().unwrap();
         let handle = cells.get(&key)?;
         self.note_undrained_tail(cell, epoch, handle);
-        cells.remove(&key)
+        let handle = cells.remove(&key)?;
+        handle.resident.store(false, Ordering::SeqCst);
+        Some(handle)
     }
 
     /// Record an ending that leaves acked rows outside the per-cell
@@ -4396,6 +4592,80 @@ fn compaction_config_from_env() -> anyhow::Result<Option<CompactionConfig>> {
     }))
 }
 
+/// The sync loop's view of `dirty.sync`: the cells it owes an upload, less
+/// the paced ones that are not yet due.
+#[derive(Default)]
+struct SyncQueue {
+    /// Paced cells that are owed an upload but not yet due, keyed by the
+    /// wall ms they become due (then arrival order). A wake releases only
+    /// the due prefix, so pacing costs O(due cells), not a walk of the
+    /// waiting ones.
+    deferred: BTreeMap<(u64, u64), CellHandle>,
+    deferrals: u64,
+    /// Set when bundling cleared the dirty set: the next unbundled wake must
+    /// re-seed it from the registry, once.
+    reseed: bool,
+    drained: Vec<CellHandle>,
+}
+
+impl SyncQueue {
+    /// The bundle loop owns tiering for now. It drains its own set, so this
+    /// one would only grow.
+    fn suspend(&mut self, set: &DirtySet) {
+        set.clear();
+        for cell in std::mem::take(&mut self.deferred).into_values() {
+            set.release(&cell);
+        }
+        self.reseed = true;
+    }
+
+    /// The resident cells owed an upload and due one now. `pacing` is the
+    /// flush interval when uploads are paced: a cell synced less than one
+    /// interval ago waits here, not in a scan, until it is due.
+    fn due(
+        &mut self,
+        set: &DirtySet,
+        cells: &Mutex<BTreeMap<(String, u64), CellHandle>>,
+        pacing: Option<u64>,
+        now: u64,
+    ) -> Vec<CellHandle> {
+        if std::mem::take(&mut self.reseed) {
+            set.mark_where(cells, sync_owed);
+        }
+        set.take(&mut self.drained);
+        // Deferred cells whose interval has run out rejoin — all of them
+        // once the loop is unpaced. Release before the watermark reads, as
+        // `take` does.
+        while let Some(entry) = self.deferred.first_entry() {
+            if pacing.is_some() && entry.key().0 > now {
+                break;
+            }
+            let cell = entry.remove();
+            set.release(&cell);
+            self.drained.push(cell);
+        }
+        let mut due = Vec::with_capacity(self.drained.len());
+        for cell in self.drained.drain(..) {
+            if !cell.resident.load(Ordering::SeqCst) || !sync_owed(&cell) {
+                continue;
+            }
+            if let Some(flush_ms) = pacing {
+                let last = cell.last_sync_ms.load(Ordering::SeqCst);
+                if now.saturating_sub(last) < flush_ms {
+                    if set.hold(&cell) {
+                        self.deferred
+                            .insert((last.saturating_add(flush_ms), self.deferrals), cell);
+                        self.deferrals += 1;
+                    }
+                    continue;
+                }
+            }
+            due.push(cell);
+        }
+        due
+    }
+}
+
 /// The node's background sync loop: wake on a dirty cell (or a slow tick) and
 /// launch a sync for every cell whose committed position runs ahead of its
 /// durable one. Each cell's sync is an independent, self-rescheduling task —
@@ -4403,15 +4673,19 @@ fn compaction_config_from_env() -> anyhow::Result<Option<CompactionConfig>> {
 /// never stalls the others (a cell keeps its own cadence up to the concurrency
 /// bound). A cell's writes reported between its syncs still clear on one upload:
 /// the batching win, without the cross-cell head-of-line blocking.
+///
+/// A wake drains the cells `dirty.sync` collected since the last one, never
+/// the registry: its cost follows the write rate, not the resident count.
 async fn sync_loop(
     cells: Arc<Mutex<BTreeMap<(String, u64), CellHandle>>>,
-    dirty: Arc<Notify>,
+    dirty: Arc<DirtySets>,
     slots: Arc<Semaphore>,
     registration: Arc<Mutex<RegistrationState>>,
     stop: StopToken,
     sync_tasks: TaskGroup,
     flush_ms: u64,
 ) {
+    let mut queue = SyncQueue::default();
     loop {
         asyncrt::select_biased! {
             "a stop signal that ties a sync-loop wake prevents another cell scan";
@@ -4419,7 +4693,7 @@ async fn sync_loop(
             _ = async {
                 asyncrt::select_biased! {
                     "a dirty notification wins a tie with the fallback tick to retain wake order";
-                    _ = dirty.notified() => {},
+                    _ = dirty.sync.notify.notified() => {},
                     _ = asyncrt::sleep(Duration::from_millis(25)) => {},
                 }
             } => {},
@@ -4447,22 +4721,16 @@ async fn sync_loop(
             && registered
                 .as_ref()
                 .is_some_and(|targets| targets.manager.bundle_active());
+        if bundling {
+            queue.suspend(&dirty.sync);
+            continue;
+        }
         let now = asyncrt::wall_ms().max(0) as u64;
-        let work: Vec<CellHandle> = {
-            let map = cells.lock().unwrap();
-            map.values()
-                .filter(|c| {
-                    c.req_seq.load(Ordering::SeqCst) > c.synced_seq.load(Ordering::SeqCst)
-                        && !bundling
-                        && (!paced
-                            || now.saturating_sub(c.last_sync_ms.load(Ordering::SeqCst))
-                                >= flush_ms)
-                })
-                .cloned()
-                .collect()
-        };
-        for cell in work {
-            // Claim the cell; skip if a sync is already in flight for it.
+        let pacing = paced.then_some(flush_ms);
+        for cell in queue.due(&dirty.sync, &cells, pacing, now) {
+            // Claim the cell; skip if a sync is already in flight for it —
+            // that task keeps syncing while the cell stays dirty and
+            // re-queues it when it stops.
             if cell
                 .syncing
                 .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
@@ -4513,12 +4781,12 @@ async fn sync_loop(
                     }
                 }
                 cell.syncing.store(false, Ordering::SeqCst);
-                // A write landing in the clear window is picked up next tick;
+                // A write that landed while this task held the claim was
+                // dropped by the loop's failed claim; re-queue the cell, and
                 // nudge the loop so it does not wait the full interval.
-                if !worker_stop.is_stopped()
-                    && cell.req_seq.load(Ordering::SeqCst) > cell.synced_seq.load(Ordering::SeqCst)
-                {
-                    dirty.notify_one();
+                if !worker_stop.is_stopped() && sync_owed(&cell) {
+                    dirty.sync.mark(&cell);
+                    dirty.sync.notify.notify_one();
                 }
             });
         }
@@ -4533,8 +4801,12 @@ async fn sync_loop(
 /// whether by a per-cell object or a bundle row; the replica's own
 /// position deliberately does NOT advance, so the direct sync_wait drain
 /// still knows exactly which frames lack per-cell objects.
+///
+/// A flush drains `dirty.bundle`, the cells ticketed since the last one, and
+/// re-queues those it could not credit, so it never walks the registry.
 async fn bundle_loop(
     cells: Arc<Mutex<BTreeMap<(String, u64), CellHandle>>>,
+    dirty: Arc<DirtySets>,
     registration: Arc<Mutex<RegistrationState>>,
     stop: StopToken,
     flush_ms: u64,
@@ -4544,6 +4816,10 @@ async fn bundle_loop(
     }
     let mut tick = asyncrt::interval(Duration::from_millis(flush_ms));
     tick.set_missed_tick_behavior(asyncrt::MissedTickBehavior::Delay);
+    // Set when an inactive sink cleared the dirty set: the next active flush
+    // re-seeds it from the registry, once.
+    let mut reseed = false;
+    let mut drained: Vec<CellHandle> = Vec::new();
     loop {
         asyncrt::select_biased! {
             "a stop signal that ties the bundle tick prevents another bucket flush";
@@ -4552,20 +4828,22 @@ async fn bundle_loop(
         }
         let installed = registered_durability(&registration).map(|targets| targets.manager.clone());
         let Some(active) = installed.filter(|sink| sink.bundle_active()) else {
+            // Nothing drains the set without a sink; do not let it retain
+            // every cell written meanwhile.
+            dirty.bundle.clear();
+            reseed = true;
             continue;
         };
-        let work: Vec<((String, u64), CellHandle)> = {
-            let map = cells.lock().unwrap();
-            map.iter()
-                .filter(|(_, cell)| {
-                    cell.req_seq.load(Ordering::SeqCst) > cell.synced_seq.load(Ordering::SeqCst)
-                })
-                .map(|(key, cell)| (key.clone(), cell.clone()))
-                .collect()
-        };
+        if std::mem::take(&mut reseed) {
+            dirty.bundle.mark_where(&cells, sync_owed);
+        }
+        let work = dirty.bundle.drain_owed(&mut drained, sync_owed);
         if work.is_empty() {
             continue;
         }
+        // A cell this flush does not credit (a failed capture or PUT) is
+        // retried on the next one, as a registry walk would find it again.
+        let taken: Vec<CellHandle> = work.iter().map(|(_, cell)| cell.clone()).collect();
         type Credits = Vec<(CellHandle, u64, u64)>;
         let (entries, credits): (Vec<celld_ltx::bundle::BundleEntry>, Credits) =
             asyncrt::blocking(move || {
@@ -4609,6 +4887,7 @@ async fn bundle_loop(
             .await
             .unwrap_or_default();
         if credits.is_empty() {
+            dirty.bundle.requeue_owed(taken, sync_owed);
             continue;
         }
         let count = entries.len();
@@ -4641,6 +4920,7 @@ async fn bundle_loop(
                 handle.ready.notify_waiters();
             }
         }
+        dirty.bundle.requeue_owed(taken, sync_owed);
     }
 }
 
@@ -4662,7 +4942,7 @@ fn lap_us(lap: &mut u64) -> u64 {
 
 async fn ship_loop(
     cells: Arc<Mutex<BTreeMap<(String, u64), CellHandle>>>,
-    dirty_ship: Arc<Notify>,
+    dirty: Arc<DirtySets>,
     registration: Arc<Mutex<RegistrationState>>,
     stop: StopToken,
     group_commit_ms: u64,
@@ -4696,6 +4976,10 @@ async fn ship_loop(
     let (mut group_us, mut capture_us, mut submit_us) = (0_u64, 0_u64, 0_u64);
     let mut loop_rounds = 0_u64;
     let mut ledger_emit = asyncrt::mono_us();
+    // Set when an inactive shipper cleared the dirty set: the next active
+    // wake re-seeds it from the registry, once.
+    let mut reseed = false;
+    let mut drained: Vec<CellHandle> = Vec::new();
     'shipping: loop {
         if asyncrt::mono_us().saturating_sub(ledger_emit) >= 1_000_000 {
             info!(
@@ -4729,7 +5013,7 @@ async fn ship_loop(
                 _ = async {
                     asyncrt::select_biased! {
                         "a dirty notification wins a tie with the fallback tick to retain wake order";
-                        _ = dirty_ship.notified() => {},
+                        _ = dirty.ship.notify.notified() => {},
                         _ = asyncrt::sleep(Duration::from_millis(25)) => {},
                     }
                 } => {},
@@ -4751,7 +5035,7 @@ async fn ship_loop(
                 if let Some(round) = round {
                     if !apply_round(&mut ledger, round) {
                         inflight = futures_util::stream::FuturesOrdered::new();
-                        reset_submitted(&cells);
+                        reset_submitted(&cells, &dirty.ship);
                     }
                 }
                 apply_us += lap_us(&mut lap);
@@ -4770,7 +5054,7 @@ async fn ship_loop(
                         _ = async {
                             asyncrt::select_biased! {
                                 "a dirty notification wins a tie with the fallback tick to retain wake order";
-                                _ = dirty_ship.notified() => {},
+                                _ = dirty.ship.notify.notified() => {},
                                 _ = asyncrt::sleep(Duration::from_millis(25)) => {},
                             }
                         } => futures_util::future::Either::Right(()),
@@ -4782,7 +5066,7 @@ async fn ship_loop(
                 if let Some(round) = round {
                     if !apply_round(&mut ledger, round) {
                         inflight = futures_util::stream::FuturesOrdered::new();
-                        reset_submitted(&cells);
+                        reset_submitted(&cells, &dirty.ship);
                     }
                 }
                 apply_us += lap_us(&mut lap);
@@ -4792,22 +5076,11 @@ async fn ship_loop(
         // Producer grouping shares a transaction within one Queue. This wait
         // also gathers writes from different Queues into one fleet capture.
         // Only pending Queue writes trigger it; other cell classes alone do
-        // not add the wait. This preliminary scan is only a delay decision;
-        // the authoritative work and shipper epoch are read after the wait.
-        let queue_pending = if group_commit_ms == 0 {
-            false
-        } else {
-            let map = cells.lock().unwrap();
-            map.iter().any(|((cell, _), handle)| {
-                cell.split_once(':')
-                    .is_some_and(|(class, _)| class == crate::deploy::QUEUE_CLASS)
-                    && {
-                        let req = handle.req_seq.load(Ordering::SeqCst);
-                        req > handle.submitted_seq.load(Ordering::SeqCst)
-                            && req > handle.synced_seq.load(Ordering::SeqCst)
-                    }
-            })
-        };
+        // not add the wait. A Queue cell in the dirty set is the delay
+        // decision — one load, where a registry walk tested every cell's
+        // class; the authoritative work and shipper epoch are read after the
+        // wait.
+        let queue_pending = group_commit_ms > 0 && dirty.ship.queue_pending();
         if queue_pending {
             let _ = lap_us(&mut lap);
             asyncrt::select_biased! {
@@ -4824,10 +5097,14 @@ async fn ship_loop(
             // gates ride the bucket proof.
             if !inflight.is_empty() {
                 inflight = futures_util::stream::FuturesOrdered::new();
-                reset_submitted(&cells);
+                reset_submitted(&cells, &dirty.ship);
             }
             current = None;
             current_epoch = None;
+            // Nothing drains the set without a shipper; do not let it retain
+            // every cell written meanwhile.
+            dirty.ship.clear();
+            reseed = true;
             continue;
         };
         let capture_epoch = active.epoch();
@@ -4836,27 +5113,24 @@ async fn ship_loop(
             // credits belong to the retired epoch and must not apply.
             if !inflight.is_empty() {
                 inflight = futures_util::stream::FuturesOrdered::new();
-                reset_submitted(&cells);
+                reset_submitted(&cells, &dirty.ship);
             }
             current = Some(active.clone());
             current_epoch = Some(capture_epoch);
         }
         ledger.observe_epoch(capture_epoch);
-        let work: Vec<((String, u64), CellHandle)> = {
-            let map = cells.lock().unwrap();
-            map.iter()
-                .filter(|(_, cell)| {
-                    let req = cell.req_seq.load(Ordering::SeqCst);
-                    req > cell.submitted_seq.load(Ordering::SeqCst)
-                        && req > cell.synced_seq.load(Ordering::SeqCst)
-                })
-                .map(|(key, cell)| (key.clone(), cell.clone()))
-                .collect()
-        };
+        if std::mem::take(&mut reseed) {
+            dirty.ship.mark_where(&cells, ship_owed);
+        }
+        let work = dirty.ship.drain_owed(&mut drained, ship_owed);
         scan_us += lap_us(&mut lap);
         if work.is_empty() {
             continue;
         }
+        // A cell this round does not take (a failed capture) is retried on
+        // the next wake, as a registry walk would find it again. No notify:
+        // the retry waits for the next ticket or the fallback tick.
+        let taken: Vec<CellHandle> = work.iter().map(|(_, cell)| cell.clone()).collect();
         let round = asyncrt::mono_ms();
         // Capture fans out across cells: each chunk syncs and reads its
         // cells exactly as the serial walk did — per-cell contiguity and
@@ -5042,6 +5316,7 @@ async fn ship_loop(
             probe_us_max = probe_us_max.max(chunk_probe_us);
         }
         if credits.is_empty() {
+            dirty.ship.requeue_owed(taken, ship_owed);
             continue;
         }
         ledger.advance(|cells| {
@@ -5085,6 +5360,7 @@ async fn ship_loop(
             handle.submitted_txid.fetch_max(*position, Ordering::SeqCst);
             handle.submitted_seq.fetch_max(*tickets, Ordering::SeqCst);
         }
+        dirty.ship.requeue_owed(taken, ship_owed);
         let submitted = asyncrt::mono_ms();
         inflight.push_back(Box::pin(async move {
             ShipRound {
@@ -5268,8 +5544,10 @@ fn apply_round(
 
 /// Discarding a pipeline makes every uncredited range eligible for capture
 /// again. The credited watermarks are monotone, so concurrent bucket progress
-/// remains intact while a failed fleet tail rolls back.
-fn reset_submitted(cells: &Arc<Mutex<BTreeMap<(String, u64), CellHandle>>>) {
+/// remains intact while a failed fleet tail rolls back. The rolled-back cells
+/// raised no ticket, so this re-queues them itself; it runs only on a failed
+/// or orphaned pipeline, so the walk stays off the steady-state path.
+fn reset_submitted(cells: &Arc<Mutex<BTreeMap<(String, u64), CellHandle>>>, ship: &DirtySet) {
     for handle in cells.lock().unwrap().values() {
         handle
             .submitted_txid
@@ -5277,6 +5555,9 @@ fn reset_submitted(cells: &Arc<Mutex<BTreeMap<(String, u64), CellHandle>>>) {
         handle
             .submitted_seq
             .store(handle.shipped_seq.load(Ordering::SeqCst), Ordering::SeqCst);
+        if ship_owed(handle) {
+            ship.mark(handle);
+        }
     }
 }
 
@@ -5413,3 +5694,6 @@ include!(env!("CELLD_INTERNAL_LTX_REPL_OBSERVERS"));
 
 #[cfg(test)]
 mod link_tests;
+
+#[cfg(test)]
+mod dirty_tests;
