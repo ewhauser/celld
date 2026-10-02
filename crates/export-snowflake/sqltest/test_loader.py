@@ -14,6 +14,7 @@ fakesnow lacks (see sqlapi.py).
 import json
 import base64
 import os
+import re
 import shutil
 import subprocess
 from pathlib import Path
@@ -24,7 +25,7 @@ import pytest
 from conftest import CRATE
 from sqlapi import Emulator, serve
 from real_account import EDGE, files, verify, write_jsonl
-from test_sql import Warehouse, emulate, pipe_as_insert, scenario_names, tombstone
+from test_sql import LOAD, TABLES, Warehouse, emulate, pipe_as_insert, scenario_names, tombstone
 
 ROOT = CRATE.parent.parent
 ACCOUNT, USER = "xy12345.us-east-2.aws", "celld_loader"
@@ -165,6 +166,60 @@ def test_the_route_task_routes_what_lands(emulator, loader, scenarios):
     assert not w.rows("SELECT * FROM CELL_CHANGES")
     emulator.run_task("EXPORT_ROUTE")
     loader("sync")
+    verify(w, s)
+
+
+def upgrade_blocks():
+    """The statements of each SQL block in docs/export.md's upgrade from a
+    loader that landed bodies as strings, comments dropped."""
+    doc = (ROOT / "docs" / "export.md").read_text()
+    section = doc[doc.index("landed each record's body as a string"):]
+    section = section[:section.index("\n### ")]
+    blocks = re.findall(r"```sql\n(.*?)```", section, re.S)
+    assert len(blocks) == 2
+    return [
+        [st.strip() for st in re.sub(r"--[^\n]*", "", b).split(";") if st.strip()]
+        for b in blocks
+    ]
+
+
+def test_upgrading_a_landing_table_that_holds_bodies_as_strings(emulator, loader, scenarios):
+    """An older deployment's landing table holds each body as text, and rows
+    in it the route task has not reached. The new loader refuses it until
+    the documented statements upgrade it, and the rows survive."""
+    s = scenarios["basic"]
+    w = Warehouse(emulator.cur)
+    for sql in TABLES.values():
+        if "EXPORT_LANDING" in sql:
+            assert "body VARIANT NOT NULL" in sql
+            sql = sql.replace("body VARIANT NOT NULL", "body STRING NOT NULL")
+        w.run(sql)
+    emulator.execute(LOAD["export_landing_new"])
+    old_pipe = LOAD["export_landing_pipe"].replace("$1:body::VARIANT", "$1:body::STRING")
+    assert old_pipe != LOAD["export_landing_pipe"]
+    emulator.execute(old_pipe)
+    emulator.tasks["EXPORT_ROUTE"] = {"statements": [], "state": "started", "sql": "old"}
+    rows = [dict(r, body=json.dumps(r["body"])) for r in s["landing_rows"]]
+    emulator.cur.execute(emulate(pipe_as_insert(old_pipe)), (json.dumps(rows),))
+
+    for args in [("deploy",), ("ingest", "-")]:
+        p = loader(*args, ok=False, stdin="")
+        assert p.returncode != 0 and "body column is TEXT" in p.stderr, p.stderr
+    assert emulator.pipes == {"EXPORT_LANDING_PIPE": old_pipe}, "nothing deployed"
+
+    before, after = upgrade_blocks()
+    for sql in before:
+        loader("query", sql)
+    assert not emulator.pipes and not emulator.tasks
+    loader("deploy")
+    for sql in after:
+        loader("query", sql)
+    assert w.run("SELECT COUNT(*) FROM EXPORT_LANDING")[0][0] == len(rows)
+    emulator.run_task("EXPORT_ROUTE")
+    loader("sync")
+    verify(w, s)
+    # And what the new loader lands from here on routes as well.
+    loader("ingest", "-", stdin="".join(json.dumps(r) + "\n" for r in s["records"]))
     verify(w, s)
 
 

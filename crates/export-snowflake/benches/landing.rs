@@ -2,7 +2,7 @@
 //! decoding it into a landing row, then encoding the row.
 use celld_export_format::{Body, Value};
 use celld_export_snowflake::consume::{Batch, Land};
-use celld_export_snowflake::streaming::{payloads, MAX_REQUEST_BYTES};
+use celld_export_snowflake::streaming::{payloads, payloads_from, Buffers, MAX_REQUEST_BYTES};
 use celld_export_snowflake::{LandingRow, WarehouseError};
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
 use std::hint::black_box;
@@ -75,5 +75,41 @@ fn landing(c: &mut Criterion) {
     g.finish();
 }
 
-criterion_group!(benches, landing);
+/// `n` rows of about 1.3 KB of JSON each, as real records run: a few
+/// changes to a cell, each with a different cell and offset.
+fn realistic_rows(n: usize) -> Vec<LandingRow> {
+    (0..n)
+        .map(|i| {
+            let mut record = support::rows_record(1 + i % 3, [800, 350, 200][i % 3]);
+            record.envelope = support::envelope(i, i as u64);
+            LandingRow::from_record(&record, format!("kafka/{}/{i}", i % 16))
+        })
+        .collect()
+}
+
+fn appends(c: &mut Criterion) {
+    let mut g = c.benchmark_group("export_appends");
+    let rows = realistic_rows(10_000);
+    let bytes: usize = payloads(&rows, MAX_REQUEST_BYTES)
+        .unwrap()
+        .iter()
+        .map(Vec::len)
+        .sum();
+    g.throughput(Throughput::Bytes(bytes as u64));
+    g.bench_function("payloads/10k", |b| {
+        b.iter(|| payloads(black_box(&rows), MAX_REQUEST_BYTES).unwrap())
+    });
+    // As `Streaming` lands: buffers given back once their appends are done.
+    let mut buffers = Buffers::default();
+    g.bench_function("payloads_reused/10k", |b| {
+        b.iter(|| {
+            for p in payloads_from(black_box(&rows), MAX_REQUEST_BYTES, &mut buffers).unwrap() {
+                buffers.give(black_box(p));
+            }
+        })
+    });
+    g.finish();
+}
+
+criterion_group!(benches, landing, appends);
 criterion_main!(benches);
