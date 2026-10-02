@@ -83,30 +83,9 @@ impl LandingRow {
         json: &[u8],
         source: String,
     ) -> Result<Self, serde_json::Error> {
-        let Fields(fields) = serde_json::from_slice(json)?;
+        let fields: Fields = serde_json::from_slice(json)?;
         let envelope = &LANDING_COLUMNS[..LANDING_COLUMNS.len() - 2];
-        let mut body = String::with_capacity(json.len());
-        body.push('{');
-        for (key, value) in fields {
-            if envelope.contains(&&*key) {
-                continue;
-            }
-            if body.len() > 1 {
-                body.push(',');
-            }
-            match key {
-                // Borrowed only when the key had no escapes, so it needs none.
-                Cow::Borrowed(key) => {
-                    body.push('"');
-                    body.push_str(key);
-                    body.push('"');
-                }
-                Cow::Owned(key) => body.push_str(&serde_json::to_string(&key)?),
-            }
-            body.push(':');
-            body.push_str(value.get());
-        }
-        body.push('}');
+        let body = fields.object_without(|key| envelope.contains(&key))?;
         let e = &record.envelope;
         Ok(LandingRow {
             kind: name(&record.kind()),
@@ -240,7 +219,7 @@ fn name(v: &impl Serialize) -> String {
 }
 
 /// A JSON object's fields in order, each value as its encoded bytes.
-struct Fields<'a>(Vec<(Cow<'a, str>, &'a RawValue)>);
+pub(crate) struct Fields<'a>(Vec<(Cow<'a, str>, &'a RawValue)>);
 
 impl<'de> Deserialize<'de> for Fields<'de> {
     fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
@@ -267,6 +246,53 @@ impl<'de> Deserialize<'de> for Fields<'de> {
             }
         }
         d.deserialize_map(V)
+    }
+}
+
+impl Fields<'_> {
+    /// The value of `key`, as encoded.
+    pub(crate) fn get(&self, key: &str) -> Option<&RawValue> {
+        self.0
+            .iter()
+            .find(|(k, _)| k == key)
+            .map(|(_, value)| *value)
+    }
+
+    /// The object without the fields `skip` names, each kept field written
+    /// with the bytes it was encoded with, in its original order.
+    pub(crate) fn object_without(
+        &self,
+        skip: impl Fn(&str) -> bool,
+    ) -> Result<String, serde_json::Error> {
+        let mut out = String::with_capacity(
+            self.0
+                .iter()
+                .map(|(k, v)| k.len() + v.get().len() + 4)
+                .sum::<usize>()
+                + 2,
+        );
+        out.push('{');
+        for (key, value) in &self.0 {
+            if skip(key) {
+                continue;
+            }
+            if out.len() > 1 {
+                out.push(',');
+            }
+            match key {
+                // Borrowed only when the key had no escapes, so it needs none.
+                Cow::Borrowed(key) => {
+                    out.push('"');
+                    out.push_str(key);
+                    out.push('"');
+                }
+                Cow::Owned(key) => out.push_str(&serde_json::to_string(key)?),
+            }
+            out.push(':');
+            out.push_str(value.get());
+        }
+        out.push('}');
+        Ok(out)
     }
 }
 
