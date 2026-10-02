@@ -198,6 +198,14 @@ savepoint therefore needs no special handling: the reverted rows disappear
 from the changeset and the surviving ones remain. The session does not
 record virtual tables, rows whose declared key contains `NULL`, or DDL.
 
+The filter also leaves out two kinds of table the session cannot track, and
+exports a commit's writes to them as `bulk`. A table with a generated column
+fails the whole changeset with `SQLITE_SCHEMA`. A rowid-only table with a
+column named `_rowid_`, in any case, yields a wrong one: the session reads
+each changed row back through `WHERE _rowid_ IS ?` when the changeset is
+taken, the column shadows the rowid alias, and inserts go missing or come
+back keyed by the column's value.
+
 The rusqlite `Session` borrows the connection, and the cell's storage struct
 owns the connection. The exporter holds a raw `sqlite3_session` pointer
 beside it and calls the four ffi functions directly.

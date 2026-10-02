@@ -54,10 +54,13 @@ pub(crate) fn reshape(
     match rows.table.as_str() {
         KV_SOURCE => kv(rows, scope, decode),
         NAMESPACE_TABLE => Ok(Some(namespace(rows, scope))),
-        _ => Ok(Some(TableRows {
-            table: exported_name(&rows.table).to_string(),
-            ..rows
-        })),
+        _ => {
+            let mut rows = rows;
+            if exported_name(&rows.table) != rows.table {
+                rows.table = exported_name(&rows.table).to_string();
+            }
+            Ok(Some(rows))
+        }
     }
 }
 
@@ -80,14 +83,14 @@ fn kv(rows: TableRows, scope: &str, decode: Decoder) -> anyhow::Result<Option<Ta
     let scope = Value::Text(scope.to_string());
     let mut out = Vec::new();
     let mut undecoded = Vec::new();
-    for RowChange(op, _, row) in rows.rows {
+    for RowChange(op, _, mut row) in rows.rows {
         if row[scope_at] != scope {
             continue;
         }
-        let key = row[key_at].clone();
-        let value = match &row[value_at] {
+        let key = std::mem::replace(&mut row[key_at], Value::Null);
+        let value = match std::mem::replace(&mut row[value_at], Value::Null) {
             Value::Blob(bytes) => {
-                undecoded.push((out.len(), bytes.clone()));
+                undecoded.push((out.len(), bytes));
                 Value::Null
             }
             value => legacy(value),
@@ -117,19 +120,19 @@ fn kv(rows: TableRows, scope: &str, decode: Decoder) -> anyhow::Result<Option<Ta
 
 /// A value that is not V8 bytes. The storage API reads text as legacy JSON,
 /// and any other SQL value as the JSON of itself.
-fn legacy(value: &Value) -> Value {
+fn legacy(value: Value) -> Value {
     match value {
         Value::Null => Value::Null,
         Value::Integer(i) => Value::Text(i.to_string()),
-        Value::Real(r) => match serde_json::Number::from_f64(*r) {
+        Value::Real(r) => match serde_json::Number::from_f64(r) {
             Some(number) => Value::Text(number.to_string()),
             None => Value::Blob(r.to_string().into_bytes()),
         },
-        Value::Text(text) => match serde_json::from_str::<serde_json::Value>(text) {
+        Value::Text(text) => match serde_json::from_str::<serde_json::Value>(&text) {
             Ok(json) => Value::Text(json.to_string()),
-            Err(_) => Value::Blob(text.clone().into_bytes()),
+            Err(_) => Value::Blob(text.into_bytes()),
         },
-        Value::Blob(bytes) => Value::Blob(bytes.clone()),
+        Value::Blob(bytes) => Value::Blob(bytes),
     }
 }
 

@@ -10,6 +10,7 @@ pub struct CaptureFixture {
     capture: Option<Capture>,
     connection: Connection,
     dirty: DirtyList,
+    payload: usize,
 }
 
 pub struct Batch(CapturedCommit);
@@ -52,6 +53,7 @@ impl CaptureFixture {
             capture,
             connection,
             dirty,
+            payload,
         };
         // Warm the catalog and schema cache before measuring steady-state writes.
         if enabled {
@@ -65,6 +67,26 @@ impl CaptureFixture {
         self.connection
             .execute_batch("BEGIN; UPDATE items SET revision = revision + 1; COMMIT;")
             .unwrap();
+    }
+
+    /// Delete every row and pull that, then insert them again, so that the
+    /// next checkpoint pulls only inserts.
+    pub fn reinsert(&mut self) {
+        let rows: i64 = self
+            .connection
+            .query_row("SELECT count(*) FROM items", [], |row| row.get(0))
+            .unwrap();
+        self.connection.execute_batch("DELETE FROM items;").unwrap();
+        drop(self.checkpoint());
+        let payload: Vec<u8> = (0..self.payload).map(|n| n as u8).collect();
+        let tx = self.connection.transaction().unwrap();
+        {
+            let mut insert = tx.prepare("INSERT INTO items VALUES (?1, ?2, 0)").unwrap();
+            for id in 0..rows {
+                insert.execute(rusqlite::params![id, payload]).unwrap();
+            }
+        }
+        tx.commit().unwrap();
     }
 
     pub fn checkpoint(&mut self) -> Batch {
