@@ -511,10 +511,12 @@ fn encode_file_with_mode(
     post_apply_checksum: Checksum,
     use_v0_5_2: bool,
 ) -> Result<Vec<u8>> {
+    let capacity = crate::codec::max_encoded_size(pages.iter().map(|(_, data)| data.as_slice()));
+    let output = Vec::with_capacity(capacity);
     let mut encoder = if use_v0_5_2 {
-        crate::codec::Encoder::new_block(Vec::new())
+        crate::codec::Encoder::new_block(output)
     } else {
-        crate::codec::Encoder::new_legacy(Vec::new())
+        crate::codec::Encoder::new_legacy(output)
     };
     encoder.encode_header(*header)?;
     for (page_number, data) in pages {
@@ -527,6 +529,10 @@ fn encode_file_with_mode(
         )?;
     }
     encoder.close(post_apply_checksum)?;
+    debug_assert!(
+        encoder.writer.len() <= capacity,
+        "the output grew past its bound"
+    );
     Ok(encoder.writer)
 }
 
