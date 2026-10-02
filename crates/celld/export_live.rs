@@ -94,7 +94,7 @@ use celld_export_format::{
 use celld_logic::export::{Attribution, Capture, CapturedWal, Released, WalGeneration, WalPoint};
 use celld_logic::RequestError;
 use rusqlite::OptionalExtension as _;
-use serde::{Deserialize, Serialize};
+use std::collections::hash_map::Entry;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
@@ -1645,7 +1645,7 @@ impl Stream {
 }
 
 /// What delivery knows about one stream.
-#[derive(Default, Serialize, Deserialize)]
+#[derive(Debug, Default, PartialEq)]
 struct Delivered {
     stream: Option<(StreamId, Option<String>)>,
     /// The newest position whose commit is wholly acknowledged.
@@ -1653,7 +1653,6 @@ struct Delivered {
     /// The `through` of the last watermark submitted.
     marked: Option<Position>,
     /// Whole records acknowledged since the last watermark, per position.
-    #[serde(with = "acked_entries")]
     acked: BTreeMap<Position, u64>,
     frozen: bool,
 }
@@ -1668,12 +1667,22 @@ fn delivery_key(meta: &Submitted) -> DeliveryKey {
 }
 
 // Historical residencies must not remain in RAM or be scanned on every ack.
-// Keep a small hot set and spill the rest to a process-local SQLite file. The
-// saved counts also preserve the chain when a cell reopens in the same epoch.
-const DELIVERY_CACHE_SIZE: usize = 256;
+// Keep the most recently used streams in memory and spill the rest to a
+// process-local SQLite file. The saved counts also preserve the chain when a
+// cell reopens in the same epoch.
+//
+// A hot entry costs about 1 KiB: the key, the stream's identity, two
+// positions, the recency index and the map's own overhead. Its acknowledged
+// positions add about 300 bytes for the first and 64 for each further one;
+// they are normally few, because every batch certifies what it acknowledged.
+// The cap therefore holds the cache near 8-10 MiB. A node acknowledging more
+// streams than this reloads the least recently used of them from the spill.
+const DELIVERY_CACHE_SIZE: usize = 8192;
 
 struct DeliveryStates {
-    hot: BTreeMap<DeliveryKey, (u64, Delivered)>,
+    hot: HashMap<DeliveryKey, (u64, Delivered)>,
+    /// The hot keys by the clock of their last use, oldest first.
+    recency: BTreeMap<u64, DeliveryKey>,
     clock: u64,
     cold: rusqlite::Connection,
 }
@@ -1683,10 +1692,17 @@ impl DeliveryStates {
         let cold = rusqlite::Connection::open("")?;
         cold.execute_batch(
             "PRAGMA cache_size=-1024; PRAGMA journal_mode=OFF; PRAGMA synchronous=OFF;
-            CREATE TABLE delivery (key TEXT PRIMARY KEY, value BLOB NOT NULL);",
+            CREATE TABLE delivery (
+                cell TEXT NOT NULL,
+                epoch INTEGER NOT NULL,
+                incarnation INTEGER NOT NULL,
+                value BLOB NOT NULL,
+                PRIMARY KEY (cell, epoch, incarnation)
+            ) WITHOUT ROWID;",
         )?;
         Ok(Self {
-            hot: BTreeMap::new(),
+            hot: HashMap::new(),
+            recency: BTreeMap::new(),
             clock: 0,
             cold,
         })
@@ -1694,58 +1710,223 @@ impl DeliveryStates {
 
     fn get(&mut self, key: DeliveryKey) -> anyhow::Result<&mut Delivered> {
         self.clock += 1;
-        if !self.hot.contains_key(&key) {
-            if self.hot.len() >= DELIVERY_CACHE_SIZE {
-                let oldest = self
-                    .hot
-                    .iter()
-                    .min_by_key(|(_, (used, _))| used)
-                    .unwrap()
-                    .0
-                    .clone();
-                let (_, state) = self.hot.remove(&oldest).unwrap();
-                self.cold.execute(
-                    "INSERT OR REPLACE INTO delivery VALUES (?1, ?2)",
-                    rusqlite::params![serde_json::to_string(&oldest)?, serde_json::to_vec(&state)?],
-                )?;
-            }
-            let encoded = serde_json::to_string(&key)?;
-            let bytes: Option<Vec<u8>> = self
-                .cold
-                .query_row(
-                    "SELECT value FROM delivery WHERE key=?1",
-                    [&encoded],
-                    |row| row.get(0),
-                )
-                .optional()?;
-            let state = bytes
-                .map(|bytes| serde_json::from_slice(&bytes))
-                .transpose()?
-                .unwrap_or_default();
+        let clock = self.clock;
+        if self.hot.len() >= DELIVERY_CACHE_SIZE && !self.hot.contains_key(&key) {
+            let (_, oldest) = self.recency.pop_first().unwrap();
+            let (_, state) = self.hot.remove(&oldest).unwrap();
+            let mut value = Vec::new();
+            state.encode(&mut value);
             self.cold
-                .execute("DELETE FROM delivery WHERE key=?1", [&encoded])?;
-            self.hot.insert(key.clone(), (self.clock, state));
+                .prepare_cached("INSERT OR REPLACE INTO delivery VALUES (?1, ?2, ?3, ?4)")?
+                .execute(rusqlite::params![
+                    oldest.0,
+                    spill_integer(oldest.1),
+                    spill_integer(oldest.2),
+                    value
+                ])?;
         }
-        let (used, state) = self.hot.get_mut(&key).unwrap();
-        *used = self.clock;
-        Ok(state)
+        match self.hot.entry(key) {
+            Entry::Occupied(entry) => {
+                let (used, state) = entry.into_mut();
+                let key = self.recency.remove(&*used).unwrap();
+                self.recency.insert(clock, key);
+                *used = clock;
+                Ok(state)
+            }
+            Entry::Vacant(entry) => {
+                let (cell, epoch, incarnation) = entry.key();
+                // All of a RETURNING statement's changes happen on its first step.
+                let value: Option<Vec<u8>> = self
+                    .cold
+                    .prepare_cached(
+                        "DELETE FROM delivery WHERE cell=?1 AND epoch=?2 AND incarnation=?3
+                        RETURNING value",
+                    )?
+                    .query_row(
+                        rusqlite::params![cell, spill_integer(*epoch), spill_integer(*incarnation)],
+                        |row| row.get(0),
+                    )
+                    .optional()?;
+                let state = value
+                    .map(|value| Delivered::decode(&value))
+                    .transpose()?
+                    .unwrap_or_default();
+                self.recency.insert(clock, entry.key().clone());
+                Ok(&mut entry.insert((clock, state)).1)
+            }
+        }
     }
 }
 
-mod acked_entries {
-    use super::*;
-    pub fn serialize<S: serde::Serializer>(
-        map: &BTreeMap<Position, u64>,
-        serializer: S,
-    ) -> Result<S::Ok, S::Error> {
-        map.iter().collect::<Vec<_>>().serialize(serializer)
+/// SQLite integers are signed; the spill keeps a u64's bits.
+fn spill_integer(value: u64) -> i64 {
+    i64::from_ne_bytes(value.to_ne_bytes())
+}
+
+/// The spill encoding of a [`Delivered`]: each field in order, an option as a
+/// 0/1 byte before its value, strings and the acknowledged map preceded by
+/// their lengths, and every integer as an LEB128 varint.
+impl Delivered {
+    fn encode(&self, out: &mut Vec<u8>) {
+        // Destructured so that a new field cannot be left out of the spill.
+        let Self {
+            stream,
+            position,
+            marked,
+            acked,
+            frozen,
+        } = self;
+        out.push(u8::from(stream.is_some()));
+        if let Some((stream, cell_name)) = stream {
+            let StreamId {
+                script,
+                class,
+                cell,
+                facet,
+                incarnation,
+            } = stream;
+            put_str(out, script);
+            put_str(out, class);
+            put_str(out, cell);
+            put_option(out, facet.as_deref(), put_str);
+            put_varint(out, *incarnation);
+            put_option(out, cell_name.as_deref(), put_str);
+        }
+        put_option(out, position.as_ref(), put_position);
+        put_option(out, marked.as_ref(), put_position);
+        put_varint(out, acked.len() as u64);
+        for (at, records) in acked {
+            put_position(out, at);
+            put_varint(out, *records);
+        }
+        out.push(u8::from(*frozen));
     }
-    pub fn deserialize<'de, D: serde::Deserializer<'de>>(
-        deserializer: D,
-    ) -> Result<BTreeMap<Position, u64>, D::Error> {
-        Ok(Vec::<(Position, u64)>::deserialize(deserializer)?
-            .into_iter()
-            .collect())
+
+    fn decode(bytes: &[u8]) -> anyhow::Result<Self> {
+        let mut input = SpillReader(bytes);
+        let stream = if input.flag()? {
+            Some((
+                StreamId {
+                    script: input.string()?,
+                    class: input.string()?,
+                    cell: input.string()?,
+                    facet: input.option(SpillReader::string)?,
+                    incarnation: input.varint()?,
+                },
+                input.option(SpillReader::string)?,
+            ))
+        } else {
+            None
+        };
+        let position = input.option(SpillReader::position)?;
+        let marked = input.option(SpillReader::position)?;
+        let mut acked = BTreeMap::new();
+        for _ in 0..input.varint()? {
+            let at = input.position()?;
+            acked.insert(at, input.varint()?);
+        }
+        let frozen = input.flag()?;
+        anyhow::ensure!(input.0.is_empty(), "delivery spill: trailing bytes");
+        Ok(Self {
+            stream,
+            position,
+            marked,
+            acked,
+            frozen,
+        })
+    }
+}
+
+fn put_varint(out: &mut Vec<u8>, mut value: u64) {
+    while value >= 0x80 {
+        out.push(value as u8 | 0x80);
+        value >>= 7;
+    }
+    out.push(value as u8);
+}
+
+fn put_str(out: &mut Vec<u8>, value: &str) {
+    put_varint(out, value.len() as u64);
+    out.extend_from_slice(value.as_bytes());
+}
+
+fn put_position(out: &mut Vec<u8>, at: &Position) {
+    let Position {
+        epoch,
+        txid,
+        commit,
+    } = *at;
+    put_varint(out, epoch);
+    put_varint(out, txid);
+    put_varint(out, commit);
+}
+
+fn put_option<T>(out: &mut Vec<u8>, value: Option<T>, put: fn(&mut Vec<u8>, T)) {
+    out.push(u8::from(value.is_some()));
+    if let Some(value) = value {
+        put(out, value);
+    }
+}
+
+struct SpillReader<'a>(&'a [u8]);
+
+impl SpillReader<'_> {
+    fn byte(&mut self) -> anyhow::Result<u8> {
+        let (&first, rest) = self
+            .0
+            .split_first()
+            .ok_or_else(|| anyhow::anyhow!("delivery spill: truncated"))?;
+        self.0 = rest;
+        Ok(first)
+    }
+
+    fn flag(&mut self) -> anyhow::Result<bool> {
+        match self.byte()? {
+            0 => Ok(false),
+            1 => Ok(true),
+            other => anyhow::bail!("delivery spill: flag {other}"),
+        }
+    }
+
+    fn varint(&mut self) -> anyhow::Result<u64> {
+        let mut value = 0u64;
+        for shift in (0..64).step_by(7) {
+            let byte = self.byte()?;
+            let bits = u64::from(byte & 0x7f);
+            anyhow::ensure!(
+                bits << shift >> shift == bits,
+                "delivery spill: varint overflows"
+            );
+            value |= bits << shift;
+            if byte & 0x80 == 0 {
+                return Ok(value);
+            }
+        }
+        anyhow::bail!("delivery spill: varint too long")
+    }
+
+    fn string(&mut self) -> anyhow::Result<String> {
+        let len = usize::try_from(self.varint()?)?;
+        anyhow::ensure!(len <= self.0.len(), "delivery spill: truncated");
+        let (bytes, rest) = self.0.split_at(len);
+        self.0 = rest;
+        Ok(String::from_utf8(bytes.to_vec())?)
+    }
+
+    fn position(&mut self) -> anyhow::Result<Position> {
+        Ok(Position::new(
+            self.varint()?,
+            self.varint()?,
+            self.varint()?,
+        ))
+    }
+
+    fn option<T>(&mut self, read: fn(&mut Self) -> anyhow::Result<T>) -> anyhow::Result<Option<T>> {
+        if self.flag()? {
+            read(self).map(Some)
+        } else {
+            Ok(None)
+        }
     }
 }
 
@@ -2655,7 +2836,8 @@ mod tests {
         state.marked = Some(at);
         state.position = Some(at);
         state.acked.insert(Position::new(1, 4, 2), 3);
-        for epoch in 2..=1000 {
+        let epochs = 2 * DELIVERY_CACHE_SIZE as u64;
+        for epoch in 2..=epochs {
             states.get(("Items:a".into(), epoch, 1)).unwrap();
         }
         assert_eq!(states.hot.len(), DELIVERY_CACHE_SIZE);
@@ -2663,10 +2845,150 @@ mod tests {
         assert_eq!(resumed.marked, Some(at));
         assert_eq!(resumed.acked[&Position::new(1, 4, 2)], 3);
         resumed.frozen = true;
-        for epoch in 1001..=2000 {
+        for epoch in epochs + 1..=2 * epochs {
             states.get(("Items:a".into(), epoch, 1)).unwrap();
         }
         assert!(states.get(("Items:a".into(), 1, 1)).unwrap().frozen);
+    }
+
+    /// Drives three times as many streams as the cache holds, touched in a
+    /// shuffled order, and checks every stream's state and the watermark it
+    /// would certify against a model after each round of evictions.
+    #[test]
+    fn delivery_cache_keeps_every_stream_across_eviction_and_reload() {
+        let streams = 3 * DELIVERY_CACHE_SIZE;
+        let keys: Vec<DeliveryKey> = (0..streams)
+            .map(|i| {
+                // Some residencies share a cell, and some an epoch with a
+                // second incarnation.
+                let cell = format!("Items:{}", i / 3);
+                let epoch = 1 + (i % 3 / 2) as u64;
+                let incarnation = 1 + (i % 2) as u64;
+                (cell, epoch, incarnation)
+            })
+            .collect();
+        let mut model: HashMap<DeliveryKey, Delivered> = HashMap::new();
+        let mut states = DeliveryStates::new().unwrap();
+        let mut rng = 0x2545_F491_4F6C_DD1Du64;
+        let mut order: Vec<usize> = (0..streams).collect();
+        for round in 0..4u64 {
+            for i in (1..order.len()).rev() {
+                rng ^= rng << 13;
+                rng ^= rng >> 7;
+                rng ^= rng << 17;
+                order.swap(i, (rng % (i as u64 + 1)) as usize);
+            }
+            for &i in &order {
+                let key = keys[i].clone();
+                let expected = model.entry(key.clone()).or_default();
+                let state = states.get(key.clone()).unwrap();
+                assert_eq!(state, expected, "stream {key:?} before round {round}");
+                // What the deliver task does: name the stream, acknowledge
+                // records, then certify the commits through `position`.
+                let stream = StreamId {
+                    script: "app".into(),
+                    class: "Items".into(),
+                    cell: key.0.clone(),
+                    facet: (i % 5 == 0).then(|| format!("f{i}")),
+                    incarnation: key.2,
+                };
+                let cell_name = (i % 4 != 0).then(|| format!("cell-{i}"));
+                let commit = round * 3;
+                let acks = [
+                    (
+                        Position::new(key.1, commit + 1, commit + 1),
+                        1 + i as u64 % 3,
+                    ),
+                    (Position::new(key.1, commit + 2, commit + 2), 2),
+                    (Position::new(key.1, commit + 3, commit + 3), 1),
+                ];
+                for target in [&mut *state, &mut *expected] {
+                    target.stream = Some((stream.clone(), cell_name.clone()));
+                    if target.frozen {
+                        continue;
+                    }
+                    for (at, records) in acks {
+                        *target.acked.entry(at).or_default() += records;
+                    }
+                    // The last commit's records are still in flight.
+                    let through = acks[1].0;
+                    target.position = Some(through);
+                    let later = target.acked.split_off(&Position {
+                        commit: through.commit + 1,
+                        ..through
+                    });
+                    let certified = std::mem::replace(&mut target.acked, later);
+                    assert_eq!(certified.len(), if round == 0 { 2 } else { 3 });
+                    target.marked = Some(through);
+                    target.frozen = i % 7 == round as usize;
+                }
+                assert!(states.hot.len() <= DELIVERY_CACHE_SIZE);
+            }
+            assert_eq!(states.hot.len(), DELIVERY_CACHE_SIZE);
+            assert_eq!(states.recency.len(), DELIVERY_CACHE_SIZE);
+            let cold: usize = states
+                .cold
+                .query_row("SELECT count(*) FROM delivery", [], |row| row.get(0))
+                .unwrap();
+            assert_eq!(cold + DELIVERY_CACHE_SIZE, streams);
+        }
+        for key in &keys {
+            assert_eq!(states.get(key.clone()).unwrap(), &model[key], "{key:?}");
+        }
+    }
+
+    #[test]
+    fn delivery_spill_round_trips() {
+        let full = Delivered {
+            stream: Some((
+                StreamId {
+                    script: "app".into(),
+                    class: "Items".into(),
+                    cell: "Items:é".into(),
+                    facet: Some("child/1".into()),
+                    incarnation: u64::MAX,
+                },
+                Some("é".into()),
+            )),
+            position: Some(Position::new(1, u64::MAX, 0)),
+            marked: Some(Position::new(0, 0, u64::MAX)),
+            acked: [
+                (Position::new(1, 2, 3), 4),
+                (Position::new(1, 3, 4), u64::MAX),
+                (Position::new(u64::MAX, 127, 128), 0),
+            ]
+            .into(),
+            frozen: true,
+        };
+        let partial = Delivered {
+            stream: Some((
+                StreamId {
+                    script: String::new(),
+                    class: "Items".into(),
+                    cell: "Items:a".into(),
+                    facet: None,
+                    incarnation: 1,
+                },
+                None,
+            )),
+            ..Delivered::default()
+        };
+        for state in [full, partial, Delivered::default()] {
+            let mut bytes = Vec::new();
+            state.encode(&mut bytes);
+            assert_eq!(Delivered::decode(&bytes).unwrap(), state);
+            for len in 0..bytes.len() {
+                assert!(Delivered::decode(&bytes[..len]).is_err(), "{len}");
+            }
+            bytes.push(0);
+            assert!(Delivered::decode(&bytes).is_err());
+        }
+        // A varint past 64 bits, and a flag that is neither 0 nor 1.
+        assert!(Delivered::decode(&[
+            1, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x02
+        ])
+        .is_err());
+        assert!(Delivered::decode(&[2]).is_err());
     }
 }
 
