@@ -11,11 +11,17 @@ mod support;
 
 /// Keeps what lands.
 #[derive(Default)]
-struct Keep(Vec<LandingRow>);
+struct Keep(std::cell::RefCell<Vec<LandingRow>>);
 
 impl Land for Keep {
-    fn land(&mut self, rows: &[LandingRow]) -> Result<(), WarehouseError> {
-        self.0.extend_from_slice(rows);
+    type Append = Vec<LandingRow>;
+
+    fn encode(&self, rows: &[LandingRow]) -> Result<Vec<Vec<LandingRow>>, WarehouseError> {
+        Ok(vec![rows.to_vec()])
+    }
+
+    fn append(&self, rows: &Vec<LandingRow>) -> Result<(), WarehouseError> {
+        self.0.borrow_mut().extend_from_slice(rows);
         Ok(())
     }
 }
@@ -24,8 +30,14 @@ impl Land for Keep {
 struct Encode;
 
 impl Land for Encode {
-    fn land(&mut self, rows: &[LandingRow]) -> Result<(), WarehouseError> {
-        black_box(payloads(rows, MAX_REQUEST_BYTES)?);
+    type Append = Vec<u8>;
+
+    fn encode(&self, rows: &[LandingRow]) -> Result<Vec<Vec<u8>>, WarehouseError> {
+        payloads(rows, MAX_REQUEST_BYTES)
+    }
+
+    fn append(&self, payload: &Vec<u8>) -> Result<(), WarehouseError> {
+        black_box(payload);
         Ok(())
     }
 }
@@ -42,7 +54,7 @@ fn message(rows: usize, blob: usize) -> Vec<u8> {
     record.to_json()
 }
 
-fn land(batch: &mut Batch, payload: &[u8], to: &mut impl Land) {
+fn land(batch: &mut Batch, payload: &[u8], to: &impl Land) {
     batch.push_message("kafka", 0, 1, payload).unwrap();
     batch.land(to).unwrap();
 }
@@ -52,24 +64,26 @@ fn landing(c: &mut Criterion) {
     for (name, rows, blob) in [("1", 1, 32), ("128", 128, 32), ("128_blob_4k", 128, 4096)] {
         let payload = message(rows, blob);
         let mut batch = Batch::default();
-        let mut kept = Keep::default();
-        land(&mut batch, &payload, &mut kept);
-        assert_eq!(kept.0.len(), 1);
+        let kept = Keep::default();
+        land(&mut batch, &payload, &kept);
+        assert_eq!(kept.0.borrow().len(), 1);
         g.throughput(Throughput::Bytes(payload.len() as u64));
         g.bench_with_input(BenchmarkId::new("to_row", name), &payload, |b, p| {
-            let mut kept = Keep::default();
+            let kept = Keep::default();
             b.iter(|| {
-                land(&mut batch, black_box(p), &mut kept);
-                kept.0.clear();
+                land(&mut batch, black_box(p), &kept);
+                kept.0.borrow_mut().clear();
             })
         });
-        g.bench_with_input(BenchmarkId::new("to_ndjson", name), &kept.0, |b, rows| {
-            b.iter(|| payloads(black_box(rows), MAX_REQUEST_BYTES).unwrap())
-        });
+        g.bench_with_input(
+            BenchmarkId::new("to_ndjson", name),
+            &kept.0.borrow().clone(),
+            |b, rows| b.iter(|| payloads(black_box(rows), MAX_REQUEST_BYTES).unwrap()),
+        );
         g.bench_with_input(
             BenchmarkId::new("message_to_ndjson", name),
             &payload,
-            |b, p| b.iter(|| land(&mut batch, black_box(p), &mut Encode)),
+            |b, p| b.iter(|| land(&mut batch, black_box(p), &Encode)),
         );
     }
     g.finish();

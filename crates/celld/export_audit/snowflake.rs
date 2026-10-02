@@ -553,10 +553,10 @@ where
             for record in &records {
                 batch.push(record, super::AUDIT_NODE);
                 if batch.is_full(&inner.limits) {
-                    batch.land(&mut inner.land).map_err(|e| anyhow!("{e}"))?;
+                    batch.land(&inner.land).map_err(|e| anyhow!("{e}"))?;
                 }
             }
-            batch.land(&mut inner.land).map_err(|e| anyhow!("{e}"))?;
+            batch.land(&inner.land).map_err(|e| anyhow!("{e}"))?;
             let deadline = std::time::Instant::now() + inner.visible_timeout;
             let mut pause = Duration::from_millis(100);
             let visible = inner

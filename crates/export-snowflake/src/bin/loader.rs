@@ -12,10 +12,12 @@
 
 use std::io::Write as _;
 use std::process::ExitCode;
+use std::sync::Arc;
 use std::time::Duration;
 
 use celld_export_snowflake::consume::Batch;
 use celld_export_snowflake::loader::{DeployReport, Erasure, SyncReport};
+use celld_export_snowflake::pipeline::{Pipeline, Progress};
 use celld_export_snowflake::settings::{self, loader};
 use celld_export_snowflake::Rows;
 
@@ -58,6 +60,7 @@ settings (environment):
                                  kafka/0/42), comma-separated
   EXPORT_BATCH_RECORDS (default 10000), EXPORT_BATCH_BYTES (default 8388608),
   EXPORT_BATCH_MS (default 5000) when a batch lands
+  EXPORT_APPEND_CONCURRENCY (default 8) appends in flight at once, and batches landing at once
   EXPORT_VISIBLE_SECONDS (default 300) ingest: how long to wait for landed rows to be queryable
 ";
 
@@ -173,7 +176,9 @@ fn run(args: &[String]) -> Result<(), Error> {
 /// Land the JSON-lines records in `file` in batches through Snowpipe
 /// Streaming, wait until queries see them all, then route them. A line
 /// that is not a record is reported and fails the command once the rest
-/// have landed.
+/// have landed. Batches land as `run` lands them, several appends at once
+/// while the next lines are read, but the first append that fails for good
+/// fails the command.
 ///
 /// Snowpipe Streaming acknowledges rows once they are durable, which can
 /// be before a query sees them, so routing straight away could route
@@ -191,29 +196,46 @@ fn ingest(file: &str) -> Result<(), Error> {
     let limits = settings::limits()?;
     let mut l = loader()?;
     l.check_landing()?;
-    let mut to = settings::streaming()?;
+    let to = Arc::new(settings::streaming()?);
+    let concurrency = settings::concurrency()?;
     let tag = settings::run_tag("ingest");
-    let mut batch = Batch::tagged(&tag);
-    let (mut landed, mut bad) = (0, 0);
-    for (n, line) in reader.lines().enumerate() {
-        let line = line?;
-        if line.trim().is_empty() {
-            continue;
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_time()
+        .build()?;
+    let (landed, bad) = runtime.block_on(async {
+        // Streaming retries each append itself; past that, give up.
+        let mut pipeline = Pipeline::new(to, concurrency, Duration::ZERO, Duration::ZERO);
+        let mut batch = Batch::tagged(&tag);
+        let (mut landed, mut bad) = (0, 0);
+        for (n, line) in reader.lines().enumerate() {
+            let line = line?;
+            if line.trim().is_empty() {
+                continue;
+            }
+            if let Err(u) = batch.push_json_line(&line, &format!("{file}:{}", n + 1)) {
+                eprintln!(
+                    "celld-export-loader: {}: not a record: {}",
+                    u.source, u.error
+                );
+                bad += 1;
+            }
+            if batch.is_full(&limits) {
+                while !pipeline.has_room() {
+                    landing(pipeline.next().await)?;
+                }
+                landed += batch.len();
+                let (rows, offsets) = batch.take();
+                pipeline.submit(rows, offsets);
+            }
         }
-        if let Err(u) = batch.push_json_line(&line, &format!("{file}:{}", n + 1)) {
-            eprintln!(
-                "celld-export-loader: {}: not a record: {}",
-                u.source, u.error
-            );
-            bad += 1;
+        landed += batch.len();
+        let (rows, offsets) = batch.take();
+        pipeline.submit(rows, offsets);
+        while let Some(progress) = pipeline.next().await {
+            landing(Some(progress))?;
         }
-        if batch.is_full(&limits) {
-            landed += batch.len();
-            batch.land(&mut to)?;
-        }
-    }
-    landed += batch.len();
-    batch.land(&mut to)?;
+        Ok::<_, Error>((landed, bad))
+    })?;
     let timeout = settings::visible_timeout()?;
     let visible = l.settle(&tag, landed as u64, settings::backoff(timeout))?;
     if visible < landed as u64 {
@@ -228,6 +250,14 @@ fn ingest(file: &str) -> Result<(), Error> {
         return Err(format!("{bad} lines were not records").into());
     }
     Ok(())
+}
+
+/// `ingest`'s view of the pipeline: a failure is final.
+fn landing(progress: Option<Progress>) -> Result<(), Error> {
+    match progress {
+        Some(Progress::Failed { error, .. }) => Err(error.into()),
+        _ => Ok(()),
+    }
 }
 
 /// The transport `run` reads: `EXPORT_SOURCE`.
@@ -261,6 +291,7 @@ fn consume(sync_every: Duration) -> Result<(), Error> {
     let settings = Settings {
         limits: settings::limits()?,
         linger: Duration::from_millis(settings::number("EXPORT_BATCH_MS", 5000)?),
+        concurrency: settings::concurrency()?,
         sync_every,
         skip: std::env::var("EXPORT_SKIP")
             .unwrap_or_default()
@@ -275,7 +306,7 @@ fn consume(sync_every: Duration) -> Result<(), Error> {
     // first.
     let source = Consumer::configure(transport, group.as_deref(), member.as_deref())?;
     let mut l = loader()?;
-    let mut to = settings::streaming()?;
+    let to = Arc::new(settings::streaming()?);
     print_deploy(&l.deploy()?)?;
 
     let runtime = tokio::runtime::Builder::new_multi_thread()
@@ -298,6 +329,9 @@ fn consume(sync_every: Duration) -> Result<(), Error> {
             let line = match event {
                 Event::Landed { .. } | Event::Synced(_) => None,
                 Event::Skipped(source) => Some(format!("{source}: skipped (EXPORT_SKIP)")),
+                Event::LandFailed { error, retry } if retry.is_zero() => {
+                    Some(format!("landing a batch failed, stopping: {error}"))
+                }
                 Event::LandFailed { error, retry } => Some(format!(
                     "landing a batch failed, retrying in {retry:?}: {error}"
                 )),
@@ -324,7 +358,7 @@ fn consume(sync_every: Duration) -> Result<(), Error> {
                 let iterator = celld_export_snowflake::blob_stream::connect(config).await?;
                 eprintln!("celld-export-loader: consuming the blob-stream export topic");
                 celld_export_snowflake::blob_stream::run(
-                    iterator, &mut l, &mut to, &settings, stop, report,
+                    iterator, &mut l, to, &settings, stop, report,
                 )
                 .await
             }
@@ -335,10 +369,8 @@ fn consume(sync_every: Duration) -> Result<(), Error> {
                     config.topic
                 );
                 let source = celld_export_snowflake::kafka::KafkaSource::new(config);
-                celld_export_snowflake::source::run(
-                    source, &mut l, &mut to, &settings, stop, report,
-                )
-                .await
+                celld_export_snowflake::source::run(source, &mut l, to, &settings, stop, report)
+                    .await
             }
         };
         result.map_err(|e| format!("{e:#}").into())
