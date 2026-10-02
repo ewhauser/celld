@@ -183,6 +183,7 @@ fn ingest(file: &str) -> Result<(), Error> {
     };
     let limits = settings::limits()?;
     let mut l = loader()?;
+    l.check_landing()?;
     let mut to = settings::streaming()?;
     let tag = settings::run_tag("ingest");
     let mut batch = Batch::tagged(&tag);
