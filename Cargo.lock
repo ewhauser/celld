@@ -1528,6 +1528,7 @@ dependencies = [
  "serde_yaml",
  "sha2 0.10.9",
  "thiserror 2.0.20",
+ "tikv-jemallocator",
  "tokio",
  "tokio-util",
  "ureq",
