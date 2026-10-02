@@ -6,8 +6,53 @@ use crate::ltx::{
     PAGE_HEADER_FLAG_SIZE, PAGE_HEADER_SIZE, TRAILER_SIZE,
 };
 use crate::CHECKSUM_FLAG;
+use lz4_flex::frame::{BlockMode, BlockSize, FrameEncoder, FrameInfo};
+use std::cell::Cell;
 use std::collections::BTreeMap;
 use std::io::{Read, Write};
+
+/// Bytes a legacy LZ4 frame adds to its page: magic (4), frame descriptor (3),
+/// block size (4), end mark (4) and content checksum (4). The block itself is
+/// at most the page, because `lz4_flex` stores a block that does not shrink
+/// uncompressed.
+const LEGACY_FRAME_OVERHEAD: usize = 19;
+
+thread_local! {
+    /// This thread's legacy frame encoder, kept across pages and files.
+    /// `FrameEncoder` sizes its buffers and match table for a whole 64 KiB
+    /// block, about 150 KiB, whatever the page size. Each new frame resets that
+    /// state without freeing it, so a reused encoder writes the same bytes as
+    /// a fresh one. An encoder is put back only after a page finishes, so one
+    /// left mid-frame by an error is dropped rather than reused.
+    static LEGACY_FRAME_ENCODER: Cell<Option<FrameEncoder<Vec<u8>>>> =
+        const { Cell::new(None) };
+}
+
+fn new_legacy_frame_encoder() -> FrameEncoder<Vec<u8>> {
+    // The pre-v0.5.2 Go encoder uses independent 64 KiB blocks and writes a
+    // content checksum. Litestream's legacy decoder expects the resulting
+    // eight-byte frame trailer (end mark + checksum).
+    let frame_info = FrameInfo::new()
+        .block_size(BlockSize::Max64KB)
+        .block_mode(BlockMode::Independent)
+        .content_checksum(true);
+    FrameEncoder::with_frame_info(frame_info, Vec::new())
+}
+
+/// An upper bound on the encoded size of a file holding `pages`, in either
+/// page encoding, so the writer can size its output once.
+pub(crate) fn max_encoded_size<'a>(pages: impl Iterator<Item = &'a [u8]>) -> usize {
+    // pgno, offset and size varints, at most 5 + 10 + 10 bytes.
+    const INDEX_ENTRY: usize = 25;
+    let pages: usize = pages
+        .map(|data| {
+            let body = (data.len() + LEGACY_FRAME_OVERHEAD)
+                .max(4 + crate::lz4_block::compress_bound(data.len()));
+            PAGE_HEADER_SIZE + body + INDEX_ENTRY
+        })
+        .sum();
+    HEADER_SIZE + pages + PAGE_HEADER_SIZE + 1 + 8 + TRAILER_SIZE
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum DecoderState {
@@ -164,7 +209,8 @@ pub(crate) struct Encoder<W> {
     pub(crate) trailer: Trailer,
     hash: Crc64,
     index: BTreeMap<u32, (u64, u64)>,
-    compressor: crate::lz4_block::Compressor,
+    /// Built on the first sized-block page; legacy files never use it.
+    compressor: Option<crate::lz4_block::Compressor>,
     page_encoding: PageEncoding,
     bytes_written: u64,
     previous_page_number: u32,
@@ -188,7 +234,7 @@ impl<W: Write> Encoder<W> {
             trailer: Trailer::default(),
             hash: Crc64::new(),
             index: BTreeMap::new(),
-            compressor: crate::lz4_block::Compressor::default(),
+            compressor: None,
             page_encoding,
             bytes_written: 0,
             previous_page_number: 0,
@@ -240,37 +286,35 @@ impl<W: Write> Encoder<W> {
         }
 
         let offset = self.bytes_written;
-        let compressed = match self.page_encoding {
+        match self.page_encoding {
             PageEncoding::LegacyFrame => {
                 if page.flags != 0 {
                     return Err(Error::LTXCorrupted);
                 }
                 self.write_hashed(&page.marshal())?;
-                // The pre-v0.5.2 Go encoder uses independent 64 KiB blocks and
-                // writes a content checksum. Litestream's legacy decoder expects
-                // the resulting eight-byte frame trailer (end mark + checksum).
-                let frame_info = lz4_flex::frame::FrameInfo::new()
-                    .block_size(lz4_flex::frame::BlockSize::Max64KB)
-                    .block_mode(lz4_flex::frame::BlockMode::Independent)
-                    .content_checksum(true);
-                let mut encoder =
-                    lz4_flex::frame::FrameEncoder::with_frame_info(frame_info, Vec::new());
-                encoder.write_all(data)?;
-                encoder.finish().map_err(|_| Error::LTXCorrupted)?
+                let mut frame = LEGACY_FRAME_ENCODER
+                    .take()
+                    .unwrap_or_else(new_legacy_frame_encoder);
+                frame.get_mut().clear();
+                frame.write_all(data)?;
+                frame.try_finish().map_err(|_| Error::LTXCorrupted)?;
+                self.write_body(frame.get_ref())?;
+                LEGACY_FRAME_ENCODER.set(Some(frame));
             }
             PageEncoding::SizedBlock => {
-                let compressed = self.compressor.compress(data);
+                let compressed = self
+                    .compressor
+                    .get_or_insert_with(Default::default)
+                    .compress(data);
                 page.flags |= PAGE_HEADER_FLAG_SIZE;
                 self.write_hashed(&page.marshal())?;
                 let size = u32::try_from(compressed.len())
                     .map_err(|_| Error::LTXCorrupted)?
                     .to_be_bytes();
                 self.write_hashed(&size)?;
-                compressed
+                self.write_body(&compressed)?;
             }
-        };
-        self.writer.write_all(&compressed)?;
-        self.bytes_written += compressed.len() as u64;
+        }
         self.hash.update(data);
 
         self.previous_page_number = page.pgno;
@@ -306,6 +350,14 @@ impl<W: Write> Encoder<W> {
         self.writer.write_all(&self.trailer.marshal())?;
         self.bytes_written += TRAILER_SIZE as u64;
         self.closed = true;
+        Ok(())
+    }
+
+    /// Writes a compressed page body. The file checksum covers the
+    /// uncompressed page instead, so the body is not hashed.
+    fn write_body(&mut self, bytes: &[u8]) -> Result<()> {
+        self.writer.write_all(bytes)?;
+        self.bytes_written += bytes.len() as u64;
         Ok(())
     }
 
