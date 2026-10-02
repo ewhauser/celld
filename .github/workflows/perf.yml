@@ -23,6 +23,10 @@ on:
       fleet:
         description: "Scenario names for the s3 backend (default: F1 F3 F5 F9 S3 S5 N2 N3)"
         default: "F1 F3 F5 F9 S3 S5 N2 N3"
+      benchmarks:
+        description: "Run component benchmarks (disable for focused scenario reruns)"
+        type: boolean
+        default: true
       repeat:
         description: "Repeats per scenario"
         default: "3"
@@ -140,6 +144,7 @@ jobs:
           ls -R baseline || true
 
       - name: Component benchmarks
+        if: github.event_name != 'workflow_dispatch' || inputs.benchmarks
         run: |
           set -euo pipefail
           baseline=()
@@ -157,14 +162,14 @@ jobs:
 
       - name: Scenarios, single node
         run: |
-          target/lab/celld-perf run ${{ steps.plan.outputs.dev }} \
+          bash .github/scripts/perf-file-limit.sh target/lab/celld-perf run ${{ steps.plan.outputs.dev }} \
             --repeat ${{ steps.plan.outputs.repeat }} \
             --celld target/lab/celld --out perf-out/dev
 
       - name: Scenarios, fleet
         if: always()
         run: |
-          target/lab/celld-perf run ${{ steps.plan.outputs.fleet }} \
+          bash .github/scripts/perf-file-limit.sh target/lab/celld-perf run ${{ steps.plan.outputs.fleet }} \
             --backend s3 --bucket s3://perf --endpoint http://127.0.0.1:9000 \
             --repeat ${{ steps.plan.outputs.repeat }} \
             --celld target/lab/celld --out perf-out/fleet
