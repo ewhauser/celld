@@ -99,6 +99,14 @@ fn delivery(c: &mut Criterion) {
             b.iter(|| black_box(cache.advance(64)));
         });
     }
+    // Many active streams acknowledged in no particular order, as on a node
+    // with thousands of resident cells under uniform load.
+    for (history, active) in [(2048, 2048), (16384, 16384)] {
+        let mut cache = DeliveryCache::uniform(history, active);
+        group.bench_function(format!("{history}_historical_{active}_uniform"), |b| {
+            b.iter(|| black_box(cache.advance(64)));
+        });
+    }
     group.finish();
 }
 

@@ -701,10 +701,10 @@ each with its overflow policy.
 
 After an attribution gap, the residency stops submitting records and
 advances. Delivery tracks only streams touched by an acknowledgement batch,
-with a 256-entry hot cache and a process-local SQLite spill preserving
-older watermark chains. Offline audit commands use a separate incremental
-SQLite object index and evaluate one cell at a time; `docs/export.md`
-describes its scope and history limit.
+with an 8,192-entry least-recently-used hot cache (about 1 KiB per entry)
+and a process-local SQLite spill preserving older watermark chains. Offline
+audit commands use a separate incremental SQLite object index and evaluate
+one cell at a time; `docs/export.md` describes its scope and history limit.
 
 The exporter's memory is therefore bounded by the shared budget plus one
 transaction's overshoot plus the resident stream count.

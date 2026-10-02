@@ -5,6 +5,9 @@ pub struct DeliveryCache {
     states: DeliveryStates,
     keys: Vec<(String, u64, u64)>,
     next: usize,
+    /// A xorshift state when the active streams are touched uniformly at
+    /// random rather than in rotation.
+    random: Option<u64>,
 }
 impl DeliveryCache {
     pub fn new(history: usize, active: usize) -> Self {
@@ -29,6 +32,7 @@ impl DeliveryCache {
             states,
             keys: (0..active).map(|i| (format!("Items:{i}"), 1, 1)).collect(),
             next: 0,
+            random: None,
         };
         // Rewarm the active set and verify positions survive a full spill cycle.
         assert_eq!(cache.advance(active), 2 * active as u64);
@@ -36,13 +40,37 @@ impl DeliveryCache {
         cache
     }
 
+    /// The same fixture, touching the active streams uniformly at random.
+    pub fn uniform(history: usize, active: usize) -> Self {
+        Self {
+            random: Some(0x9E37_79B9_7F4A_7C15),
+            ..Self::new(history, active)
+        }
+    }
+
+    fn pick(&mut self) -> usize {
+        match &mut self.random {
+            Some(x) => {
+                *x ^= *x << 13;
+                *x ^= *x >> 7;
+                *x ^= *x << 17;
+                (*x % self.keys.len() as u64) as usize
+            }
+            None => {
+                let at = self.next;
+                self.next = (self.next + 1) % self.keys.len();
+                at
+            }
+        }
+    }
+
     /// One acknowledgement batch; the cold store uses the same transaction as delivery.
     pub fn advance(&mut self, records: usize) -> u64 {
         self.states.cold.execute_batch("BEGIN").unwrap();
         let mut sum = 0;
         for _ in 0..records {
-            let key = self.keys[self.next].clone();
-            self.next = (self.next + 1) % self.keys.len();
+            let at = self.pick();
+            let key = self.keys[at].clone();
             let state = self.states.get(key).unwrap();
             let previous = state.marked.expect("spilled watermark preserved");
             let position = Position::new(1, previous.txid + 1, previous.commit + 1);
