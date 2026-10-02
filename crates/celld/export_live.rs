@@ -87,9 +87,9 @@ use crate::facet_streams::FacetDeleted;
 use crate::replication::{ActivationLink, ActivationMode};
 use crate::storage::export_capture::{CapturedCommit, WalStamp};
 use celld_export_format::{
-    split, Body, BulkBody, DeletedBody, Envelope, GapBody, LinkBody, LinkMode, Origin, Position,
-    Record, RecoveredBody, RowsBody, SchemaBody, SnapshotBody, SnapshotEndBody, SnapshotScope,
-    Split, StreamId, TableGen, WatermarkBody,
+    split_encoded, Body, BulkBody, DeletedBody, Encoded, Envelope, GapBody, LinkBody, LinkMode,
+    Origin, Position, Record, RecoveredBody, RowsBody, SchemaBody, SnapshotBody, SnapshotEndBody,
+    SnapshotScope, Split, StreamId, TableGen, WatermarkBody,
 };
 use celld_logic::export::{Attribution, Capture, CapturedWal, Released, WalGeneration, WalPoint};
 use celld_logic::RequestError;
@@ -757,6 +757,16 @@ impl Exporter {
 
     /// Submit records in order, registering what delivery needs first.
     fn submit(&self, records: Vec<(Record, Submitted)>) {
+        self.submit_encoded(
+            records
+                .into_iter()
+                .map(|(record, meta)| (record, None, meta))
+                .collect(),
+        );
+    }
+
+    /// [`Self::submit`], with the JSON of the records already encoded.
+    fn submit_encoded(&self, records: Vec<(Record, Option<bytes::Bytes>, Submitted)>) {
         if records.is_empty() || self.delivery_failed.load(Ordering::SeqCst) {
             return;
         }
@@ -766,10 +776,10 @@ impl Exporter {
             if self.delivery_failed.load(Ordering::SeqCst) {
                 return;
             }
-            for (record, meta) in records {
+            for (record, json, meta) in records {
                 let seq = self.next_seq.fetch_add(1, Ordering::Relaxed);
                 submitted.insert(seq, meta);
-                batch.push(SinkRecord { seq, record });
+                batch.push(SinkRecord { seq, record, json });
             }
         }
         let seqs: Vec<u64> = batch.iter().map(|r| r.seq).collect();
@@ -1462,7 +1472,7 @@ impl Stream {
     fn release(&mut self, released: Vec<Out<Option<CapturedCommit>>>) {
         let epoch = self.key.1;
         let max_record = self.exporter.config.max_record_bytes;
-        let mut out: Vec<(Record, Submitted)> = Vec::new();
+        let mut out: Vec<(Record, Option<bytes::Bytes>, Submitted)> = Vec::new();
         for entry in released {
             if self.gapped {
                 break;
@@ -1497,6 +1507,8 @@ impl Stream {
             let number = self.next_commit;
             self.next_commit += 1;
             let mut records = Vec::new();
+            // What `split_encoded` encoded, by index in `records`.
+            let mut json = BTreeMap::new();
             match entry {
                 Out::Deleted(delete) => {
                     let position = Position::new(epoch, self.last_txid, number);
@@ -1542,15 +1554,15 @@ impl Stream {
                                     data: table,
                                 }),
                             };
-                            match split(record, max_record) {
+                            match split_encoded(record, max_record) {
                                 Split::Fragments(fragments) => {
                                     if let Some(Body::Snapshot(first)) =
-                                        fragments.first().map(|f| &f.body)
+                                        fragments.first().map(|f| &f.record.body)
                                     {
                                         covered.push(first.data.table_gen());
                                     }
                                     count += 1;
-                                    records.extend(fragments);
+                                    extend_encoded(&mut records, &mut json, fragments);
                                 }
                                 // A row too large for any record: the table
                                 // leaves the snapshot and is unknown instead.
@@ -1578,8 +1590,10 @@ impl Stream {
                             envelope: envelope.clone(),
                             body: Body::Rows(RowsBody { data: table }),
                         };
-                        match split(record, max_record) {
-                            Split::Fragments(fragments) => records.extend(fragments),
+                        match split_encoded(record, max_record) {
+                            Split::Fragments(fragments) => {
+                                extend_encoded(&mut records, &mut json, fragments)
+                            }
                             Split::Bulk(record) => {
                                 if let Body::Bulk(body) = record.body {
                                     bulk.extend(body.tables);
@@ -1637,10 +1651,23 @@ impl Stream {
                     watermark: false,
                     recovered: false,
                 };
-                out.push((record, meta));
+                out.push((record, json.remove(&index), meta));
             }
         }
-        self.exporter.submit(out);
+        self.exporter.submit_encoded(out);
+    }
+}
+
+/// Append split pieces to `records`, keeping each one's JSON under its
+/// index there.
+fn extend_encoded(
+    records: &mut Vec<Record>,
+    json: &mut BTreeMap<usize, bytes::Bytes>,
+    pieces: Vec<Encoded>,
+) {
+    for piece in pieces {
+        json.insert(records.len(), piece.json.into());
+        records.push(piece.record);
     }
 }
 
@@ -2644,6 +2671,70 @@ mod tests {
             "{} queued gap records occupy {bytes} bytes for budget {budget}",
             held.len()
         );
+    }
+
+    #[test]
+    fn split_records_carry_their_own_json_to_the_sink() {
+        let (exporter, sink, _outcomes) = exporter(1 << 30);
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let mut stream = Stream::new(
+            exporter,
+            ("Items:a".into(), 1),
+            ActivationLink {
+                start_txid: 0,
+                prev_epoch: None,
+                prev_txid: None,
+                mode: ActivationMode::Fresh,
+            },
+            tx.downgrade(),
+        );
+        let table = |name: &str, rows: i64, width: usize| TableRows {
+            table: name.to_string(),
+            generation: 0,
+            columns: vec!["id".to_string(), "body".to_string()],
+            key_columns: vec!["id".to_string()],
+            rows: (0..rows)
+                .map(|id| {
+                    RowChange(
+                        Op::Insert,
+                        vec![Value::Integer(id)],
+                        vec![Value::Integer(id), Value::Text("x".repeat(width))],
+                    )
+                })
+                .collect(),
+        };
+        // Whole records, fragments (40 rows of 4 KiB against 64 KiB), and a
+        // row too large for any record, as snapshot and as rows.
+        let mut commit = commit_of(8);
+        commit.snapshot = Some(crate::storage::export_capture::InlineSnapshot {
+            id: "s".to_string(),
+            tables: vec![
+                table("a", 3, 8),
+                table("b", 40, 4096),
+                table("c", 1, 70_000),
+            ],
+        });
+        commit.tables = vec![
+            table("d", 3, 8),
+            table("e", 40, 4096),
+            table("f", 1, 70_000),
+        ];
+        stream.release(vec![Out::Released(Released::Commit {
+            label: 1,
+            payload: Some(commit),
+        })]);
+        let held = sink.held.lock().unwrap();
+        let mut fragments = 0;
+        for r in held.iter() {
+            let split = matches!(r.record.body, Body::Rows(_) | Body::Snapshot(_));
+            let expected = split.then(|| r.record.to_json());
+            assert_eq!(r.json.as_deref(), expected.as_deref(), "{:?}", r.record);
+            fragments += usize::from(r.record.envelope.fragments > 1);
+        }
+        assert!(fragments >= 4, "{fragments} fragments");
+        assert!(held
+            .iter()
+            .any(|r| matches!(r.record.body, Body::Bulk(_)) && r.json.is_none()));
     }
 
     #[test]

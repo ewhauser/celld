@@ -114,6 +114,7 @@ pub(crate) fn submitted(seqs: std::ops::Range<u64>) -> Vec<SinkRecord> {
     seqs.map(|seq| SinkRecord {
         seq,
         record: record("c", seq),
+        json: None,
     })
     .collect()
 }
@@ -155,6 +156,131 @@ fn a_message_is_the_record_json_keyed_by_stream() {
     let mut reborn = record("a", 1);
     reborn.envelope.stream.incarnation = 8;
     assert_ne!(message(&reborn).unwrap().key, one.key);
+}
+
+/// Rows of `table` in `cell`'s stream, `width` bytes of text each.
+fn rows(cell: &str, txid: u64, table: &str, count: i64, width: usize) -> Record {
+    use celld_export_format::{Op, RowChange, RowsBody, TableRows, Value};
+    Record {
+        body: Body::Rows(RowsBody {
+            data: TableRows {
+                table: table.into(),
+                generation: 1,
+                columns: vec!["id".into(), "body".into()],
+                key_columns: vec!["id".into()],
+                rows: (0..count)
+                    .map(|id| {
+                        RowChange(
+                            Op::Insert,
+                            vec![Value::Integer(id)],
+                            vec![
+                                Value::Integer(id),
+                                Value::Text(format!("{id}\n\"é{}", "x".repeat(width))),
+                            ],
+                        )
+                    })
+                    .collect(),
+            },
+        }),
+        ..record(cell, txid)
+    }
+}
+
+#[tokio::test]
+async fn the_payload_is_the_record_json_whether_or_not_the_exporter_encoded_it() {
+    use celld_export_format::{
+        split_encoded, ColumnDef, LinkBody, LinkMode, SchemaBody, Split, WatermarkBody,
+    };
+    let mut records: Vec<(Record, Option<bytes::Bytes>)> = Vec::new();
+    // What the exporter does with rows: split, and send what the split
+    // encoded. One fragment, then several.
+    for (count, width) in [(3, 10), (40, 200)] {
+        let Split::Fragments(pieces) = split_encoded(rows("c", 1, "t", count, width), 4096) else {
+            panic!("rows fit")
+        };
+        assert_eq!(pieces.len() > 1, count == 40);
+        records.extend(pieces.into_iter().map(|p| (p.record, Some(p.json.into()))));
+    }
+    // A row too large alone: the exporter sends the bulk record unencoded.
+    let Split::Bulk(bulk) = split_encoded(rows("c", 2, "t", 1, 8192), 4096) else {
+        panic!("one row over the limit")
+    };
+    records.push((*bulk, None));
+    // Records that are never split.
+    let at = |body| Record {
+        body,
+        ..record("c", 3)
+    };
+    records.push((
+        at(Body::Link(LinkBody {
+            start_txid: 1,
+            prev_epoch: None,
+            prev_txid: None,
+            mode: LinkMode::Fresh,
+        })),
+        None,
+    ));
+    records.push((
+        at(Body::Schema(SchemaBody {
+            table: "t".into(),
+            generation: 1,
+            sql: "CREATE TABLE t (id INTEGER PRIMARY KEY, body TEXT)".into(),
+            columns: vec![ColumnDef {
+                name: "id".into(),
+                decl_type: "INTEGER".into(),
+                pk: 1,
+                not_null: false,
+                generated: false,
+            }],
+            dropped: false,
+            renamed_from: None,
+            unsupported: false,
+        })),
+        None,
+    ));
+    records.push((
+        at(Body::Watermark(WatermarkBody {
+            from: None,
+            through: Position::new(1, 3, 3),
+            commits: 3,
+            records: 5,
+        })),
+        None,
+    ));
+
+    let mut h = harness(Duration::from_secs(60));
+    let (producer, mut calls) = fake();
+    h.connects.send(Ok(producer)).unwrap();
+    h.sink
+        .submit(
+            records
+                .iter()
+                .cloned()
+                .enumerate()
+                .map(|(seq, (record, json))| SinkRecord {
+                    seq: seq as u64,
+                    record,
+                    json,
+                })
+                .collect(),
+        )
+        .unwrap();
+    let call = next_call(&mut calls).await;
+    assert_eq!(call.messages.len(), records.len());
+    let mut expected_bytes = 0;
+    for ((record, json), m) in records.iter().zip(&call.messages) {
+        assert_eq!(m.payload, serde_json::to_vec(record).unwrap());
+        if let Some(json) = json {
+            // The exporter's bytes themselves, not a second encoding.
+            assert_eq!(m.payload.as_ptr(), json.as_ptr());
+        }
+        expected_bytes += (m.key.len() + m.payload.len()) as u64;
+    }
+    assert_eq!(h.sink.buffered_bytes(), expected_bytes);
+    call.reply.send(vec![acked("t/0"); records.len()]).unwrap();
+    let outcome = next_outcome(&mut h.outcomes).await;
+    assert!(outcome.results.iter().all(|(_, d)| d.is_acknowledged()));
+    assert_eq!(h.sink.buffered_bytes(), 0);
 }
 
 #[tokio::test]

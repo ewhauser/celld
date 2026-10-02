@@ -1,4 +1,4 @@
-use celld_export_format::{split, Consumer, Reassembler, Record, Split};
+use celld_export_format::{split, split_encoded, Consumer, Reassembler, Record, Split};
 use criterion::{criterion_group, criterion_main, BatchSize, BenchmarkId, Criterion, Throughput};
 use std::hint::black_box;
 use std::time::Duration;
@@ -60,6 +60,27 @@ fn fragments(c: &mut Criterion) {
     g.finish();
 }
 
+/// What the exporter does per record before a topic sink: split it under
+/// the limit and produce each piece's JSON payload.
+fn payload(c: &mut Criterion) {
+    let mut g = c.benchmark_group("export_payload");
+    for rows in [1, 128, 1024] {
+        let record = support::rows_record(rows, 128);
+        g.throughput(Throughput::Bytes(record.to_json().len() as u64));
+        g.bench_function(BenchmarkId::new("split_encode_64k", rows), |b| {
+            b.iter_batched(
+                || record.clone(),
+                |r| match split_encoded(black_box(r), 64 * 1024) {
+                    Split::Fragments(fragments) => fragments,
+                    Split::Bulk(_) => unreachable!("rows fit"),
+                },
+                BatchSize::PerIteration,
+            )
+        });
+    }
+    g.finish();
+}
+
 fn replay(c: &mut Criterion) {
     let mut g = c.benchmark_group("export_consumer");
     for (commits, streams, repair) in [
@@ -97,6 +118,6 @@ criterion_group! {
         .sample_size(30)
         .warm_up_time(Duration::from_secs(1))
         .measurement_time(Duration::from_secs(3));
-    targets = json, fragments, replay
+    targets = json, fragments, payload, replay
 }
 criterion_main!(benches);
