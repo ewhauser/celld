@@ -68,6 +68,16 @@ pub fn limits() -> Result<Limits, Error> {
     })
 }
 
+/// Appends in flight at once, and batches landing at once:
+/// `EXPORT_APPEND_CONCURRENCY`.
+pub fn concurrency() -> Result<usize, Error> {
+    Ok(number(
+        "EXPORT_APPEND_CONCURRENCY",
+        crate::pipeline::DEFAULT_CONCURRENCY,
+    )?
+    .max(1))
+}
+
 /// How long landed rows may take to become queryable:
 /// `EXPORT_VISIBLE_SECONDS`, default 300.
 pub fn visible_timeout() -> Result<Duration, Error> {
