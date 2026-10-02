@@ -1363,11 +1363,15 @@ impl Db {
 
     /// Detects whether a FULL or RESTART checkpoint occurred (we may have missed
     /// frames). Ported from `DB.detectFullCheckpoint` (db.go:1477-1507).
-    fn detect_full_checkpoint(&self, known_salts: &[(u32, u32)]) -> Result<bool> {
-        let wal_bytes = self.host.read(&self.wal_path())?;
-        let rd = WalReader::new(&wal_bytes).map_err(Error::from)?;
+    ///
+    /// Reads the WAL header and frame headers through the held handle, as Go
+    /// reads the open file, rather than the whole WAL: the scan needs only
+    /// salts, and usually stops a few frames in, at the first old-salt frame.
+    fn detect_full_checkpoint(&mut self, known_salts: &[(u32, u32)]) -> Result<bool> {
         let last_known = known_salts.last().copied().unwrap_or((0, 0));
-        let mut m = rd.frame_salts_until(last_known);
+        let mut m = self
+            .with_wal_file(|file| crate::wal::frame_salts_until_in_file(file, last_known))?
+            .map_err(Error::from)?;
         for s in known_salts {
             m.remove(s);
         }
