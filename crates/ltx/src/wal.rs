@@ -583,12 +583,30 @@ impl<'a> WalReader<'a> {
     ///
     /// Ported from `FrameSaltsUntil` in litestream@v0.5.11 wal_reader.go:246-270.
     pub fn frame_salts_until(&self, until: (u32, u32)) -> HashSet<(u32, u32)> {
+        let read =
+            |offset| Ok::<_, std::convert::Infallible>(self.read_at(offset, WAL_FRAME_HEADER_SIZE));
+        match self.frame_salts_until_with(until, read) {
+            Ok(m) => m,
+            Err(never) => match never {},
+        }
+    }
+
+    /// [`Self::frame_salts_until`] with frame headers read by `frame_header_at`
+    /// instead of from this reader's bytes, so a caller holding only the WAL
+    /// header can scan a file. `frame_header_at(offset)` yields the
+    /// `WAL_FRAME_HEADER_SIZE` bytes at `offset`, or `None` on a short read.
+    fn frame_salts_until_with<H: AsRef<[u8]>, E>(
+        &self,
+        until: (u32, u32),
+        mut frame_header_at: impl FnMut(i64) -> Result<Option<H>, E>,
+    ) -> Result<HashSet<(u32, u32)>, E> {
         let mut m = HashSet::new();
         let step = WAL_FRAME_HEADER_SIZE as i64 + self.page_size as i64;
         let mut offset = WAL_HEADER_SIZE as i64;
         // The loop ends either when a frame-header read runs short (the Go
         // `n != len(hdr)` => break) or when we reach the `until` salt below.
-        while let Some(hdr) = self.read_at(offset, WAL_FRAME_HEADER_SIZE) {
+        while let Some(hdr) = frame_header_at(offset)? {
+            let hdr = hdr.as_ref();
             let salt1 = be_u32(&hdr[8..]);
             let salt2 = be_u32(&hdr[12..]);
 
@@ -602,8 +620,43 @@ impl<'a> WalReader<'a> {
 
             offset += step;
         }
-        m
+        Ok(m)
     }
+}
+
+/// [`WalReader::frame_salts_until`] over an open WAL file, reading the 32-byte
+/// header and then only each frame's 24-byte header — never the pages, which
+/// the scan does not look at. This is the shape of Go's `detectFullCheckpoint`
+/// (litestream@v0.5.11 db.go:1477-1507), which hands the open file to
+/// `NewWALReader` as an `io.ReaderAt`.
+///
+/// The outer `Err` is an I/O failure, including a file that shrank under the
+/// scan, which the caller may retry on a fresh handle. The inner `Err` is the
+/// header's verdict, exactly as [`WalReader::new`] gives it over the file's
+/// bytes: [`WalError::Eof`] for a file shorter than a header or a header
+/// whose checksum does not match, and so on. A frame header that runs past
+/// the end of the file ends the scan, as a short read does over the bytes.
+pub fn frame_salts_until_in_file(
+    file: &mut crate::HostFile,
+    until: (u32, u32),
+) -> std::io::Result<WalResult<HashSet<(u32, u32)>>> {
+    let len = file.file_len()?;
+    if len < WAL_HEADER_SIZE as u64 {
+        return Ok(Err(WalError::Eof));
+    }
+    let header = file.read_exact_at(0, WAL_HEADER_SIZE)?;
+    let rd = match WalReader::new(&header) {
+        Ok(rd) => rd,
+        Err(e) => return Ok(Err(e)),
+    };
+    rd.frame_salts_until_with(until, |offset| {
+        let offset = offset as u64;
+        if offset + WAL_FRAME_HEADER_SIZE as u64 > len {
+            return Ok(None);
+        }
+        file.read_exact_at(offset, WAL_FRAME_HEADER_SIZE).map(Some)
+    })
+    .map(Ok)
 }
 
 /// Reads a big-endian `u32` from the first four bytes of `b`.
