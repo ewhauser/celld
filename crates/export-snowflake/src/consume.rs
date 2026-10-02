@@ -96,13 +96,13 @@ impl Batch {
         offset: u64,
         payload: &[u8],
     ) -> Result<(), Undecodable> {
-        let source = message_source(transport, partition, offset);
-        let record = Record::from_json(payload).map_err(|e| Undecodable {
-            source: source.clone(),
-            error: e.to_string(),
-        })?;
+        let row = LandingRow::from_json(payload, message_source(transport, partition, offset))
+            .map_err(|e| Undecodable {
+                source: message_source(transport, partition, offset),
+                error: e.to_string(),
+            })?;
         self.cover(partition, offset);
-        self.push_record(&record, source, payload.len());
+        self.push_row(row, payload.len());
         Ok(())
     }
 
@@ -132,21 +132,24 @@ impl Batch {
             _ => fallback.to_string(),
         };
         let bytes = serde_json::to_vec(&value).map_err(|e| fail(&source, e.to_string()))?;
-        let record = Record::from_json(&bytes).map_err(|e| fail(&source, e.to_string()))?;
-        self.push_record(&record, source, bytes.len());
+        let row = LandingRow::from_json(&bytes, source.clone())
+            .map_err(|e| fail(&source, e.to_string()))?;
+        self.push_row(row, bytes.len());
         Ok(())
     }
 
     /// Add a record read from `source`.
     pub fn push(&mut self, record: &Record, source: impl Into<String>) {
-        let bytes = serde_json::to_vec(record).map_or(0, |b| b.len());
-        self.push_record(record, source.into(), bytes);
+        let json = record.to_json();
+        let row =
+            LandingRow::split(record, &json, source.into()).expect("an encoded record splits");
+        self.push_row(row, json.len());
     }
 
-    fn push_record(&mut self, record: &Record, mut source: String, bytes: usize) {
-        source.push_str(&self.tag);
-        self.bytes += bytes + source.len();
-        self.rows.push(LandingRow::from_record(record, source));
+    fn push_row(&mut self, mut row: LandingRow, bytes: usize) {
+        row.source.push_str(&self.tag);
+        self.bytes += bytes + row.source.len();
+        self.rows.push(row);
     }
 
     /// Records waiting to land.
