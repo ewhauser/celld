@@ -12,6 +12,7 @@
 //!   histogram's count or percentile over the phase;
 //! - `client:FIELD`: `ok`, `errors`, `shed`, `error_rate`, `achieved_rate`,
 //!   `p50_us`, `p99_us`, `p999_us`;
+//! - `node_count`: the number of nodes sampled in the phase;
 //! - `node:FIELD`: `cpu_cores` or `rss_bytes_max`, the largest across nodes.
 //!
 //! With `per_ok`, the value is divided by the phase's successful requests,
@@ -114,6 +115,7 @@ fn metric(metric: &str, phase: &Value) -> Option<f64> {
             "p999_us" => phase["latency_us"]["p999"].as_f64(),
             _ => None,
         },
+        "node_count" => Some(phase["nodes"].as_array()?.len() as f64),
         "node" => phase["nodes"]
             .as_array()?
             .iter()
@@ -143,6 +145,29 @@ mod tests {
             min: None,
             max: Some(max),
             timing: false,
+        }
+    }
+
+    #[test]
+    fn idle_fleet_budget_is_per_node_and_per_second() {
+        let scenario: crate::scenario::Scenario =
+            serde_json::from_str(include_str!("../scenarios/F9-idle-cost.json")).unwrap();
+        let check = &scenario.phases[0].checks[0];
+        for count in [3, 10] {
+            let mut phase = json!({
+                "duration_s": 120.0,
+                "nodes": vec![json!({}); count],
+                "server": {"bucket_requests": [{"count": count * 120 * 2}]},
+            });
+            let result = evaluate(check, &phase);
+            assert_eq!(result["value"], 2.0);
+            assert_eq!(result["pass"], true);
+            phase["server"]["bucket_requests"][0]["count"] = json!(count * 120 * 11);
+            assert_eq!(evaluate(check, &phase)["pass"], false);
+            phase["nodes"] = json!([]);
+            assert_eq!(evaluate(check, &phase)["pass"], false);
+            phase.as_object_mut().unwrap().remove("nodes");
+            assert_eq!(evaluate(check, &phase)["pass"], false);
         }
     }
 
