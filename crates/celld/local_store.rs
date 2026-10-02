@@ -15,7 +15,7 @@ use futures_util::stream::{self, BoxStream};
 use futures_util::FutureExt as _;
 use futures_util::StreamExt as _;
 use object_store::list::{PaginatedListOptions, PaginatedListResult, PaginatedListStore};
-use object_store::path::Path;
+use object_store::path::{Path, DELIMITER};
 use object_store::{
     Attribute, AttributeValue, Attributes, Error, GetOptions, GetResult, GetResultPayload,
     ListResult, MultipartUpload, ObjectMeta, ObjectStore, PutMode, PutMultipartOptions, PutOptions,
@@ -25,6 +25,7 @@ use rusqlite::{params, Connection, OptionalExtension as _, TransactionBehavior};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 use std::fmt;
+use std::ops::ControlFlow;
 use std::path::{Path as FsPath, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime};
@@ -192,27 +193,44 @@ impl LocalStore {
             .ok_or_else(|| not_found(key))
     }
 
-    fn metadata(&self) -> object_store::Result<Vec<StoredObject>> {
+    /// Visit, in key order, each object whose key starts with `prefix` and
+    /// sorts after `after`, until `visit` breaks. The row holds the columns
+    /// [`listed_meta`] reads.
+    ///
+    /// The bounds are a range on the primary key's index, so a listing reads
+    /// the keys it can return and not the bucket. Reading every object and
+    /// filtering in Rust cost a quarter of a dev node's CPU and allocations
+    /// once the bucket held a few thousand LTX files (2026-10-01).
+    fn scan(
+        &self,
+        prefix: &str,
+        after: Option<&str>,
+        mut visit: impl FnMut(&str, &rusqlite::Row<'_>) -> object_store::Result<ControlFlow<()>>,
+    ) -> object_store::Result<()> {
+        let (lower, inclusive) = match after {
+            Some(after) if after >= prefix => (after, false),
+            _ => (prefix, true),
+        };
+        let upper = prefix_successor(prefix);
         let connection = self.connect()?;
         let mut statement = connection
-            .prepare(
-                "SELECT key, CAST(X'' AS BLOB), etag, modified_ms, attributes, length(body)
-                 FROM objects ORDER BY key",
-            )
+            .prepare_cached(&scan_sql(inclusive, upper.is_some()))
             .map_err(db_error)?;
-        let rows = statement
-            .query_map([], |row| {
-                Ok(StoredObject {
-                    key: row.get(0)?,
-                    body: row.get(1)?,
-                    size: row.get(5)?,
-                    etag: row.get(2)?,
-                    modified_ms: row.get(3)?,
-                    attributes: row.get(4)?,
-                })
-            })
-            .map_err(db_error)?;
-        rows.collect::<Result<Vec<_>, _>>().map_err(db_error)
+        let mut rows = match &upper {
+            Some(upper) => statement.query(rusqlite::named_params! {
+                ":lower": lower,
+                ":upper": upper,
+            }),
+            None => statement.query(rusqlite::named_params! { ":lower": lower }),
+        }
+        .map_err(db_error)?;
+        while let Some(row) = rows.next().map_err(db_error)? {
+            let key = row.get_ref(0).and_then(|key| Ok(key.as_str()?));
+            if visit(key.map_err(db_error)?, row)?.is_break() {
+                break;
+            }
+        }
+        Ok(())
     }
 
     fn put_sync(
@@ -457,23 +475,22 @@ impl ObjectStore for LocalStore {
     }
 
     fn list(&self, prefix: Option<&Path>) -> BoxStream<'static, object_store::Result<ObjectMeta>> {
-        let prefix = prefix.cloned();
-        let result = self.metadata().and_then(|objects| {
-            objects
-                .into_iter()
-                .map(|object| object_meta(&object))
-                .filter(|meta| {
-                    meta.as_ref().map_or(true, |meta| {
-                        prefix.as_ref().is_none_or(|prefix| {
-                            meta.location
-                                .prefix_match(prefix)
-                                .is_some_and(|mut remainder| remainder.next().is_some())
-                        })
-                    })
-                })
-                .collect::<object_store::Result<Vec<_>>>()
+        let prefix = prefix.cloned().unwrap_or_default();
+        let mut objects = Vec::new();
+        let result = self.scan(&key_prefix(&prefix), None, |key, row| {
+            // The range already holds only keys below the prefix. This
+            // restates object_store's rule on the parsed path: a prefix
+            // matches whole segments and never the object it names.
+            let location = stored_location(key)?;
+            if location
+                .prefix_match(&prefix)
+                .is_some_and(|mut remainder| remainder.next().is_some())
+            {
+                objects.push(listed_meta(location, row)?);
+            }
+            Ok(ControlFlow::Continue(()))
         });
-        match result {
+        match result.map(|()| objects) {
             Ok(objects) => stream::iter(objects.into_iter().map(Ok)).boxed(),
             Err(error) => stream::once(async move { Err(error) }).boxed(),
         }
@@ -481,22 +498,35 @@ impl ObjectStore for LocalStore {
 
     async fn list_with_delimiter(&self, prefix: Option<&Path>) -> object_store::Result<ListResult> {
         let prefix = prefix.cloned().unwrap_or_default();
+        let start = key_prefix(&prefix);
         let mut common_prefixes = BTreeSet::new();
         let mut objects = Vec::new();
-        for object in self.metadata()? {
-            let location = stored_location(&object.key)?;
+        // The key prefix of the last common prefix found. Its keys are
+        // adjacent in key order, so the rest of them are skipped unparsed.
+        let mut within = None::<String>;
+        self.scan(&start, None, |key, row| {
+            if within
+                .as_deref()
+                .is_some_and(|within| key.starts_with(within))
+            {
+                return Ok(ControlFlow::Continue(()));
+            }
+            let location = stored_location(key)?;
             let Some(mut remainder) = location.prefix_match(&prefix) else {
-                continue;
+                return Ok(ControlFlow::Continue(()));
             };
             let Some(child) = remainder.next() else {
-                continue;
+                return Ok(ControlFlow::Continue(()));
             };
             if remainder.next().is_some() {
+                within = Some(format!("{start}{}{DELIMITER}", child.as_ref()));
                 common_prefixes.insert(prefix.child(child));
-            } else {
-                objects.push(object_meta(&object)?);
+                return Ok(ControlFlow::Continue(()));
             }
-        }
+            drop(remainder);
+            objects.push(listed_meta(location, row)?);
+            Ok(ControlFlow::Continue(()))
+        })?;
         Ok(ListResult {
             common_prefixes: common_prefixes.into_iter().collect(),
             objects,
@@ -534,31 +564,38 @@ impl PaginatedListStore for LocalStore {
         let delimiter = options.delimiter.as_deref();
         let limit = options.max_keys.unwrap_or(usize::MAX);
         let mut entries: Vec<(String, Option<Path>, Option<ObjectMeta>)> = Vec::new();
-        for object in self.metadata()? {
-            let Some(remainder) = object.key.strip_prefix(prefix) else {
-                continue;
+        self.scan(prefix, after, |key, row| {
+            let Some(remainder) = key.strip_prefix(prefix) else {
+                return Ok(ControlFlow::Continue(()));
             };
-            if after.is_some_and(|after| object.key.as_str() <= after) {
-                continue;
-            }
             let common = delimiter.and_then(|delimiter| {
-                remainder.find(delimiter).map(|index| {
-                    stored_location(&format!("{prefix}{}{}", &remainder[..index], delimiter))
-                })
+                remainder
+                    .find(delimiter)
+                    .map(|index| &key[..prefix.len() + index + delimiter.len()])
             });
-            let common = common.transpose()?;
             if let Some(common) = common {
-                if let Some((last, Some(previous), _)) = entries.last_mut() {
-                    if *previous == common {
-                        *last = object.key;
-                        continue;
+                // The previous entry has this common prefix exactly when
+                // its key starts with it.
+                if let Some((last, Some(_), _)) = entries.last_mut() {
+                    if last.starts_with(common) {
+                        last.clear();
+                        last.push_str(key);
+                        return Ok(ControlFlow::Continue(()));
                     }
                 }
-                entries.push((object.key, Some(common), None));
+                entries.push((key.to_string(), Some(stored_location(common)?), None));
             } else {
-                entries.push((object.key.clone(), None, Some(object_meta(&object)?)));
+                let meta = listed_meta(stored_location(key)?, row)?;
+                entries.push((key.to_string(), None, Some(meta)));
             }
-        }
+            // The entry before this one is final, and it is the last one the
+            // page returns.
+            Ok(if entries.len() > limit {
+                ControlFlow::Break(())
+            } else {
+                ControlFlow::Continue(())
+            })
+        })?;
         let truncated = entries.len() > limit;
         entries.truncate(limit);
         let page_token = truncated
@@ -621,16 +658,76 @@ impl MultipartUpload for LocalUpload {
 }
 
 fn object_meta(object: &StoredObject) -> object_store::Result<ObjectMeta> {
+    meta(
+        stored_location(&object.key)?,
+        object.size,
+        object.etag,
+        object.modified_ms,
+    )
+}
+
+/// The metadata of a row [`LocalStore::scan`] visited.
+fn listed_meta(location: Path, row: &rusqlite::Row<'_>) -> object_store::Result<ObjectMeta> {
+    meta(
+        location,
+        row.get(1).map_err(db_error)?,
+        row.get(2).map_err(db_error)?,
+        row.get(3).map_err(db_error)?,
+    )
+}
+
+fn meta(
+    location: Path,
+    size: u64,
+    etag: i64,
+    modified_ms: i64,
+) -> object_store::Result<ObjectMeta> {
     let modified = SystemTime::UNIX_EPOCH
-        .checked_add(Duration::from_millis(object.modified_ms.max(0) as u64))
+        .checked_add(Duration::from_millis(modified_ms.max(0) as u64))
         .ok_or_else(|| message_error("the object timestamp is outside the system clock range"))?;
     Ok(ObjectMeta {
-        location: stored_location(&object.key)?,
+        location,
         last_modified: modified.into(),
-        size: object.size,
-        e_tag: Some(object.etag.to_string()),
+        size,
+        e_tag: Some(etag.to_string()),
         version: None,
     })
+}
+
+/// The query behind [`LocalStore::scan`]. Every variant is a range on the
+/// key's index, which SQLite seeks only when each bound is a plain
+/// comparison, so an absent bound is left out rather than bound to NULL.
+fn scan_sql(inclusive: bool, bounded: bool) -> String {
+    format!(
+        "SELECT key, length(body), etag, modified_ms FROM objects
+         WHERE key {} :lower{} ORDER BY key",
+        if inclusive { ">=" } else { ">" },
+        if bounded { " AND key < :upper" } else { "" },
+    )
+}
+
+/// The key prefix of the objects below `prefix`. The trailing delimiter
+/// keeps `a/bc` out of a listing of `a/b`, and `a/b` itself.
+fn key_prefix(prefix: &Path) -> String {
+    match prefix.as_ref() {
+        "" => String::new(),
+        prefix => format!("{prefix}{}", DELIMITER),
+    }
+}
+
+/// The exclusive upper bound of the keys that start with `prefix`: the
+/// prefix with its last character advanced, or `None` when nothing bounds
+/// them (an empty prefix, or one made only of `char::MAX`). SQLite compares
+/// keys bytewise, and UTF-8 orders bytes as it orders code points.
+fn prefix_successor(prefix: &str) -> Option<String> {
+    let mut successor = prefix.to_string();
+    while let Some(last) = successor.pop() {
+        if let Some(next) = (last as u32 + 1..=char::MAX as u32).find_map(char::from_u32) {
+            successor.push(next);
+            return Some(successor);
+        }
+    }
+    None
 }
 
 fn encode_attributes(attributes: &Attributes) -> object_store::Result<String> {
