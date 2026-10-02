@@ -25,7 +25,7 @@ fixtures only for this target; ordinary node builds do not include them.
 | `export_consumer` | 128/1,024 commits, 1/32 streams, duplicate delivery, optional complete repair snapshot | Ingest and state derivation separately; delivered records, including duplicates and metadata |
 | `capture` | 1/64/512 rows, 128-byte/4-KiB blobs; 64 oversized 32-KiB rows | Plain SQLite write, write plus checkpoint, checkpoint alone; updated rows |
 | `parquet` | 64/1,024 mixed-value records over 32 streams | Production Parquet encoding/decoding; records |
-| `delivery_cache` | 64 historical/64 active streams, 4,096/64, 1,024/1,024 | Production cache lookups, position updates and spill within a transaction; 64 acknowledgements per iteration |
+| `delivery_cache` | 64 historical/64 active streams, 4,096/64 and 1,024/1,024 in rotation; 2,048/2,048 and 16,384/16,384 uniformly at random | Production cache lookups, position updates and spill within a transaction; 64 acknowledgements per iteration |
 | `audit_cache` | 16/128 Parquet objects, one stream and 64 commits per object | Cold/warm index refresh and stream summaries; objects. One-cell state derivation; delivered records for that cell |
 
 Capture fixtures update a fixed-size in-memory table. Capture sessions and schema
@@ -48,10 +48,13 @@ boundary. They use the development SQLite bucket on local disk; this measures no
 remote S3 request latency.
 
 Delivery fixtures keep their historical and active stream sets fixed across
-iterations, exercising the production hot-cache/spill implementation. They do
-not run the full sink acknowledgement channel or exporter scheduling loop.
-Consumer fixtures retain at most 128 current keys per stream while varying
-history length. No measured loop accumulates new streams or rows indefinitely.
+iterations, exercising the production hot-cache/spill implementation. The
+uniform cases draw each acknowledgement's stream from a fixed-seed generator;
+2,048 streams fit the hot cache and 16,384 overflow it, so about half of their
+acknowledgements reload a spilled stream. They do not run the full sink
+acknowledgement channel or exporter scheduling loop. Consumer fixtures retain at
+most 128 current keys per stream while varying history length. No measured loop
+accumulates new streams or rows indefinitely.
 
 ## Baselines and comparison
 
