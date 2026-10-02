@@ -178,15 +178,18 @@ jobs:
         id: compare
         if: always()
         run: |
-          set -uo pipefail
+          set -euo pipefail
+          shopt -s nullglob
           status=0
           : > compare.txt
           for kind in dev fleet; do
-            new=$(ls perf-out/$kind/*/result.json 2>/dev/null | head -1)
-            old=$(ls baseline/$kind/*/result.json 2>/dev/null | head -1)
-            if [[ -n "$new" && -n "$old" ]]; then
+            new=(perf-out/"$kind"/*/result.json)
+            old=(baseline/"$kind"/*/result.json)
+            if (( ${#new[@]} && ${#old[@]} )); then
               echo "== $kind" >> compare.txt
-              target/lab/celld-perf compare "$old" "$new" >> compare.txt || status=1
+              target/lab/celld-perf compare "${old[0]}" "${new[0]}" >> compare.txt || status=1
+            else
+              echo "== $kind: comparison skipped (no result or successful baseline)" >> compare.txt
             fi
           done
           # Criterion flags its own changes; they inform, the scenarios gate.
