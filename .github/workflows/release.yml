@@ -33,54 +33,78 @@ env:
 
 jobs:
   build-celld:
-    name: Build celld ${{ matrix.target }}
+    # Static name so a skipped run shows "Build celld" instead of the
+    # unexpanded matrix expression.
+    name: Build celld
     if: github.event_name != 'release'
     strategy:
       fail-fast: false
       matrix:
+        target:
+          - x86_64-unknown-linux-gnu
+          - aarch64-unknown-linux-gnu
+          - aarch64-apple-darwin
+        # The default binary, and the `kafka` variant with the Kafka change
+        # export sink compiled in, published as `celld-kafka-<target>.gz`.
+        variant: ["", kafka]
         include:
-          - runner: ubuntu-22.04
-            target: x86_64-unknown-linux-gnu
-          - runner: ubuntu-22.04-arm
-            target: aarch64-unknown-linux-gnu
-          - runner: macos-14
-            target: aarch64-apple-darwin
+          - target: x86_64-unknown-linux-gnu
+            runner: ubuntu-22.04
+          - target: aarch64-unknown-linux-gnu
+            runner: ubuntu-22.04-arm
+          - target: aarch64-apple-darwin
+            runner: macos-14
+          - variant: kafka
+            features: export-kafka
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 90
+    env:
+      # `celld-<target>` for the default binary, `celld-kafka-<target>` for a
+      # variant.
+      ASSET_BASE: celld-${{ matrix.variant && format('{0}-', matrix.variant) || '' }}${{ matrix.target }}
     steps:
       - uses: actions/checkout@v6
 
       - name: Build
+        env:
+          CELLD_FEATURES: ${{ matrix.features }}
         run: |
           set -euo pipefail
           rustup toolchain install "$RUST_VERSION" --profile minimal
           rustup default "$RUST_VERSION"
-          cargo build --release --locked
+          if [ -n "$CELLD_FEATURES" ]; then
+            cargo build --release --locked -p celld --features "$CELLD_FEATURES"
+          else
+            cargo build --release --locked
+          fi
           version=$(sed -n 's/^version = "\(.*\)"$/\1/p' crates/celld/Cargo.toml | head -1)
           target/release/celld --version | grep -F "$version"
 
       - name: Package
         env:
           BUILD_TARGET: ${{ matrix.target }}
+          CELLD_FEATURES: ${{ matrix.features }}
         run: |
           set -euo pipefail
           mkdir -p out
           # -n omits name and timestamp so the envelope is reproducible
           # whenever the binary is.
-          asset="celld-$BUILD_TARGET.gz"
+          asset="$ASSET_BASE.gz"
           gzip -9 -n -c target/release/celld > "out/$asset"
           version=$(sed -n 's/^version = "\(.*\)"$/\1/p' crates/celld/Cargo.toml | head -1)
           digest=$(shasum -a 256 "out/$asset" | cut -d ' ' -f 1)
           jq -n --arg repository "$GITHUB_REPOSITORY" --arg commit "$GITHUB_SHA" \
             --arg version "$version" --arg target "$BUILD_TARGET" \
+            --arg features "$CELLD_FEATURES" \
             --arg asset "$asset" --arg sha256 "$digest" \
             '{repository: $repository, commit: $commit, version: $version,
-              target: $target, asset: $asset, sha256: $sha256}' \
-            > "out/celld-$BUILD_TARGET.build.json"
+              target: $target, features: ($features | split(",") | map(select(. != ""))),
+              asset: $asset, sha256: $sha256}' \
+            > "out/$ASSET_BASE.build.json"
 
       - uses: actions/upload-artifact@v4
         with:
-          name: celld-${{ matrix.target }}
+          name: ${{ env.ASSET_BASE }}
           path: out/*
           if-no-files-found: error
 
@@ -155,18 +179,27 @@ jobs:
           set -euo pipefail
           version=$(sed -n 's/^version = "\(.*\)"$/\1/p' crates/celld/Cargo.toml | head -1)
           cd assets
-          for target in \
-            x86_64-unknown-linux-gnu \
-            aarch64-unknown-linux-gnu \
-            aarch64-apple-darwin; do
-            test -f "celld-$target.gz"
-            jq -e --arg commit "$GITHUB_SHA" --arg repository "$GITHUB_REPOSITORY" \
-              --arg target "$target" --arg version "$version" \
-              '.commit == $commit and .repository == $repository and .target == $target
-                and .version == $version and .asset == ("celld-" + $target + ".gz")' \
-              "celld-$target.build.json"
-            expected=$(jq -r .sha256 "celld-$target.build.json")
-            printf '%s  %s\n' "$expected" "celld-$target.gz" | sha256sum --check --strict
+          # Each variant prefix, with the feature list it must have been built
+          # with.
+          for variant in "celld-=[]" 'celld-kafka-=["export-kafka"]'; do
+            prefix=${variant%%=*}
+            features=${variant#*=}
+            for target in \
+              x86_64-unknown-linux-gnu \
+              aarch64-unknown-linux-gnu \
+              aarch64-apple-darwin; do
+              base="$prefix$target"
+              test -f "$base.gz"
+              jq -e --arg commit "$GITHUB_SHA" --arg repository "$GITHUB_REPOSITORY" \
+                --arg target "$target" --arg version "$version" \
+                --arg asset "$base.gz" --argjson features "$features" \
+                '.commit == $commit and .repository == $repository and .target == $target
+                  and .version == $version and .asset == $asset
+                  and .features == $features' \
+                "$base.build.json"
+              expected=$(jq -r .sha256 "$base.build.json")
+              printf '%s  %s\n' "$expected" "$base.gz" | sha256sum --check --strict
+            done
           done
           sha256sum celld-*.gz > SHA256SUMS
 
