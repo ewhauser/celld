@@ -33,6 +33,6 @@ pub mod value;
 
 pub use consumer::{Consumer, Gap, StreamState, TableState};
 pub use dedup::{row_keys, DedupKey, RecordKey, RowDedupKey};
-pub use fragment::{split, ReassembleError, Reassembler, Split};
+pub use fragment::{split, split_encoded, Encoded, ReassembleError, Reassembler, Split};
 pub use record::*;
 pub use value::Value;
