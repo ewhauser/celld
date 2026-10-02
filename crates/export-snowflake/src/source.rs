@@ -8,25 +8,29 @@
 //! The loader is a member of a consumer group, `snowflake` by default, over
 //! the topic the nodes' sink writes: blob-stream ([`crate::blob_stream`]) or
 //! Kafka ([`crate::kafka`]). Each is a [`Source`]; [`run`] is the same loop
-//! over either. It reads records into a [`Batch`] and lands the batch in
-//! `EXPORT_LANDING` (through Snowpipe Streaming, [`crate::streaming`]) once it
-//! is full or has waited `linger`; only once every row is acknowledged does
-//! it store and commit the offsets the batch covered. A crash or a lost
-//! lease therefore replays at most the batches that had not landed, and a
-//! replayed record is a duplicate every reader drops. The route task moves
-//! landed records into the tables on its schedule, and the same loop keeps
-//! the Dynamic Tables in step with the schemas it has seen.
+//! over either. It reads records into a [`Batch`] and, once the batch is
+//! full or has waited `linger`, hands it to a [`Pipeline`] that lands it in
+//! `EXPORT_LANDING` (through Snowpipe Streaming, [`crate::streaming`]) while
+//! the loop reads on. Up to `concurrency` batches land at once; only once
+//! every row of a batch and of every batch before it is acknowledged does
+//! the loop store and commit the offsets the batch covered. A crash or a
+//! lost lease therefore replays at most the batches that had not landed,
+//! and a replayed record is a duplicate every reader drops. The route task
+//! moves landed records into the tables on its schedule, and the same loop
+//! keeps the Dynamic Tables in step with the schemas it has seen.
 //!
-//! A batch that fails to land is retried, the same batch, with backoff, and
-//! nothing is read meanwhile. A message that is not a record stops the loop
-//! with an error, once what came before it has landed and been committed,
-//! so it is read again when the loader restarts: a newer loader may decode
-//! it, and an operator can list it in `skip` to drop it. When the group
-//! revokes partitions, the loader lands what it holds before letting them
-//! go, so the next owner starts where it stopped.
+//! An append that fails is sent again, with backoff, until it lands; while
+//! `concurrency` batches are in the pipeline, nothing more is read. A
+//! message that is not a record stops the loop with an error, once what
+//! came before it has landed and been committed, so it is read again when
+//! the loader restarts: a newer loader may decode it, and an operator can
+//! list it in `skip` to drop it. When the group revokes partitions, the
+//! loader lands what it holds before letting them go, so the next owner
+//! starts where it stopped.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::future::Future;
+use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::anyhow;
@@ -35,6 +39,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::consume::{message_source, Batch, Land, Limits, Undecodable};
 use crate::loader::{LoadError, Loader, SyncReport, Warehouse};
+use crate::pipeline::{Pipeline, Progress, DEFAULT_CONCURRENCY};
 
 /// The consumer group the loader joins unless told otherwise.
 pub const DEFAULT_GROUP: &str = "snowflake";
@@ -96,10 +101,12 @@ pub struct Settings {
     pub limits: Limits,
     /// The longest a record waits in a batch before the batch lands.
     pub linger: Duration,
+    /// Appends in flight at once, and batches landing at once.
+    pub concurrency: usize,
     /// How often the Dynamic Tables are synced with the schema union.
     pub sync_every: Duration,
-    /// The first wait before landing a failed batch again, doubled for each
-    /// failure after, up to `retry_max`.
+    /// The first wait before sending a failed append again, doubled for
+    /// each failure of its batch after, up to `retry_max`.
     pub retry: Duration,
     pub retry_max: Duration,
     /// Messages to drop, by source (`<transport>/<partition>/<offset>`):
@@ -112,6 +119,7 @@ impl Default for Settings {
         Settings {
             limits: Limits::default(),
             linger: Duration::from_secs(5),
+            concurrency: DEFAULT_CONCURRENCY,
             sync_every: Duration::from_secs(60),
             retry: Duration::from_secs(1),
             retry_max: Duration::from_secs(60),
@@ -123,15 +131,18 @@ impl Default for Settings {
 /// What the loop did, for the caller to log.
 #[derive(Debug)]
 pub enum Event<'a> {
-    /// A batch landed and its offsets were committed.
+    /// Batches landed, every one read before them too, and their offsets
+    /// were committed.
     Landed {
+        batches: usize,
         records: usize,
         offsets: &'a BTreeMap<u32, u64>,
     },
     /// A message listed in `skip`; its offset is committed with the
     /// batch's.
     Skipped(&'a str),
-    /// A batch failed to land; the same batch is tried again after `retry`.
+    /// An append failed; it is sent again after `retry`. When stopping
+    /// it is not (`retry` is zero), and its batch is read again.
     LandFailed {
         error: &'a LoadError,
         retry: Duration,
@@ -142,7 +153,7 @@ pub enum Event<'a> {
     /// Partitions the group committed without this member: another member
     /// owns them now and may read their last batch again.
     Fenced(&'a [u32]),
-    /// The group took partitions away; what the loader held of them landed
+    /// The group took partitions away; what the loader read before landed
     /// first.
     Revoked(&'a [u32]),
     /// Reading failed in a way the source recovers from on its own, such as
@@ -153,41 +164,64 @@ pub enum Event<'a> {
 }
 
 /// Consume until `stop` is cancelled or the consumer fails: land batches
-/// with `lander`, commit their offsets, and sync the Dynamic Tables through
-/// `loader` every `sync_every`.
-/// On stop, what has been read lands (unless it is failing to), and the
-/// source shuts down, committing and giving up its partitions.
+/// through `lander`, commit their offsets, and sync the Dynamic Tables
+/// through `loader` every `sync_every`.
+/// On stop, what has been read lands (each append tried once more at most),
+/// and the source shuts down, committing and giving up its partitions.
 ///
-/// Must run on a multi-threaded Tokio runtime: Snowflake requests block,
-/// and run in place on this task's thread.
-pub async fn run<S: Source, W: Warehouse, L: Land>(
+/// Must run on a multi-threaded Tokio runtime: the Dynamic Table sync
+/// blocks, and runs in place on this task's thread.
+pub async fn run<S, W, L>(
     mut source: S,
     loader: &mut Loader<W>,
-    lander: &mut L,
+    lander: Arc<L>,
     settings: &Settings,
     stop: CancellationToken,
     mut report: impl FnMut(Event<'_>),
-) -> anyhow::Result<()> {
+) -> anyhow::Result<()>
+where
+    S: Source,
+    W: Warehouse,
+    L: Land + Send + Sync + 'static,
+    L::Append: Send + 'static,
+{
     source.start()?;
     let name = source.name();
+    let mut pipeline = Pipeline::new(
+        lander,
+        settings.concurrency,
+        settings.retry,
+        settings.retry_max,
+    );
     let mut batch = Batch::default();
     // When the batch's oldest record must land.
     let mut due: Option<Instant> = None;
     let mut next_sync = Instant::now() + settings.sync_every;
     let result = loop {
-        let wake = due.map_or(next_sync, |d| d.min(next_sync));
+        // Hand the batch over once it is full or due and there is room. A
+        // full batch waiting for room stops the reading.
+        let full = batch.is_full(&settings.limits);
+        if !batch.is_empty()
+            && pipeline.has_room()
+            && (full || due.is_some_and(|d| d <= Instant::now()))
+        {
+            let (rows, offsets) = batch.take();
+            pipeline.submit(rows, offsets);
+            due = None;
+        }
+        let reading = !batch.is_full(&settings.limits);
+        let wake = match due {
+            Some(d) if pipeline.has_room() => d.min(next_sync),
+            _ => next_sync,
+        };
         tokio::select! {
             biased;
             () = stop.cancelled() => break Ok(()),
+            Some(progress) = pipeline.next(), if !pipeline.is_empty() => {
+                handle(&mut source, progress, &mut report).await;
+            }
             () = tokio::time::sleep_until(wake) => {
-                let now = Instant::now();
-                if due.is_some_and(|d| d <= now) {
-                    if !flush(&mut source, &mut batch, lander, settings, &stop, &mut report).await {
-                        break Ok(());
-                    }
-                    due = None;
-                }
-                if next_sync <= now {
+                if next_sync <= Instant::now() {
                     match tokio::task::block_in_place(|| loader.sync_dynamic_tables()) {
                         Ok(r) => report(Event::Synced(&r)),
                         Err(e) => report(Event::SyncFailed(&e)),
@@ -195,7 +229,7 @@ pub async fn run<S: Source, W: Warehouse, L: Land>(
                     next_sync = Instant::now() + settings.sync_every;
                 }
             }
-            next = source.next() => match next {
+            next = source.next(), if reading => match next {
                 Err(e) => break Err(e.context("read the export topic")),
                 Ok(Next::Record { partition, offset, payload }) => {
                     if due.is_none() {
@@ -207,42 +241,39 @@ pub async fn run<S: Source, W: Warehouse, L: Land>(
                         report(Event::Skipped(&from));
                     } else if let Err(u) = batch.push_message(name, partition, offset, &payload) {
                         // Commit up to it, never past it.
-                        if !flush(&mut source, &mut batch, lander, settings, &stop, &mut report).await {
+                        if !land_all(&mut source, &mut pipeline, &mut batch, &stop, &mut report).await {
                             break Ok(());
                         }
                         break Err(not_a_record(&u));
                     }
-                    if batch.is_full(&settings.limits) {
-                        if !flush(&mut source, &mut batch, lander, settings, &stop, &mut report).await {
-                            break Ok(());
-                        }
-                        due = None;
-                    }
                 }
                 Ok(Next::Revoked(revoked)) => {
-                    // Land before letting go, or the next owner reads the
-                    // batch again. A stop mid-retry lets go without landing;
-                    // the batch is then read again, which is harmless.
-                    flush(&mut source, &mut batch, lander, settings, &stop, &mut report).await;
+                    // Land before letting go, or the next owner reads it
+                    // again. A stop first lets go without landing; what was
+                    // read from them is then read again, which is harmless,
+                    // and its offsets are never committed here.
+                    let partitions = revoked.partitions();
+                    if !land_all(&mut source, &mut pipeline, &mut batch, &stop, &mut report).await {
+                        pipeline.forget(&partitions);
+                    }
                     due = None;
-                    report(Event::Revoked(&revoked.partitions()));
+                    report(Event::Revoked(&partitions));
                     revoked.complete().await;
                 }
                 Ok(Next::Failed(e)) => report(Event::ReadFailed(&e)),
             },
         }
     };
+    // Stopping, or failing: land what has been read, but send nothing
+    // twice, so a stop is never held up by a warehouse that is down. What
+    // does not land is read again.
     if result.is_ok() && !batch.is_empty() {
-        // Stopping: one attempt, no retries, so a stop is never held up by
-        // a warehouse that is down. What does not land is read again.
-        let records = batch.len();
-        match tokio::task::block_in_place(|| batch.land(lander)) {
-            Ok(offsets) => commit(&mut source, &offsets, records, &mut report).await,
-            Err(e) => report(Event::LandFailed {
-                error: &e,
-                retry: Duration::ZERO,
-            }),
-        }
+        let (rows, offsets) = batch.take();
+        pipeline.submit(rows, offsets);
+    }
+    pipeline.stop_retrying();
+    while let Some(progress) = pipeline.next().await {
+        handle(&mut source, progress, &mut report).await;
     }
     let shutdown = source.shutdown().await;
     result.and(shutdown.map_err(|e| e.context(format!("shut the {name} consumer down"))))
@@ -258,48 +289,68 @@ fn not_a_record(u: &Undecodable) -> anyhow::Error {
     )
 }
 
-/// Land `batch`, retrying until it lands, and commit its offsets. Returns
-/// false if `stop` was cancelled first; the batch is then kept.
-async fn flush<S: Source, L: Land>(
+/// Hand `batch` over and wait until everything in the pipeline has landed
+/// and its offsets are committed, retrying until it does. Returns false if
+/// `stop` was cancelled first; what has not landed stays in the pipeline.
+async fn land_all<S, L>(
     source: &mut S,
+    pipeline: &mut Pipeline<L>,
     batch: &mut Batch,
-    lander: &mut L,
-    settings: &Settings,
     stop: &CancellationToken,
     report: &mut impl FnMut(Event<'_>),
-) -> bool {
-    if batch.is_empty() {
-        return true;
+) -> bool
+where
+    S: Source,
+    L: Land + Send + Sync + 'static,
+    L::Append: Send + 'static,
+{
+    if !batch.is_empty() {
+        let (rows, offsets) = batch.take();
+        pipeline.submit(rows, offsets);
     }
-    let records = batch.len();
-    let mut wait = settings.retry;
     loop {
-        match tokio::task::block_in_place(|| batch.land(lander)) {
-            Ok(offsets) => {
-                commit(source, &offsets, records, report).await;
-                return true;
-            }
-            Err(error) => {
-                report(Event::LandFailed {
-                    error: &error,
-                    retry: wait,
-                });
-                tokio::select! {
-                    () = stop.cancelled() => return false,
-                    () = tokio::time::sleep(wait) => {}
-                }
-                wait = (wait * 2).min(settings.retry_max);
-            }
+        tokio::select! {
+            biased;
+            () = stop.cancelled() => return false,
+            progress = pipeline.next() => match progress {
+                Some(progress) => handle(source, progress, report).await,
+                None => return true,
+            },
         }
+    }
+}
+
+/// Commit what landed, or report what failed.
+async fn handle<S: Source>(source: &mut S, progress: Progress, report: &mut impl FnMut(Event<'_>)) {
+    match progress {
+        Progress::Landed {
+            batches,
+            records,
+            offsets,
+        } => commit(source, &offsets, batches, records, report).await,
+        Progress::Failed { error, retry } => report(Event::LandFailed {
+            error: &error,
+            retry: retry.unwrap_or_default(),
+        }),
     }
 }
 
 async fn commit<S: Source>(
     source: &mut S,
     offsets: &BTreeMap<u32, u64>,
+    batches: usize,
     records: usize,
     report: &mut impl FnMut(Event<'_>),
 ) {
+    // Batches only of partitions the group took away: nothing to commit.
+    if offsets.is_empty() {
+        report(Event::Landed {
+            batches,
+            records,
+            offsets,
+        });
+        return;
+    }
     for (&partition, &offset) in offsets {
         if let Err(e) = source.store_offset(partition, offset) {
             report(Event::CommitFailed(&e.context(format!(
@@ -315,5 +366,12 @@ async fn commit<S: Source>(
         }
         Err(e) => report(Event::CommitFailed(&e.context("commit offsets"))),
     }
-    report(Event::Landed { records, offsets });
+    report(Event::Landed {
+        batches,
+        records,
+        offsets,
+    });
 }
+
+#[cfg(test)]
+mod tests;

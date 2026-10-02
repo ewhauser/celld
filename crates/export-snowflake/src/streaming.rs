@@ -11,7 +11,10 @@
 //! Connecting: the key-pair JWT the SQL API uses asks the account's host for
 //! the ingest host (`GET /v2/streaming/hostname`), then trades itself for a
 //! token scoped to that host (`POST /oauth/token`). Appends go to the ingest
-//! host with the scoped token. A 401 connects again.
+//! host with the scoped token. A 401 connects again. Appends run on
+//! several threads at once and share one token: whichever finds it missing
+//! or stale fetches the next while the others wait, and a 401 drops only
+//! the token it was answered for, so one expiry fetches one token.
 //!
 //! An append carries at most [`MAX_REQUEST_BYTES`] of NDJSON, so a batch
 //! may take several. A failed append is sent again with the same request id
@@ -19,6 +22,7 @@
 //! landed twice is a duplicate every reader drops.
 
 use std::io::Read as _;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use serde::Deserialize;
@@ -45,15 +49,21 @@ pub struct Streaming {
     schema: String,
     pipe: String,
     key: KeyPair,
-    clock: Clock,
     agent: ureq::Agent,
-    jwt: Option<(String, u64)>,
-    ingest: Option<Ingest>,
+    /// Shared by every append in flight.
+    auth: Mutex<Auth>,
     /// Waits between retries; a test makes it a no-op.
     pub pause: fn(Duration),
     /// The largest append payload; tests make it small.
     pub max_request_bytes: usize,
-    buffers: Buffers,
+    /// Payload buffers, back from appends that are done with them.
+    buffers: Arc<Mutex<Buffers>>,
+}
+
+struct Auth {
+    clock: Clock,
+    jwt: Option<(String, u64)>,
+    ingest: Option<Arc<Ingest>>,
 }
 
 struct Ingest {
@@ -86,31 +96,57 @@ impl Streaming {
             schema: connection.schema.clone(),
             pipe: LANDING_PIPE.to_string(),
             key,
-            clock,
             agent,
-            jwt: None,
-            ingest: None,
+            auth: Mutex::new(Auth {
+                clock,
+                jwt: None,
+                ingest: None,
+            }),
             pause: std::thread::sleep,
             max_request_bytes: MAX_REQUEST_BYTES,
-            buffers: Buffers::default(),
+            buffers: Arc::default(),
         }
     }
 
-    fn jwt(&mut self) -> String {
-        let now = (self.clock)();
-        match &self.jwt {
+    fn jwt(&self, auth: &mut Auth) -> String {
+        let now = (auth.clock)();
+        match &auth.jwt {
             Some((t, expires)) if now + TOKEN_MARGIN < *expires => t.clone(),
             _ => {
                 let t = self.key.jwt(&self.account, &self.user, now);
-                self.jwt = Some((t.clone(), now + TOKEN_LIFETIME));
+                auth.jwt = Some((t.clone(), now + TOKEN_LIFETIME));
                 t
             }
         }
     }
 
+    /// The scoped token, fetching one first if there is none or it is
+    /// stale. Appends that ask while one is being fetched wait for it.
+    fn ingest(&self) -> Result<Arc<Ingest>, WarehouseError> {
+        let mut auth = self.auth.lock().unwrap_or_else(|e| e.into_inner());
+        let now = (auth.clock)();
+        match &auth.ingest {
+            Some(i) if now < i.fetched + SCOPED_TOKEN_REFRESH => Ok(i.clone()),
+            _ => {
+                let ingest = Arc::new(self.connect(&mut auth)?);
+                auth.ingest = Some(ingest.clone());
+                Ok(ingest)
+            }
+        }
+    }
+
+    /// Drop the scoped token Snowflake refused, unless another append has
+    /// already replaced it.
+    fn refused(&self, ingest: &Arc<Ingest>) {
+        let mut auth = self.auth.lock().unwrap_or_else(|e| e.into_inner());
+        if auth.ingest.as_ref().is_some_and(|i| Arc::ptr_eq(i, ingest)) {
+            auth.ingest = None;
+        }
+    }
+
     /// Find the ingest host and fetch a token scoped to it.
-    fn connect(&mut self) -> Result<(), WarehouseError> {
-        let auth = format!("Bearer {}", self.jwt());
+    fn connect(&self, state: &mut Auth) -> Result<Ingest, WarehouseError> {
+        let auth = format!("Bearer {}", self.jwt(state));
         let url = format!("{}/v2/streaming/hostname", self.control);
         let sent = self
             .agent
@@ -164,16 +200,15 @@ impl Streaming {
             ));
         }
         let scheme = self.control.split("://").next().unwrap_or("https");
-        self.ingest = Some(Ingest {
+        Ok(Ingest {
             base: format!("{scheme}://{host}"),
             token,
-            fetched: (self.clock)(),
-        });
-        Ok(())
+            fetched: (state.clock)(),
+        })
     }
 
     /// Append one NDJSON payload, retrying what may be retried.
-    fn append(&mut self, payload: &[u8]) -> Result<(), WarehouseError> {
+    fn send(&self, payload: &[u8]) -> Result<(), WarehouseError> {
         let request = request_id()?;
         let mut last = String::new();
         let mut delay = Duration::from_secs(1);
@@ -185,17 +220,13 @@ impl Streaming {
                 (self.pause)(delay);
                 delay *= 2;
             }
-            let stale = self
-                .ingest
-                .as_ref()
-                .is_none_or(|i| (self.clock)() >= i.fetched + SCOPED_TOKEN_REFRESH);
-            if stale {
-                if let Err(e) = self.connect() {
+            let ingest = match self.ingest() {
+                Ok(i) => i,
+                Err(e) => {
                     last = e.message;
                     continue;
                 }
-            }
-            let ingest = self.ingest.as_ref().expect("connected above");
+            };
             let url = format!(
                 "{}/v2/streaming/data/databases/{}/schemas/{}/pipes/{}/channels/ELASTIC/rows?requestId={request}&retryCount={sent}",
                 ingest.base, self.database, self.schema, self.pipe
@@ -227,7 +258,7 @@ impl Streaming {
                 200 => return Ok(()),
                 401 => {
                     // The scoped token expired; fetch another.
-                    self.ingest = None;
+                    self.refused(&ingest);
                     last = format!("401: {text}");
                 }
                 408 | 429 | 500 | 502 | 503 | 504 => last = format!("{status}: {text}"),
@@ -254,14 +285,48 @@ impl Streaming {
     }
 }
 
+impl Streaming {
+    fn spares(&self) -> std::sync::MutexGuard<'_, Buffers> {
+        self.buffers.lock().unwrap_or_else(|e| e.into_inner())
+    }
+}
+
+/// One append's NDJSON. Its buffer goes back to the [`Streaming`] it came
+/// from once it is dropped: when it has landed, or is given up.
+pub struct Payload {
+    bytes: Vec<u8>,
+    spares: Arc<Mutex<Buffers>>,
+}
+
+impl Drop for Payload {
+    fn drop(&mut self) {
+        let bytes = std::mem::take(&mut self.bytes);
+        self.spares
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .give(bytes);
+    }
+}
+
 impl Land for Streaming {
-    fn land(&mut self, rows: &[LandingRow]) -> Result<(), WarehouseError> {
-        for payload in payloads_from(rows, self.max_request_bytes, &mut self.buffers)? {
-            let appended = self.append(&payload);
-            self.buffers.give(payload);
-            appended?;
-        }
-        Ok(())
+    type Append = Payload;
+
+    fn encode(&self, rows: &[LandingRow]) -> Result<Vec<Payload>, WarehouseError> {
+        // Take the spares rather than hold the lock: batches encode at once.
+        let mut spares = std::mem::take(&mut *self.spares());
+        let encoded = payloads_from(rows, self.max_request_bytes, &mut spares);
+        self.spares().keep(spares);
+        Ok(encoded?
+            .into_iter()
+            .map(|bytes| Payload {
+                bytes,
+                spares: self.buffers.clone(),
+            })
+            .collect())
+    }
+
+    fn append(&self, payload: &Payload) -> Result<(), WarehouseError> {
+        self.send(&payload.bytes)
     }
 }
 
@@ -341,6 +406,13 @@ impl Buffers {
         match spare {
             Some(i) => self.0.swap_remove(i),
             None => Vec::with_capacity(capacity),
+        }
+    }
+
+    /// Keep what `other` kept too.
+    fn keep(&mut self, other: Buffers) {
+        for buffer in other.0 {
+            self.give(buffer);
         }
     }
 

@@ -98,7 +98,13 @@ impl Warehouse for NoSchemas {
 struct Landed(Arc<Mutex<Vec<LandingRow>>>);
 
 impl Land for Landed {
-    fn land(&mut self, rows: &[LandingRow]) -> Result<(), WarehouseError> {
+    type Append = Vec<LandingRow>;
+
+    fn encode(&self, rows: &[LandingRow]) -> Result<Vec<Vec<LandingRow>>, WarehouseError> {
+        Ok(vec![rows.to_vec()])
+    }
+
+    fn append(&self, rows: &Vec<LandingRow>) -> Result<(), WarehouseError> {
         self.0.lock().unwrap().extend_from_slice(rows);
         Ok(())
     }
@@ -216,7 +222,7 @@ fn member(brokers: &str, topic: &str, group: &str, linger: Duration) -> Member {
     let source =
         KafkaSource::new(Settings::new(brokers, Some(topic), Some(group), None, None).unwrap());
     let landed = Landed::default();
-    let mut lander = landed.clone();
+    let lander = Arc::new(landed.clone());
     let events = Arc::new(Mutex::new(Vec::new()));
     let stop = CancellationToken::new();
     let (e, s) = (events.clone(), stop.clone());
@@ -235,7 +241,7 @@ fn member(brokers: &str, topic: &str, group: &str, linger: Duration) -> Member {
             linger,
             ..LoopSettings::default()
         };
-        crate::source::run(source, &mut loader, &mut lander, &settings, s, |event| {
+        crate::source::run(source, &mut loader, lander, &settings, s, |event| {
             e.lock().unwrap().push(format!("{event:?}"));
         })
         .await

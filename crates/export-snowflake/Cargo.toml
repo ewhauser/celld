@@ -40,6 +40,7 @@ tokio = { workspace = true, optional = true, features = ["macros", "rt-multi-thr
 tokio-util = { workspace = true, optional = true }
 
 [features]
+# tokio: appends are sent several at a time, on its blocking threads.
 sql-api = [
     "dep:base64",
     "dep:getrandom",
@@ -47,6 +48,7 @@ sql-api = [
     "dep:rsa",
     "dep:sha2",
     "dep:tikv-jemallocator",
+    "dep:tokio",
     "dep:ureq",
 ]
 # The consumer that feeds the loader from the blob-stream topic. Off by

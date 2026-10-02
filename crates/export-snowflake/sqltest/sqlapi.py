@@ -276,22 +276,25 @@ class Emulator:
         request_id = query.get("requestId", [None])[0]
         retry = int(query.get("retryCount", ["0"])[0])
         rows = [json.loads(line) for line in body.decode().splitlines() if line.strip()]
-        seen = [a for a in self.appends if a[1] == request_id]
-        # retryCount counts the requests sent before under this id, and a
-        # request the emulator never received (the client gave up waiting
-        # before it arrived, say) is one the emulator did not see.
-        if request_id is None or retry < len(seen):
-            status = 400
-        elif not self.appends:
-            status = 503
-        elif (db, schema) != ("EXPORT", "CELLS") or pipe not in self.pipes:
-            status = 404
-        else:
-            status = 200
-        self.appends.append((pipe, request_id, retry, rows, status))
-        if status == 200:
-            with self.lock:
+        # The loader sends several appends at once: decide and record each
+        # under the lock, so only the very first is refused.
+        with self.lock:
+            seen = [a for a in self.appends if a[1] == request_id]
+            # retryCount counts the requests sent before under this id, and a
+            # request the emulator never received (the client gave up waiting
+            # before it arrived, say) is one the emulator did not see.
+            if request_id is None or retry < len(seen):
+                status = 400
+            elif not self.appends:
+                status = 503
+            elif (db, schema) != ("EXPORT", "CELLS") or pipe not in self.pipes:
+                status = 404
+            else:
+                status = 200
+            self.appends.append((pipe, request_id, retry, rows, status))
+            if status == 200:
                 self.buffered.append([VISIBLE_AFTER, pipe, rows])
+        if status == 200:
             return 200, {"message": "OK"}
         return status, {"code": "EMULATED", "message": f"append answered {status}"}
 

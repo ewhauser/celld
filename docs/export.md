@@ -490,10 +490,11 @@ like this:
 2. The loader reads the topic as a member of the consumer group `snowflake`
    and appends records in batches to the pipe `EXPORT_LANDING_PIPE` through
    [Snowpipe Streaming](https://docs.snowflake.com/user-guide/snowpipe-streaming/data-load-snowpipe-streaming-overview),
-   which lands them in `EXPORT_LANDING`. It commits its topic offsets only
-   once Snowflake has acknowledged every row of a batch, so a restart
-   replays at most the batches in flight, and duplicates are dropped
-   downstream.
+   which lands them in `EXPORT_LANDING`. It keeps several appends in
+   flight while it reads on, and commits a batch's topic offsets only once
+   Snowflake has acknowledged every row of that batch and of every batch
+   before it, so a restart replays at most the batches in flight, and
+   duplicates are dropped downstream.
 3. A task running every minute routes landed rows: `rows` and `snapshot`
    into `CELL_CHANGES`, everything else into `CELL_META`, dropping
    tombstoned streams.
@@ -560,8 +561,8 @@ celld-export-loader run 60
 
 `run` deploys every missing object, resumes the tasks, then consumes the
 topic until it gets `SIGINT` or `SIGTERM`, syncing the Dynamic Tables every
-60 seconds. On a stop it lands what it has read and gives up its
-partitions. Several loaders with different member ids share the topic's
+60 seconds. On a stop it lands what it has read, sending each append it
+has not sent yet once, commits what landed, and gives up its partitions. Several loaders with different member ids share the topic's
 partitions between them.
 
 | setting | required | meaning |
@@ -579,12 +580,15 @@ partitions between them.
 | `EXPORT_MEMBER_ID` | `run` | This loader's member id in the consumer group, stable across restarts. Default: `HOSTNAME`. Kafka uses it as the client id. |
 | `EXPORT_GROUP` | no | The consumer group. Default `snowflake`, or the config file's. |
 | `EXPORT_BATCH_RECORDS`, `EXPORT_BATCH_BYTES`, `EXPORT_BATCH_MS` | no | A batch lands at 10000 records, 8 MiB, or 5 seconds after its first record, whichever comes first. |
+| `EXPORT_APPEND_CONCURRENCY` | no | Appends in flight at once, and batches landing at once. Default 8. An append carries at most 4 MB, so at a given append latency this sets how fast the loader lands; while this many batches are landing, it reads nothing more. `ingest` takes it too. |
 | `EXPORT_SKIP` | no | Messages to drop, comma-separated, as `blob-stream/<partition>/<offset>` or `kafka/<partition>/<offset>`. See below. |
 | `EXPORT_TARGET_LAG` | no | The Dynamic Tables' target lag. Default `1 minute`. |
 | `EXPORT_DYNAMIC_TABLE_PREFIX` | no | The Dynamic Tables' name prefix. Default `CF`. |
 
-A batch that fails to land is retried, with backoff, until it lands;
-nothing more is read meanwhile. A message on the topic that is not a
+An append that fails is sent again, with backoff (1 second doubling to
+60), until it lands. The batches after it keep landing, but none of their
+offsets is committed before it lands, and once `EXPORT_APPEND_CONCURRENCY`
+batches are waiting, nothing more is read. A message on the topic that is not a
 record stops the loader with an error naming it, once everything before it
 has landed; its offset and everything after it in its partition stay
 uncommitted, so a restart reads it again. The usual cause is a record from
