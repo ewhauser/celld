@@ -98,13 +98,22 @@ fn a_cell_is_queued_once_until_drained() {
     let mut scratch = Vec::new();
     ticket(&sets, &a);
     ticket(&sets, &a);
-    assert_eq!(keys(&sets.ship.drain_owed(&mut scratch, ship_owed)), ["Cart:a"]);
+    assert_eq!(
+        keys(&sets.ship.drain_owed(&mut scratch, ship_owed)),
+        ["Cart:a"]
+    );
     assert!(sets.ship.drain_owed(&mut scratch, ship_owed).is_empty());
     // Draining released the flag: the next ticket queues the cell again.
     ticket(&sets, &a);
-    assert_eq!(keys(&sets.ship.drain_owed(&mut scratch, ship_owed)), ["Cart:a"]);
+    assert_eq!(
+        keys(&sets.ship.drain_owed(&mut scratch, ship_owed)),
+        ["Cart:a"]
+    );
     // Each loop drains its own set.
-    assert_eq!(keys(&sets.bundle.drain_owed(&mut scratch, sync_owed)), ["Cart:a"]);
+    assert_eq!(
+        keys(&sets.bundle.drain_owed(&mut scratch, sync_owed)),
+        ["Cart:a"]
+    );
 }
 
 #[test]
@@ -122,14 +131,20 @@ fn a_drain_skips_cells_that_left_the_registry_or_are_covered() {
     gone.resident.store(false, Ordering::SeqCst);
     credit(&covered);
     let mut scratch = Vec::new();
-    assert_eq!(keys(&sets.ship.drain_owed(&mut scratch, ship_owed)), ["Cart:live"]);
+    assert_eq!(
+        keys(&sets.ship.drain_owed(&mut scratch, ship_owed)),
+        ["Cart:live"]
+    );
 }
 
 #[test]
 fn an_uncredited_cell_is_requeued_without_a_ticket() {
     let client = client();
     let sets = DirtySets::new(true);
-    let (failed, shipped) = (cell(&client, "Cart:failed", 1), cell(&client, "Cart:shipped", 1));
+    let (failed, shipped) = (
+        cell(&client, "Cart:failed", 1),
+        cell(&client, "Cart:shipped", 1),
+    );
     ticket(&sets, &failed);
     ticket(&sets, &shipped);
     let mut scratch = Vec::new();
@@ -139,7 +154,10 @@ fn an_uncredited_cell_is_requeued_without_a_ticket() {
     shipped.submitted_seq.store(1, Ordering::SeqCst);
     sets.ship
         .requeue_owed(work.into_iter().map(|(_, cell)| cell).collect(), ship_owed);
-    assert_eq!(keys(&sets.ship.drain_owed(&mut scratch, ship_owed)), ["Cart:failed"]);
+    assert_eq!(
+        keys(&sets.ship.drain_owed(&mut scratch, ship_owed)),
+        ["Cart:failed"]
+    );
 }
 
 #[test]
@@ -201,12 +219,16 @@ fn a_paced_cell_waits_for_its_interval_without_a_scan() {
     a.last_sync_ms.store(1_000, Ordering::SeqCst);
     let mut queue = SyncQueue::default();
     ticket(&sets, &a);
-    assert!(queue.due(&sets.sync, &registry, Some(100), 1_050).is_empty());
+    assert!(queue
+        .due(&sets.sync, &registry, Some(100), 1_050)
+        .is_empty());
     assert_eq!(queue.deferred.len(), 1);
     // A ticket on a held cell does not queue a second entry.
     ticket(&sets, &a);
     assert!(sets.sync.queue.lock().unwrap().is_empty());
-    assert!(queue.due(&sets.sync, &registry, Some(100), 1_099).is_empty());
+    assert!(queue
+        .due(&sets.sync, &registry, Some(100), 1_099)
+        .is_empty());
     let due = queue.due(&sets.sync, &registry, Some(100), 1_100);
     assert_eq!(due.len(), 1);
     assert!(queue.deferred.is_empty());
@@ -226,7 +248,9 @@ fn a_late_sync_redefers_and_unpacing_releases_everything() {
     let mut queue = SyncQueue::default();
     ticket(&sets, &a);
     ticket(&sets, &b);
-    assert!(queue.due(&sets.sync, &registry, Some(100), 1_000).is_empty());
+    assert!(queue
+        .due(&sets.sync, &registry, Some(100), 1_000)
+        .is_empty());
     // A direct sync moved `a`'s anchor; its old deadline re-defers it.
     a.last_sync_ms.store(1_080, Ordering::SeqCst);
     let due = queue.due(&sets.sync, &registry, Some(100), 1_100);
@@ -397,6 +421,8 @@ fn a_wake_touches_only_the_dirty_cells() {
 /// `cargo test -p celld --release --lib dirty_tests::wake_cost -- --ignored --nocapture`.
 #[test]
 #[ignore = "timing benchmark"]
+// Offline timing: wall-clock reads and printed results are the point.
+#[allow(clippy::disallowed_methods)]
 fn wake_cost_is_independent_of_residency() {
     let client = client();
     const WAKES: u32 = 2_000;
@@ -419,7 +445,7 @@ fn wake_cost_is_independent_of_residency() {
             sets.clear_all_for_test();
         }
         let scanned = started.elapsed() / WAKES;
-        println!(
+        eprintln!(
             "residents={residents:>6} hot={} drained={drained:>10.2?}/wake scanned={scanned:>10.2?}/wake",
             hot.len()
         );
