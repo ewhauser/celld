@@ -43,6 +43,17 @@ fn capture(c: &mut Criterion) {
                 BatchSize::PerIteration,
             );
         });
+        enabled.borrow_mut().reinsert();
+        let batch = enabled.borrow_mut().checkpoint();
+        assert_eq!(batch.rows(), rows);
+        assert_eq!(batch.bulk(), 0);
+        group.bench_function(BenchmarkId::new("checkpoint_inserts", &id), |b| {
+            b.iter_batched(
+                || enabled.borrow_mut().reinsert(),
+                |()| black_box(enabled.borrow_mut().checkpoint()),
+                BatchSize::PerIteration,
+            );
+        });
     }
     let mut large = CaptureFixture::new(64, 32768, 65536, true);
     large.write();
