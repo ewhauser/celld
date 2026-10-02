@@ -36,6 +36,12 @@ Silicon in place of `x86_64-unknown-linux-gnu`. The adjacent `.build.json` recor
 the source repository, commit, version, target, and SHA-256 digest. The macOS
 binary is not signed or notarized by Apple.
 
+Releases after v0.6.1-ewhauser.2 also publish a `kafka` variant of every
+target, `celld-kafka-<target>.gz`, built with the `export-kafka` feature for the
+Kafka change export sink. Download it the same way with
+`--pattern 'celld-kafka-x86_64-unknown-linux-gnu.*'`; its `.build.json` lists
+the features it was built with.
+
 Move the verified executable into a directory on your `PATH`. Worker projects
 also need [esbuild](https://esbuild.github.io/) on `PATH`. Continue with the
 [upstream configuration and deployment guide](https://celld.dev/docs/).
@@ -45,6 +51,10 @@ also need [esbuild](https://esbuild.github.io/) on `PATH`. Continue with the
 ```sh
 docker run --rm ghcr.io/ewhauser/celld:0.6.0-ewhauser.2 --version
 ```
+
+Releases after v0.6.1-ewhauser.2 also publish the `kafka` variant, with every
+tag suffixed `-kafka` (`ghcr.io/ewhauser/celld:<version>-kafka`); it never takes
+`latest`.
 
 Fork prereleases do **not** update `latest`. The image is published for Linux
 amd64 and arm64 after the verified draft release is published. Native artifacts
