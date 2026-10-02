@@ -5,6 +5,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::value::Value;
 
+mod de;
+
 /// Which state a record belongs to. For a root cell `facet` is `None` and
 /// `incarnation` is the cell's first epoch; for a facet it is the root's
 /// scope, the facet path, and the ordered incarnation stamped in the facet's
@@ -124,8 +126,9 @@ pub struct Envelope {
 }
 
 /// One record: the envelope and the kind-specific body, encoded as one flat
-/// JSON object with a `kind` field.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+/// JSON object with a `kind` field. It decodes in one pass (`record/de.rs`)
+/// rather than through the derive, which buffers the object to find `kind`.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct Record {
     #[serde(flatten)]
     pub envelope: Envelope,
