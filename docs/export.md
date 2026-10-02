@@ -687,6 +687,19 @@ column with no declared type are `VARIANT`. A value that does not fit its
 column's type is `NULL` there and intact in `_CF_ROW`. A root cell's
 `_CF_FACET` is `''`.
 
+The Dynamic Tables use the default `REFRESH_MODE = AUTO`. The views they
+read avoid constructs that Snowflake can't refresh incrementally, such as
+subqueries in `WHERE`, so each refresh should process only the rows that
+changed since the last one. A Dynamic Table that resolves to a full refresh
+re-reads all of `CELL_CHANGES` every `EXPORT_TARGET_LAG`. Check which mode
+Snowflake chose, and why:
+
+```sql
+SHOW DYNAMIC TABLES LIKE 'CF\\_%';
+SELECT "name", "refresh_mode", "refresh_mode_reason"
+FROM TABLE(RESULT_SCAN(LAST_QUERY_ID()));
+```
+
 ## Keeping the copy complete
 
 Losing records between a node and a sink is expected in rare cases: a node
