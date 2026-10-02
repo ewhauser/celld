@@ -19,6 +19,13 @@ use celld_export_snowflake::loader::{DeployReport, Erasure, SyncReport};
 use celld_export_snowflake::settings::{self, loader};
 use celld_export_snowflake::Rows;
 
+// Landing decodes, reshapes and re-encodes every record on one thread, and
+// most of that is short-lived allocations. jemalloc, as celld itself uses,
+// spends much less of that thread in malloc and free than the platform
+// allocators do.
+#[global_allocator]
+static ALLOC: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
+
 const USAGE: &str = "\
 usage: celld-export-loader COMMAND
 
