@@ -617,6 +617,48 @@ ALTER TABLE CELL_META RENAME COLUMN FILE_NAME TO SOURCE;
 Rows landed but not yet routed stay in the `EXPORT_LANDING_NEW` stream, and
 the recreated task routes them.
 
+Earlier loaders landed each record's body as a string, which the route
+task parsed: their `EXPORT_LANDING.BODY` is `TEXT`, where it is `VARIANT`
+now. A newer loader's `deploy` and `ingest` refuse the `TEXT`
+table, naming this section. To upgrade, stop the old loader, and wait until
+Snowpipe Streaming has made what it acknowledged visible: `SELECT COUNT(*)
+FROM EXPORT_LANDING` gives the same answer a minute apart. Then copy the
+rows the route task has not reached aside, and drop the objects that read
+or write the string body:
+
+```sql
+ALTER TASK EXPORT_ROUTE SUSPEND;
+DROP TASK EXPORT_ROUTE;          -- its body parses the body text
+DROP PIPE EXPORT_LANDING_PIPE;   -- it casts the body to STRING
+CREATE TRANSIENT TABLE EXPORT_LANDING_UNROUTED AS
+SELECT kind, script, class, cell, cell_name, facet, incarnation, epoch, txid,
+    commit, committed_at, node, origin, fragment, fragments, body, source,
+    landed_at
+FROM EXPORT_LANDING_NEW;
+DROP STREAM EXPORT_LANDING_NEW;
+DROP TABLE EXPORT_LANDING;       -- routed already, or copied aside
+```
+
+Run `deploy` (or `run`, which deploys first) with the new loader, which
+creates the table, the stream, the pipe and the task again. Then land the
+copied rows in the new table, where the task routes them:
+
+```sql
+INSERT INTO EXPORT_LANDING (
+    kind, script, class, cell, cell_name, facet, incarnation, epoch, txid,
+    commit, committed_at, node, origin, fragment, fragments, body, source,
+    landed_at
+)
+SELECT kind, script, class, cell, cell_name, facet, incarnation, epoch, txid,
+    commit, committed_at, node, origin, fragment, fragments, PARSE_JSON(body),
+    source, landed_at
+FROM EXPORT_LANDING_UNROUTED;
+DROP TABLE EXPORT_LANDING_UNROUTED;
+```
+
+The loader may land new rows before the copied ones; the order does not
+matter. `CELL_CHANGES` and `CELL_META` are unchanged.
+
 ### Loader commands
 
 | command | what it does |
@@ -648,6 +690,19 @@ column whose type differs between generations, a `NUMERIC` column, and a
 column with no declared type are `VARIANT`. A value that does not fit its
 column's type is `NULL` there and intact in `_CF_ROW`. A root cell's
 `_CF_FACET` is `''`.
+
+The Dynamic Tables use the default `REFRESH_MODE = AUTO`. The views they
+read avoid constructs that Snowflake can't refresh incrementally, such as
+subqueries in `WHERE`, so each refresh should process only the rows that
+changed since the last one. A Dynamic Table that resolves to a full refresh
+re-reads all of `CELL_CHANGES` every `EXPORT_TARGET_LAG`. Check which mode
+Snowflake chose, and why:
+
+```sql
+SHOW DYNAMIC TABLES LIKE 'CF\\_%';
+SELECT "name", "refresh_mode", "refresh_mode_reason"
+FROM TABLE(RESULT_SCAN(LAST_QUERY_ID()));
+```
 
 ## Keeping the copy complete
 

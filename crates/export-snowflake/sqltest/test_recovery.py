@@ -1,7 +1,5 @@
 """Regression checks for recovery identity and declared data loss."""
 
-import json
-
 from test_sql import load, warehouse
 
 
@@ -21,7 +19,7 @@ def landing(kind, txid, body, script="app", incarnation=1):
         origin="live",
         fragment=1,
         fragments=1,
-        body=json.dumps(body),
+        body=body,
         source="test",
     )
 
@@ -56,3 +54,30 @@ def test_recovered_loss_below_certification_is_detected(warehouse):
     assert len(got) == 1, got
     assert got[0]["gap_kind"] == "recovered"
     assert got[0]["bound_txid"] == 10
+
+
+def test_partly_adopted_recovery_placeholder(warehouse):
+    """A scriptless stream keeps the `recovered` records no named stream
+    adopts, and only those: an adopted record appears once, under its
+    adopter."""
+    setup(warehouse, [
+        landing("link", 0, dict(start_txid=0, prev_epoch=None, prev_txid=None, mode="fresh"),
+                incarnation=3),
+        # Head epoch 5 reaches incarnation 3: adopted by app/3.
+        landing("recovered", 5, dict(
+            session="dead/1", head=dict(epoch=5, txid=5, commit=0), loss=False, cells=1,
+        ), script="", incarnation=0),
+        # Head epoch 1 is below every named incarnation: nobody adopts it.
+        landing("recovered", 6, dict(
+            session="dead/2", head=dict(epoch=1, txid=6, commit=0), loss=False, cells=1,
+        ), script="", incarnation=0),
+    ])
+    streams = warehouse.rows("SELECT script, incarnation FROM CELL_STREAMS ORDER BY script")
+    assert [(r["script"], r["incarnation"]) for r in streams] == [("", 0), ("app", 3)], streams
+    got = warehouse.rows(
+        "SELECT script, incarnation, txid FROM CELL_META_CURRENT WHERE kind = 'recovered'"
+    )
+    assert sorted((r["script"], r["incarnation"], r["txid"]) for r in got) == [
+        ("", 0, 6),
+        ("app", 3, 5),
+    ], got

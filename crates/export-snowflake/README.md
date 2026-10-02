@@ -33,7 +33,7 @@ per transport.
    batches the messages and appends each batch as JSON lines to
    `EXPORT_LANDING_PIPE` through Snowpipe Streaming's elastic channel. The
    pipe's `COPY` casts each line into a `LandingRow`: one column per
-   envelope field, `body` (the kind-specific fields as a JSON string) and
+   envelope field, `body` (the kind-specific fields, a `VARIANT`) and
    `source` (`blob-stream/<partition>/<offset>` or
    `kafka/<partition>/<offset>`). Snowpipe Streaming bills
    per GB ingested; no warehouse runs for it. Up to

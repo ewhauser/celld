@@ -21,6 +21,13 @@ use celld_export_snowflake::pipeline::{Pipeline, Progress};
 use celld_export_snowflake::settings::{self, loader};
 use celld_export_snowflake::Rows;
 
+// Landing decodes, reshapes and re-encodes every record on one thread, and
+// most of that is short-lived allocations. jemalloc, as celld itself uses,
+// spends much less of that thread in malloc and free than the platform
+// allocators do.
+#[global_allocator]
+static ALLOC: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
+
 const USAGE: &str = "\
 usage: celld-export-loader COMMAND
 
@@ -188,6 +195,7 @@ fn ingest(file: &str) -> Result<(), Error> {
     };
     let limits = settings::limits()?;
     let mut l = loader()?;
+    l.check_landing()?;
     let to = Arc::new(settings::streaming()?);
     let concurrency = settings::concurrency()?;
     let tag = settings::run_tag("ingest");

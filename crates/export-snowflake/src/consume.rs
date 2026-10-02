@@ -23,6 +23,7 @@ use std::collections::BTreeMap;
 
 use celld_export_format::Record;
 
+use crate::landing::Fields;
 use crate::loader::{LoadError, WarehouseError};
 use crate::LandingRow;
 
@@ -105,13 +106,13 @@ impl Batch {
         offset: u64,
         payload: &[u8],
     ) -> Result<(), Undecodable> {
-        let source = message_source(transport, partition, offset);
-        let record = Record::from_json(payload).map_err(|e| Undecodable {
-            source: source.clone(),
-            error: e.to_string(),
-        })?;
+        let row = LandingRow::from_json(payload, message_source(transport, partition, offset))
+            .map_err(|e| Undecodable {
+                source: message_source(transport, partition, offset),
+                error: e.to_string(),
+            })?;
         self.cover(partition, offset);
-        self.push_record(&record, source, payload.len());
+        self.push_row(row, payload.len());
         Ok(())
     }
 
@@ -134,28 +135,35 @@ impl Batch {
             source: source.to_string(),
             error,
         };
-        let mut value: serde_json::Value =
+        // Cut `object` out of the line as written, rather than decoding the
+        // line into a tree and encoding it again.
+        let fields: Fields =
             serde_json::from_str(line).map_err(|e| fail(fallback, e.to_string()))?;
-        let source = match value.as_object_mut().and_then(|m| m.remove("object")) {
-            Some(serde_json::Value::String(object)) => object,
-            _ => fallback.to_string(),
-        };
-        let bytes = serde_json::to_vec(&value).map_err(|e| fail(&source, e.to_string()))?;
-        let record = Record::from_json(&bytes).map_err(|e| fail(&source, e.to_string()))?;
-        self.push_record(&record, source, bytes.len());
+        let source = fields
+            .get("object")
+            .and_then(|object| serde_json::from_str::<String>(object.get()).ok())
+            .unwrap_or_else(|| fallback.to_string());
+        let json = fields
+            .object_without(|key| key == "object")
+            .map_err(|e| fail(&source, e.to_string()))?;
+        let row = LandingRow::from_json(json.as_bytes(), source.clone())
+            .map_err(|e| fail(&source, e.to_string()))?;
+        self.push_row(row, json.len());
         Ok(())
     }
 
     /// Add a record read from `source`.
     pub fn push(&mut self, record: &Record, source: impl Into<String>) {
-        let bytes = serde_json::to_vec(record).map_or(0, |b| b.len());
-        self.push_record(record, source.into(), bytes);
+        let json = record.to_json();
+        let row =
+            LandingRow::split(record, &json, source.into()).expect("an encoded record splits");
+        self.push_row(row, json.len());
     }
 
-    fn push_record(&mut self, record: &Record, mut source: String, bytes: usize) {
-        source.push_str(&self.tag);
-        self.bytes += bytes + source.len();
-        self.rows.push(LandingRow::from_record(record, source));
+    fn push_row(&mut self, mut row: LandingRow, bytes: usize) {
+        row.source.push_str(&self.tag);
+        self.bytes += bytes + row.source.len();
+        self.rows.push(row);
     }
 
     /// Records waiting to land.
@@ -336,6 +344,16 @@ mod tests {
             .push_json_line(&String::from_utf8(record(2).to_json()).unwrap(), "stdin:2")
             .unwrap();
         assert!(batch.push_json_line("{}", "stdin:3").is_err());
+        // An object named with escapes is unescaped; one that is not a
+        // string is dropped, and the line's own name is the source.
+        let mut line = serde_json::to_value(record(3)).unwrap();
+        line["object"] = "export/\"quoted\"\\name.parquet".into();
+        batch.push_json_line(&line.to_string(), "stdin:4").unwrap();
+        let mut line = serde_json::to_value(record(4)).unwrap();
+        line["object"] = 7.into();
+        batch.push_json_line(&line.to_string(), "stdin:5").unwrap();
+        let not_an_object = batch.push_json_line("[1]", "stdin:6").unwrap_err();
+        assert_eq!(not_an_object.source, "stdin:6");
         let l = Fake::default();
         batch.land(&l).unwrap();
         let landed = &l.landed.lock().unwrap()[0];
@@ -345,5 +363,17 @@ mod tests {
         );
         assert_eq!(landed[0].to_record().unwrap(), record(1));
         assert_eq!(landed[1].source, "stdin:2 (ingest 1)");
+        assert_eq!(
+            landed[2].source,
+            "export/\"quoted\"\\name.parquet (ingest 1)"
+        );
+        assert_eq!(landed[2].to_record().unwrap(), record(3));
+        assert_eq!(landed[3].source, "stdin:5 (ingest 1)");
+        assert_eq!(landed[3].to_record().unwrap(), record(4));
+        for row in landed {
+            let body: serde_json::Map<String, serde_json::Value> =
+                serde_json::from_str(&row.body).unwrap();
+            assert!(!body.contains_key("object"), "{}", row.body);
+        }
     }
 }

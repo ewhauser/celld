@@ -66,6 +66,34 @@ erased AS (
      AND t.facet = s.facet
      AND (t.incarnation IS NULL OR t.incarnation = s.incarnation)
     WHERE t.cleared_at IS NULL
+),
+-- Per class, cell and facet, the lowest incarnation a named stream has: a
+-- recovery placeholder's record is adopted when one exists (for a facet)
+-- or is at or below the record's head epoch (for a root).
+named AS (
+    SELECT class, cell, facet, MIN(incarnation) AS first_incarnation
+    FROM streams
+    WHERE script <> ''
+    GROUP BY class, cell, facet
+),
+-- The recovery placeholders still holding something no named stream has
+-- adopted: a change, a record other than `recovered`, or a `recovered`
+-- record without an adopter. Kept in FROM, not in WHERE subqueries, so a
+-- Dynamic Table over these views can refresh incrementally.
+placeholder_held AS (
+    SELECT DISTINCT script, class, cell, facet, incarnation
+    FROM CELL_CHANGES
+    WHERE script = ''
+    UNION
+    SELECT DISTINCT m.script, m.class, m.cell, m.facet, m.incarnation
+    FROM CELL_META m
+    LEFT JOIN named n
+      ON n.class = m.class AND n.cell = m.cell AND n.facet = m.facet
+    WHERE m.script = ''
+      AND (m.kind <> 'recovered'
+           OR n.cell IS NULL
+           OR (m.facet = ''
+               AND NOT COALESCE(n.first_incarnation <= m.body:head:epoch::NUMBER(20, 0), FALSE)))
 )
 SELECT
     s.script, s.class, s.cell, s.facet, s.incarnation,
@@ -83,21 +111,12 @@ LEFT JOIN facet_deleted f
 LEFT JOIN erased e
   ON e.script = s.script AND e.class = s.class AND e.cell = s.cell
  AND e.facet = s.facet AND e.incarnation = s.incarnation
+LEFT JOIN placeholder_held h
+  ON h.script = s.script AND h.class = s.class AND h.cell = s.cell
+ AND h.facet = s.facet AND h.incarnation = s.incarnation
 -- Drop a recovery placeholder only once every record it holds has a
 -- matching named stream, as Consumer::fully_adopted does.
-WHERE NOT (s.script = ''
-    AND NOT EXISTS (SELECT 1 FROM CELL_CHANGES c
-        WHERE c.script = s.script AND c.class = s.class AND c.cell = s.cell
-          AND c.facet = s.facet AND c.incarnation = s.incarnation)
-    AND NOT EXISTS (SELECT 1 FROM CELL_META m
-        WHERE m.script = s.script AND m.class = s.class AND m.cell = s.cell
-          AND m.facet = s.facet AND m.incarnation = s.incarnation
-          AND (m.kind <> 'recovered' OR NOT EXISTS (
-              SELECT 1 FROM streams target
-              WHERE target.script <> '' AND target.class = s.class
-                AND target.cell = s.cell AND target.facet = s.facet
-                AND (s.facet <> '' OR target.incarnation <= m.body:head:epoch::NUMBER(20, 0))
-          ))));
+WHERE NOT (s.script = '' AND h.cell IS NULL);
 
 -- statement: cell_changes_current
 -- Whole `rows` and `snapshot` records, one row per fragment, each fragment
@@ -160,12 +179,15 @@ adoptions AS (
     QUALIFY s.facet <> '' OR s.incarnation = MAX(s.incarnation) OVER (
         PARTITION BY r.class, r.cell, r.facet, r.position_key, r.origin, s.script)
 ),
+adopted AS (
+    SELECT DISTINCT class, cell, facet, position_key, origin FROM adoptions
+),
 resolved AS (
     SELECT r.* FROM records r
-    WHERE NOT (r.kind = 'recovered' AND r.script = '' AND EXISTS (
-        SELECT 1 FROM adoptions a WHERE a.class = r.class AND a.cell = r.cell
-          AND a.facet = r.facet AND a.position_key = r.position_key AND a.origin = r.origin
-    ))
+    LEFT JOIN adopted ad
+      ON ad.class = r.class AND ad.cell = r.cell AND ad.facet = r.facet
+     AND ad.position_key = r.position_key AND ad.origin = r.origin
+    WHERE NOT (r.kind = 'recovered' AND r.script = '' AND ad.cell IS NOT NULL)
     UNION ALL
     SELECT a.* EXCLUDE (adopted_script, adopted_incarnation)
         REPLACE (a.adopted_script AS script, a.adopted_incarnation AS incarnation)
