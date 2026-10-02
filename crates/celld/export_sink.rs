@@ -71,6 +71,10 @@ const SWEEP_INTERVAL: Duration = Duration::from_secs(6 * 3600);
 pub struct SinkRecord {
     pub seq: u64,
     pub record: Record,
+    /// The record's JSON, when the caller already encoded it, so a sink
+    /// that sends JSON does not encode it again. Exactly
+    /// [`Record::to_json`] of `record`.
+    pub json: Option<bytes::Bytes>,
 }
 
 /// The terminal result of one record.
@@ -273,7 +277,7 @@ impl ExportSink for BucketSink {
         }
         let pending: Vec<Pending> = records
             .into_iter()
-            .map(|SinkRecord { seq, record }| {
+            .map(|SinkRecord { seq, record, .. }| {
                 let row = Row::new(record).map_err(|error| Arc::from(format!("{error:#}")));
                 let bytes = row.as_ref().map_or(0, Row::approx_bytes);
                 Pending { seq, row, bytes }

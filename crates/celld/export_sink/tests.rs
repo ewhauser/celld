@@ -281,6 +281,7 @@ fn submitted(seqs: std::ops::Range<u64>) -> Vec<SinkRecord> {
     seqs.map(|seq| SinkRecord {
         seq,
         record: rows_record("cell-a", seq, vec![insert(seq as i64, "x")]),
+        json: None,
     })
     .collect()
 }
@@ -737,6 +738,7 @@ fn the_reference_consumer_applies_what_the_sink_wrote() {
                 .map(|(seq, record)| SinkRecord {
                     seq: seq as u64,
                     record,
+                    json: None,
                 })
                 .collect(),
         )

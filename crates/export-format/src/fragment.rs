@@ -13,29 +13,77 @@ use std::collections::BTreeMap;
 use crate::dedup::RecordKey;
 use crate::record::{Body, BulkBody, Record, RowChange};
 
-/// The result of [`split`].
+/// The result of [`split`] and [`split_encoded`].
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub enum Split {
+pub enum Split<T = Record> {
     /// The record as `1 of 1`, or its fragments `1..=k of k`, each within the
     /// limit.
-    Fragments(Vec<Record>),
+    Fragments(Vec<T>),
     /// A row did not fit alone; this `bulk` record replaces the input.
     Bulk(Box<Record>),
+}
+
+/// A record with its JSON, exactly as [`Record::to_json`] encodes it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Encoded {
+    pub record: Record,
+    pub json: Vec<u8>,
 }
 
 /// Split `record` so that every piece encodes to at most `max_bytes`.
 ///
 /// The input's `fragment` and `fragments` are overwritten. Kinds other than
 /// `rows` and `snapshot` come back whole, whatever their size.
-pub fn split(mut record: Record, max_bytes: usize) -> Split {
+pub fn split(record: Record, max_bytes: usize) -> Split {
+    match pieces(record, max_bytes) {
+        Pieces::Whole(record, _) => Split::Fragments(vec![record]),
+        Pieces::Fragments(fragments) => Split::Fragments(fragments),
+        Pieces::Bulk(bulk) => Split::Bulk(bulk),
+    }
+}
+
+/// [`split`], with each piece's JSON. A record is encoded once: the
+/// encoding that measured a record that fits is the one returned, and each
+/// fragment is encoded once it is final.
+pub fn split_encoded(record: Record, max_bytes: usize) -> Split<Encoded> {
+    let encode = |record: Record| Encoded {
+        json: record.to_json(),
+        record,
+    };
+    match pieces(record, max_bytes) {
+        Pieces::Whole(record, Some(json)) => Split::Fragments(vec![Encoded { record, json }]),
+        Pieces::Whole(record, None) => Split::Fragments(vec![encode(record)]),
+        Pieces::Fragments(fragments) => {
+            Split::Fragments(fragments.into_iter().map(encode).collect())
+        }
+        Pieces::Bulk(bulk) => Split::Bulk(bulk),
+    }
+}
+
+// Returned and matched at once, never stored; boxing the common case would
+// cost an allocation per record.
+#[allow(clippy::large_enum_variant)]
+enum Pieces {
+    /// `1 of 1`, with its JSON when measuring it took one.
+    Whole(Record, Option<Vec<u8>>),
+    Fragments(Vec<Record>),
+    Bulk(Box<Record>),
+}
+
+fn pieces(mut record: Record, max_bytes: usize) -> Pieces {
     record.envelope.fragment = 1;
     record.envelope.fragments = 1;
     let Some(data) = record.body.table_rows() else {
-        return Split::Fragments(vec![record]);
+        return Pieces::Whole(record, None);
     };
-    if data.rows.is_empty() || record.to_json().len() <= max_bytes {
-        return Split::Fragments(vec![record]);
+    if data.rows.is_empty() {
+        return Pieces::Whole(record, None);
     }
+    let json = record.to_json();
+    if json.len() <= max_bytes {
+        return Pieces::Whole(record, Some(json));
+    }
+    drop(json);
 
     // The size of a fragment with no rows, with the fragment counters at
     // their widest so the estimate never undercounts.
@@ -65,7 +113,7 @@ pub fn split(mut record: Record, max_bytes: usize) -> Split {
             bulk.body = Body::Bulk(BulkBody {
                 tables: vec![table],
             });
-            return Split::Bulk(Box::new(bulk));
+            return Pieces::Bulk(Box::new(bulk));
         }
         if size + add > max_bytes {
             chunks.push(std::mem::take(&mut current));
@@ -90,7 +138,7 @@ pub fn split(mut record: Record, max_bytes: usize) -> Split {
             r
         })
         .collect();
-    Split::Fragments(fragments)
+    Pieces::Fragments(fragments)
 }
 
 /// Why a fragment was refused.
