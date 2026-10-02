@@ -20,9 +20,14 @@
 //! A pulled commit makes the stream ask the output gate for an export
 //! ticket at the commit's position ([`celld_logic::Event::ExportTicket`]),
 //! one ticket at a time. The ticket gets the gate's authority check, fence
-//! and ownership read. Once it settles, the commits whose label the proof
-//! covers are released in commit order, turned into records, and submitted
-//! to the sink. A failed ticket is retried; a fenced node stops.
+//! and ownership read. The read is usually the one the write that made the
+//! commit takes for its own output: the gate lets a ticket ride another
+//! barrier's read when that read is asked after the ticket and after a proof
+//! that covers it (`celld_logic`'s `output_gate.rs`, "Export tickets ride"),
+//! so export adds no ownership read to a write. Once the ticket settles, the
+//! commits whose label the proof covers are released in commit order, turned
+//! into records, and submitted to the sink. A failed ticket is retried; a
+//! fenced node stops.
 //!
 //! The sink reports one result per record in submission order. The
 //! delivery task derives each stream's **delivered position** from those

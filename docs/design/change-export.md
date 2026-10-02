@@ -317,6 +317,19 @@ exporter then releases every pending commit whose label is at or below
 `durable_txid` at that moment, in commit order, to the node buffer. A fenced
 node's tickets never settle, so it releases nothing.
 
+The ticket need not read ownership itself. The write that made the commit
+takes its own ticket when it answers, and on a bucket proof both would read
+`own.json`. The gate lets the exporter's ticket ride another barrier on the
+same cell and epoch when that barrier's read is one the ticket could have
+taken: asked after the ticket arrived, and after a proof that covers the
+ticket's position, either the host barrier's own proof or the ticket's.
+A write and the export of its commit then share one read. A host settled by
+a fleet proof takes no read, so its riders prove themselves; a host that
+fails or is fenced fails them, and the exporter retries or stops as for a
+ticket of its own. The rules are in
+[`output_gate.rs`](../../crates/logic/output_gate.rs), "Export tickets
+ride".
+
 The **released position** of a cell after a release is the largest label
 such that every commit with that label or lower has been released. Labels
 are non-decreasing in commit order, so it is one less than the smallest label

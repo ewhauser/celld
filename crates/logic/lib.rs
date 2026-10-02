@@ -386,6 +386,20 @@ struct Barrier {
     /// share the write's verdict -- one proof, one verdict, however many
     /// channels are waiting on it.
     followers: Vec<Held>,
+    /// Whether the ownership read for a bucket proof has been asked. Until
+    /// it is, any read this barrier takes comes after everything the core
+    /// has seen so far, which is what lets an export ticket ride it.
+    verifying: bool,
+    /// Export tickets settled by this barrier's ownership read instead of
+    /// one of their own (`output_gate.rs`, "Export tickets ride").
+    riders: Vec<Rider>,
+}
+
+/// An export ticket waiting on another barrier's ownership read.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct Rider {
+    ticket: u64,
+    position: u64,
 }
 
 impl Barrier {
@@ -3423,6 +3437,8 @@ impl State {
                         epoch,
                         position,
                         followers: Vec::new(),
+                        verifying: false,
+                        riders: Vec::new(),
                     },
                 );
                 effects.push(Effect::AwaitDurable {
@@ -5544,6 +5560,9 @@ impl State {
             for follower in gate.followers {
                 self.release_held(follower, Err(RequestError::DurabilityUnproven), effects);
             }
+            // The handoff's own proof follows, so an export ticket riding
+            // this output proves itself instead, as it would have unridden.
+            self.reask_riders(gate.cell, gate.epoch, gate.riders, effects);
         }
     }
 
@@ -6362,6 +6381,14 @@ impl State {
                     result: Err(RequestError::DurabilityUnproven),
                 });
             }
+            for rider in gate.riders {
+                effects.push(Effect::ExportProven {
+                    cell: gate.cell.clone(),
+                    epoch: gate.epoch,
+                    ticket: rider.ticket,
+                    result: Err(RequestError::DurabilityUnproven),
+                });
+            }
         }
         // Requests already running against this runtime lose it here, exactly
         // as a fence does. Leaving them in `active_requests` would leave the
@@ -6559,6 +6586,14 @@ impl State {
                 effects.push(Effect::Release {
                     request: held.request,
                     channel: held.channel,
+                    result: Err(RequestError::NodeFenced),
+                });
+            }
+            for rider in gate.riders {
+                effects.push(Effect::ExportProven {
+                    cell: gate.cell.clone(),
+                    epoch: gate.epoch,
+                    ticket: rider.ticket,
                     result: Err(RequestError::NodeFenced),
                 });
             }

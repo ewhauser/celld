@@ -67,6 +67,36 @@
 //! [`Channel::Response`], not one ticket for the response. The producer is a
 //! single pump that awaits each chunk's ticket before it asks for the next
 //! chunk, which is what keeps a held chunk from overtaking a released one.
+//!
+//! # Export tickets ride
+//!
+//! The change exporter asks for a proof of each commit it captured
+//! ([`State::export_ticket`]), and the write that made the commit asks for
+//! its own when it answers. On a bucket proof each would read the ownership
+//! record, so a write would cost two reads with export on. Instead a ticket
+//! *rides* another barrier on its cell and epoch and settles on that
+//! barrier's read, when the read is one the ticket could have taken itself:
+//!
+//! - it is asked after the ticket arrived, so it checks the node's claim to
+//!   the cell after everything the ticket stands for (a relayed facet proof,
+//!   a facet delete) happened; and
+//! - it is asked after the ticket's commits were proven uploaded, either
+//!   because the host barrier's own proof covers the ticket's position or
+//!   because the ticket's own proof already landed.
+//!
+//! A barrier still proving has asked no read, so three moments qualify: a
+//! ticket arriving while a barrier at or above its position is proving
+//! ([`State::export_ticket`]); a barrier asking its read, which takes the
+//! still-proving export barriers at or below its position
+//! ([`State::durable_reached`]); and an export barrier whose own proof
+//! landed while a barrier that is not an export barrier is still proving,
+//! which hands its ticket to that barrier's later read. A ticket moves at
+//! most twice, so riding cannot postpone a ticket indefinitely.
+//!
+//! A host settled by a fleet proof takes no read, and a fleet acknowledgement
+//! can predate the ticket, so its riders are asked again on their own. So are
+//! the riders of an output a shutdown handoff cancels, whose proof the
+//! handoff makes instead. A reset or a fence fails them with the host.
 
 use crate::*;
 
@@ -164,6 +194,10 @@ impl State {
     /// nothing, and a read-only output never trails it: it reveals nothing
     /// to a client, and the writes a reader could see have barriers or
     /// observed positions of their own.
+    ///
+    /// The proof and the read need not be the ticket's own: it rides a
+    /// barrier whose read qualifies (module docs, "Export tickets ride"),
+    /// which is how a write and the export of its commit share one read.
     pub(crate) fn export_ticket(
         &mut self,
         cell: CellId,
@@ -193,6 +227,32 @@ impl State {
             });
             return;
         }
+        // A barrier still proving a position at or above this one will read
+        // ownership after its proof, which covers these commits, and after
+        // now.
+        if let Some(host) = self.barriers.values_mut().find(|barrier| {
+            barrier.cell == cell
+                && barrier.epoch == epoch
+                && !barrier.verifying
+                && barrier.position >= position
+        }) {
+            host.riders.push(Rider { ticket, position });
+            return;
+        }
+        self.open_export_barrier(cell, epoch, position, ticket, effects);
+    }
+
+    /// The export barrier itself, asked without the checks
+    /// [`State::export_ticket`] makes: a rider asked again had them when it
+    /// arrived, as a barrier of its own would have.
+    fn open_export_barrier(
+        &mut self,
+        cell: CellId,
+        epoch: Epoch,
+        position: u64,
+        ticket: u64,
+        effects: &mut Vec<Effect>,
+    ) {
         let op = self.op();
         self.barriers.insert(
             op,
@@ -202,6 +262,8 @@ impl State {
                 epoch,
                 position,
                 followers: Vec::new(),
+                verifying: false,
+                riders: Vec::new(),
             },
         );
         effects.push(Effect::AwaitDurable {
@@ -210,6 +272,19 @@ impl State {
             epoch,
             position,
         });
+    }
+
+    /// Ask each rider again with a proof of its own.
+    pub(crate) fn reask_riders(
+        &mut self,
+        cell: CellId,
+        epoch: Epoch,
+        riders: Vec<Rider>,
+        effects: &mut Vec<Effect>,
+    ) {
+        for Rider { ticket, position } in riders {
+            self.open_export_barrier(cell.clone(), epoch, position, ticket, effects);
+        }
     }
 
     /// Whether a verified proof of this residency, at `epoch`, already covers
@@ -282,6 +357,8 @@ impl State {
                 epoch,
                 position,
                 followers: Vec::new(),
+                verifying: false,
+                riders: Vec::new(),
             },
         );
         effects.push(Effect::AwaitDurable {
@@ -358,11 +435,104 @@ impl State {
         // arbitrated it: a takeover seals a member before restoring, so a
         // stale owner's ack-all fails closed.
         if proven && source == ProofSource::Bucket {
+            if self.hand_export_on(op) {
+                return;
+            }
+            self.take_export_riders(op);
+            let gate = self.barriers.get_mut(&op).expect("checked above");
+            gate.verifying = true;
             let (cell, epoch) = (gate.cell.clone(), gate.epoch);
             effects.push(Effect::VerifyOwnership { op, cell, epoch });
             return;
         }
+        // A fleet acknowledgement can predate a rider's ticket, so each rider
+        // proves itself.
+        if proven {
+            let gate = self.barriers.get_mut(&op).expect("checked above");
+            let riders = std::mem::take(&mut gate.riders);
+            let (cell, epoch) = (gate.cell.clone(), gate.epoch);
+            self.settle_gate(op, true, effects);
+            self.reask_riders(cell, epoch, riders, effects);
+            return;
+        }
         self.settle_gate(op, proven, effects);
+    }
+
+    /// An export barrier's bucket proof landed. If a barrier that is not an
+    /// export barrier is still proving on the same residency, its read comes
+    /// after this proof and after this ticket, so the ticket and its riders
+    /// ride it rather than read for themselves. The host is not an export
+    /// barrier, so it reads for itself and nothing moves again.
+    fn hand_export_on(&mut self, op: OpId) -> bool {
+        let gate = &self.barriers[&op];
+        if !matches!(gate.owner, GateOwner::Export { .. }) {
+            return false;
+        }
+        let (cell, epoch) = (gate.cell.clone(), gate.epoch);
+        let Some(host) = self
+            .barriers
+            .iter()
+            .find(|(other, barrier)| {
+                **other != op
+                    && barrier.cell == cell
+                    && barrier.epoch == epoch
+                    && !barrier.verifying
+                    && barrier.trailable()
+            })
+            .map(|(other, _)| *other)
+        else {
+            return false;
+        };
+        let gate = self.barriers.remove(&op).expect("checked above");
+        let GateOwner::Export { ticket } = gate.owner else {
+            unreachable!("checked above")
+        };
+        let host = self.barriers.get_mut(&host).expect("found above");
+        host.riders.push(Rider {
+            ticket,
+            position: gate.position,
+        });
+        host.riders.extend(gate.riders);
+        true
+    }
+
+    /// Barrier `op` is about to read ownership after a proof of its
+    /// position. An export barrier on the same residency still proving a
+    /// position at or below it was asked before now and is covered by that
+    /// proof, so it rides this read, with its own riders.
+    fn take_export_riders(&mut self, op: OpId) {
+        let gate = &self.barriers[&op];
+        let (cell, epoch, position) = (gate.cell.clone(), gate.epoch, gate.position);
+        let taken: Vec<OpId> = self
+            .barriers
+            .iter()
+            .filter(|(other, barrier)| {
+                **other != op
+                    && barrier.cell == cell
+                    && barrier.epoch == epoch
+                    && !barrier.verifying
+                    && barrier.position <= position
+                    && matches!(barrier.owner, GateOwner::Export { .. })
+            })
+            .map(|(other, _)| *other)
+            .collect();
+        let mut riders = Vec::new();
+        for other in taken {
+            let barrier = self.barriers.remove(&other).expect("found above");
+            let GateOwner::Export { ticket } = barrier.owner else {
+                unreachable!("only export barriers were selected")
+            };
+            riders.push(Rider {
+                ticket,
+                position: barrier.position,
+            });
+            riders.extend(barrier.riders);
+        }
+        self.barriers
+            .get_mut(&op)
+            .expect("checked above")
+            .riders
+            .extend(riders);
     }
 
     /// Ownership verification for a bucket-proof gate. A record that no longer
@@ -409,6 +579,16 @@ impl State {
         } else {
             Err(RequestError::DurabilityUnproven)
         };
+        // A rider shares the verdict, and like an export barrier of its own
+        // a failed one is retried by the exporter.
+        for rider in &gate.riders {
+            effects.push(Effect::ExportProven {
+                cell: gate.cell.clone(),
+                epoch: gate.epoch,
+                ticket: rider.ticket,
+                result,
+            });
+        }
         match gate.owner {
             // Unpin before releasing: the cleanup this ends -- shedding,
             // eviction -- is queued ahead of the response, so a caller that
