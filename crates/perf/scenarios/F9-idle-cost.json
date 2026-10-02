@@ -29,6 +29,7 @@
       "checks": [
         {
           "metric": "bucket",
+          "per": "node_count",
           "per_second": true,
           "max": 10
         }

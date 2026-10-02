@@ -367,6 +367,7 @@ A scenario is a JSON file in `crates/perf/scenarios`. Fixtures are in
   fails a run only with `--enforce-timing`. Metrics:
   - `bucket[:class=…,op=…,outcome=…]`;
   - `counter:LABEL`;
+  - `node_count` (use `"per": "node_count", "per_second": true` for a per-node rate);
   - `hist_count:LABEL`, `hist_p50:LABEL`, `hist_p99:LABEL`;
   - `client:{ok,errors,shed,error_rate,achieved_rate,p50_us,p99_us,p999_us}`;
   - `node:{cpu_cores,rss_bytes_max}`.
@@ -479,3 +480,16 @@ results on it.
 - **celld-tck.** The fleet scenarios live here, not in celld-tck. The
   scenario files are JSON, so the TCK can run the same files against its
   own Compose fleet.
+
+### Runner file limits
+
+The 10,000-resident-cell scenarios need about 80,000 open descriptors for
+SQLite alone. The performance workflow runs the harness and its children
+with a soft limit of 262,144. On GitHub-hosted runners, it raises an inherited
+hard limit below that value for the scenario shell only. Self-hosted runners
+must provide at least that hard limit (for example through `LimitNOFILE` in
+the runner service); the workflow fails before load starts if they do not.
+The applied soft and hard limits are printed in each scenario step.
+
+For focused reruns, workflow dispatch accepts `benchmarks=false` to skip
+component benchmarks while retaining the selected scenario checks.
