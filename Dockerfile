@@ -12,6 +12,9 @@ ARG TARGETARCH
 # `release` for shipped artifacts; a fast-loop caller passes `lab` to skip
 # the fat-LTO relink and keep incremental state in the target cache.
 ARG CELLD_PROFILE=release
+# Optional Cargo features of the celld crate, comma separated. The release
+# workflow passes `export-kafka` for the `-kafka` image variant.
+ARG CELLD_FEATURES=
 WORKDIR /src
 # rusqlite's `session` feature regenerates libsqlite3-sys bindings with
 # bindgen, which loads libclang at build time.
@@ -24,7 +27,8 @@ RUN --mount=type=cache,id=celld-cargo-registry,target=/usr/local/cargo/registry,
     --mount=type=cache,id=celld-cargo-git,target=/usr/local/cargo/git,sharing=locked \
     --mount=type=cache,id=celld-target-${TARGETARCH},target=/src/target,sharing=locked \
     mkdir -p /out && \
-    cargo build --profile "${CELLD_PROFILE}" --locked -p celld && \
+    cargo build --profile "${CELLD_PROFILE}" --locked -p celld \
+      ${CELLD_FEATURES:+--features "${CELLD_FEATURES}"} && \
     install -m 755 "target/${CELLD_PROFILE}/celld" /out/celld
 
 # The final image depends on this stage, so a break in the engine's tests or
