@@ -40,6 +40,11 @@ pub mod internal {
 
     #[cfg(feature = "s3")]
     pub use crate::client::object_store::internal as object_store;
+
+    /// Go's `path.Join`, the reference the LTX path helpers must match.
+    pub fn path_join(elem: &[&str]) -> String {
+        crate::path_join(elem)
+    }
 }
 
 // ── Crate-root re-exports — the ergonomic public surface ────────────────
@@ -524,6 +529,110 @@ fn path_join(elem: &[&str]) -> String {
 // ── LTX path helpers ──────────────────────────────────────────────────────────
 //
 // Ported from litestream@v0.5.11 litestream.go:184-197.
+//
+// Go builds each path with nested `path.Join` calls, cleaning at every level.
+// Only the first join (`root` + `"ltx"`) can change under `path.Clean`. Its
+// result always ends in the element `ltx`, so it is never empty, `.` or `/`.
+// The level (decimal digits) and the filename (hex digits, `-` and `.ltx`) are
+// single elements that are never empty, `.` or `..`, so appending each to that
+// clean directory after a `/` yields a path `path.Clean` leaves unchanged. The
+// helpers below clean the root once and append the rest into one pre-sized
+// `String`.
+
+/// Length of an LTX filename: two 16-digit TXIDs, `-` and `.ltx`.
+pub(crate) const LTX_FILENAME_LEN: usize = 16 + 1 + 16 + 4;
+
+/// Appends `v` as lowercase hex, zero-padded to at least `width` digits, the
+/// same bytes as `format!("{v:0width$x}")`.
+pub(crate) fn push_hex(buf: &mut String, v: u64, width: usize) {
+    const DIGITS: &[u8; 16] = b"0123456789abcdef";
+    let mut tmp = [0u8; 16];
+    let mut i = tmp.len();
+    let mut v = v;
+    loop {
+        i -= 1;
+        tmp[i] = DIGITS[(v & 0xf) as usize];
+        v >>= 4;
+        if v == 0 {
+            break;
+        }
+    }
+    for _ in tmp.len() - i..width {
+        buf.push('0');
+    }
+    buf.extend(tmp[i..].iter().map(|&b| b as char));
+}
+
+/// Appends `v` in decimal, the same bytes as `v.to_string()`.
+fn push_decimal(buf: &mut String, v: u32) {
+    let mut tmp = [0u8; 10];
+    let mut i = tmp.len();
+    let mut v = v;
+    loop {
+        i -= 1;
+        tmp[i] = b'0' + (v % 10) as u8;
+        v /= 10;
+        if v == 0 {
+            break;
+        }
+    }
+    buf.extend(tmp[i..].iter().map(|&b| b as char));
+}
+
+/// Appends the LTX filename `<min>-<max>.ltx`, the same bytes as
+/// [`ltx::format_filename`].
+pub(crate) fn push_ltx_filename(buf: &mut String, min_txid: TXID, max_txid: TXID) {
+    push_hex(buf, min_txid.0, 16);
+    buf.push('-');
+    push_hex(buf, max_txid.0, 16);
+    buf.push_str(".ltx");
+}
+
+/// LTX paths under one root, with the root cleaned once.
+///
+/// Builds the same strings as [`ltx_dir`], [`ltx_level_dir`] and
+/// [`ltx_file_path`] for that root, each in a single allocation.
+#[derive(Debug, Clone)]
+pub struct LtxPaths {
+    /// `ltx_dir(root)`, already cleaned.
+    dir: String,
+}
+
+impl LtxPaths {
+    /// Cleans `root` + `"ltx"` once for every later path.
+    pub fn new(root: &str) -> Self {
+        LtxPaths {
+            dir: path_join(&[root, "ltx"]),
+        }
+    }
+
+    /// The LTX directory, the same as [`ltx_dir`].
+    pub fn dir(&self) -> &str {
+        &self.dir
+    }
+
+    /// One level's directory, the same as [`ltx_level_dir`].
+    pub fn level_dir(&self, level: u32) -> String {
+        let mut buf = String::with_capacity(self.dir.len() + 1 + 10);
+        self.push_level_dir(&mut buf, level);
+        buf
+    }
+
+    /// One LTX file's path, the same as [`ltx_file_path`].
+    pub fn file_path(&self, level: u32, min_txid: TXID, max_txid: TXID) -> String {
+        let mut buf = String::with_capacity(self.dir.len() + 1 + 10 + 1 + LTX_FILENAME_LEN);
+        self.push_level_dir(&mut buf, level);
+        buf.push('/');
+        push_ltx_filename(&mut buf, min_txid, max_txid);
+        buf
+    }
+
+    fn push_level_dir(&self, buf: &mut String, level: u32) {
+        buf.push_str(&self.dir);
+        buf.push('/');
+        push_decimal(buf, level);
+    }
+}
 
 /// Returns the path to the LTX directory under a given root.
 ///
@@ -540,7 +649,7 @@ pub fn ltx_dir(root: &str) -> String {
 /// composition over the already-cleaned `LTXDir(root)`, which we preserve so
 /// `..` resolution matches Go exactly.
 pub fn ltx_level_dir(root: &str, level: u32) -> String {
-    path_join(&[&ltx_dir(root), &level.to_string()])
+    LtxPaths::new(root).level_dir(level)
 }
 
 /// Returns the path to a single LTX file for a given transaction range.
@@ -552,7 +661,8 @@ pub fn ltx_level_dir(root: &str, level: u32) -> String {
 /// `return path.Join(LTXLevelDir(root, level), ltx.FormatFilename(minTXID, maxTXID))`
 /// and `FormatFilename` in ltx@v0.5.1 ltx.go:487
 /// (`fmt.Sprintf("%s-%s.ltx", minTXID.String(), maxTXID.String())`).
+///
+/// Callers that build many paths under one root should hold an [`LtxPaths`].
 pub fn ltx_file_path(root: &str, level: u32, min_txid: TXID, max_txid: TXID) -> String {
-    let filename = format!("{}-{}.ltx", min_txid, max_txid);
-    path_join(&[&ltx_level_dir(root, level), &filename])
+    LtxPaths::new(root).file_path(level, min_txid, max_txid)
 }

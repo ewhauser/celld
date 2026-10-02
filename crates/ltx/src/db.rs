@@ -50,8 +50,8 @@ use crate::error::{new_ltx_error, Error, Result};
 use crate::ltx::{self, lock_pgno, Crc64};
 use crate::wal::WalReader;
 use crate::{
-    ltx_file_path, ltx_level_dir, Pos, CHECKPOINT_MODE_PASSIVE, CHECKPOINT_MODE_RESTART,
-    CHECKPOINT_MODE_TRUNCATE, META_DIR_SUFFIX, TXID, WAL_FRAME_HEADER_SIZE, WAL_HEADER_SIZE,
+    LtxPaths, Pos, CHECKPOINT_MODE_PASSIVE, CHECKPOINT_MODE_RESTART, CHECKPOINT_MODE_TRUNCATE,
+    META_DIR_SUFFIX, TXID, WAL_FRAME_HEADER_SIZE, WAL_HEADER_SIZE,
 };
 use rusqlite::ffi;
 use rusqlite::Connection;
@@ -361,6 +361,8 @@ pub struct Db {
     host: crate::LtxHost,
     path: PathBuf,
     meta_path: PathBuf,
+    /// LTX paths under `meta_path`, with the root cleaned once at open.
+    ltx_paths: LtxPaths,
     /// Main connection: writes, PRAGMAs, checkpoints, page-size reads.
     conn: Connection,
     /// Dedicated connection that holds the long-running read transaction.
@@ -564,10 +566,12 @@ impl Db {
             .busy_timeout(Self::DEFAULT_BUSY_TIMEOUT)
             .map_err(sql_err)?;
 
+        let ltx_paths = LtxPaths::new(&meta_path.to_string_lossy());
         let mut db = Db {
             host,
             path,
             meta_path,
+            ltx_paths,
             conn,
             rtx_conn,
             page_size: 0,
@@ -663,13 +667,13 @@ impl Db {
     }
 
     /// Root LTX directory (`<meta>/ltx`). Ported from `DB.LTXDir` (db.go:302).
-    fn ltx_dir(&self) -> String {
-        crate::ltx_dir(&self.meta_path.to_string_lossy())
+    fn ltx_dir(&self) -> &str {
+        self.ltx_paths.dir()
     }
 
     /// LTX level sub-directory. Ported from `DB.LTXLevelDir` (db.go:332).
     fn ltx_level_dir(&self, level: u32) -> String {
-        ltx_level_dir(&self.meta_path.to_string_lossy(), level)
+        self.ltx_paths.level_dir(level)
     }
 
     /// Local path of a single LTX file. Ported from `DB.LTXPath` (db.go:338).
@@ -678,7 +682,7 @@ impl Db {
     /// the capture loop wrote and upload them (the Go exported `DB.LTXPath`,
     /// used by `Replica.uploadLTXFile`, replica.go:183).
     pub fn ltx_path(&self, level: u32, min_txid: TXID, max_txid: TXID) -> String {
-        ltx_file_path(&self.meta_path.to_string_lossy(), level, min_txid, max_txid)
+        self.ltx_paths.file_path(level, min_txid, max_txid)
     }
 
     /// Reads one local LTX file through the host filesystem.
@@ -939,7 +943,7 @@ impl Db {
     /// Removes local LTX files, forcing a fresh snapshot on the next sync.
     /// Ported from `DB.ResetLocalState` (db.go:309-328).
     pub fn reset_local_state(&mut self) -> Result<()> {
-        match self.host.remove_dir_all(Path::new(&self.ltx_dir())) {
+        match self.host.remove_dir_all(Path::new(self.ltx_dir())) {
             Ok(()) => {}
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
             Err(e) => return Err(e.into()),
