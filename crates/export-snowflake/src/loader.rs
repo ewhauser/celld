@@ -91,6 +91,11 @@ pub enum LoadError {
     Render(#[from] RenderError),
     #[error("a schema record in CELL_META does not decode: {0}")]
     Schema(serde_json::Error),
+    #[error(
+        "EXPORT_LANDING's body column is {0}, from a loader that landed bodies as \
+         strings; upgrade it as docs/export.md says before landing with this loader"
+    )]
+    LandingBody(String),
 }
 
 /// `schema` records by `(script, class, table)`.
@@ -162,6 +167,7 @@ impl<W: Warehouse> Loader<W> {
     /// `IF NOT EXISTS`, so a deployed object whose SQL changed must be
     /// dropped by hand first (see the README).
     pub fn deploy(&mut self) -> Result<DeployReport, LoadError> {
+        self.check_landing()?;
         let statements = self.config.deployment.statements()?;
         for s in &statements {
             self.run(&s.name, &s.sql)?;
@@ -171,6 +177,23 @@ impl<W: Warehouse> Loader<W> {
             statements: statements.len(),
             dynamic_tables,
         })
+    }
+
+    /// Refuse an `EXPORT_LANDING` deployed by a loader that landed bodies
+    /// as strings. Its pipe casts each body to a string, and its route task
+    /// parses one, so neither may meet this loader's rows: `deploy` never
+    /// changes an object that exists, so the upgrade is by hand.
+    pub fn check_landing(&mut self) -> Result<(), LoadError> {
+        let rows = self.run(
+            "check EXPORT_LANDING",
+            "SELECT data_type FROM INFORMATION_SCHEMA.COLUMNS \
+             WHERE table_schema = CURRENT_SCHEMA() AND table_name = 'EXPORT_LANDING' \
+             AND column_name = 'BODY'",
+        )?;
+        match rows.get(0, "data_type") {
+            None | Some("VARIANT") => Ok(()),
+            Some(other) => Err(LoadError::LandingBody(other.to_string())),
+        }
     }
 
     /// Route every landed record now, by running the route task's body,
@@ -435,6 +458,8 @@ mod tests {
         schemas: Vec<(String, String, String)>,
         dynamic_tables: Vec<(String, String)>,
         fail_containing: Option<String>,
+        /// EXPORT_LANDING.BODY's type, once deployed.
+        landing_body: Option<String>,
     }
 
     impl Warehouse for Fake {
@@ -459,6 +484,14 @@ mod tests {
                     self.schemas
                         .iter()
                         .map(|(s, c, b)| vec![Some(s.clone()), Some(c.clone()), Some(b.clone())])
+                        .collect(),
+                )
+            } else if sql.contains("table_name = 'EXPORT_LANDING'") {
+                rows(
+                    &["DATA_TYPE"],
+                    self.landing_body
+                        .iter()
+                        .map(|t| vec![Some(t.clone())])
                         .collect(),
                 )
             } else if sql.starts_with("SELECT name, sql FROM EXPORT_DYNAMIC_TABLES") {
@@ -514,6 +547,8 @@ mod tests {
         let log = &l.warehouse.log;
         let n = config().deployment.statements().unwrap().len();
         assert_eq!(report.statements, n);
+        assert!(log[0].contains("INFORMATION_SCHEMA.COLUMNS"), "{}", log[0]);
+        let log = &log[1..];
         assert!(log[..n].contains(&"ALTER TASK EXPORT_ROUTE RESUME".to_string()));
         assert!(log[..n].contains(&"ALTER TASK EXPORT_ERASE RESUME".to_string()));
         assert!(log
@@ -521,6 +556,29 @@ mod tests {
             .any(|s| s.contains("CREATE TABLE IF NOT EXISTS EXPORT_DYNAMIC_TABLES")));
     }
 
+    #[test]
+    fn deploy_refuses_a_landing_table_that_holds_bodies_as_strings() {
+        for (body, ok) in [(None, true), (Some("VARIANT"), true), (Some("TEXT"), false)] {
+            let mut l = Loader::new(
+                Fake {
+                    landing_body: body.map(Into::into),
+                    ..Fake::default()
+                },
+                config(),
+            );
+            match l.deploy() {
+                Ok(_) => assert!(ok, "{body:?}"),
+                Err(e) => {
+                    assert!(!ok, "{body:?}: {e}");
+                    assert!(
+                        matches!(&e, LoadError::LandingBody(t) if t == "TEXT"),
+                        "{e}"
+                    );
+                    assert_eq!(l.warehouse.log.len(), 1, "nothing deployed");
+                }
+            }
+        }
+    }
     #[test]
     fn sync_creates_then_leaves_alone_then_replaces_on_a_new_column() {
         let mut fake = Fake {

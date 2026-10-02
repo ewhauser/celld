@@ -266,7 +266,8 @@ pub fn payloads(rows: &[LandingRow], limit: usize) -> Result<Vec<Vec<u8>>, Wareh
     let mut out: Vec<Vec<u8>> = Vec::new();
     let mut current: Vec<u8> = Vec::new();
     for row in rows {
-        let mut line = serde_json::to_vec(row).expect("landing rows always encode");
+        let mut line = Vec::with_capacity(row.body.len() + 512);
+        row.write_json(&mut line);
         line.push(b'\n');
         if line.len() > limit {
             return Err(WarehouseError::other(format!(
@@ -342,7 +343,7 @@ mod tests {
             origin: "live".into(),
             fragment: 1,
             fragments: 1,
-            body: "x".repeat(body_bytes),
+            body: format!("{{\"x\":\"{}\"}}", "x".repeat(body_bytes)),
             source: source.into(),
         }
     }
@@ -367,6 +368,10 @@ mod tests {
             .contains("\"incarnation\":18446744073709551615"));
         assert!(payloads(&[], 10).unwrap().is_empty());
         assert!(payloads(&[row("big", 100)], 50).is_err());
+        // The body lands as a VARIANT, so it must be JSON, and is nested.
+        assert!(std::str::from_utf8(&out[0])
+            .unwrap()
+            .contains(&format!("\"body\":{{\"x\":\"{}\"}}", "x".repeat(100))));
     }
 
     #[test]

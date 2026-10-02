@@ -1,7 +1,5 @@
 """Regression checks for recovery identity and declared data loss."""
 
-import json
-
 from test_sql import load, warehouse
 
 
@@ -21,7 +19,7 @@ def landing(kind, txid, body, script="app", incarnation=1):
         origin="live",
         fragment=1,
         fragments=1,
-        body=json.dumps(body),
+        body=body,
         source="test",
     )
 

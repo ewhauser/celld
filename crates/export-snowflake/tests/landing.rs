@@ -266,10 +266,17 @@ fn a_row_cut_from_a_message_holds_the_whole_record() {
             let field = format!("{}:{}", serde_json::to_string(&k).unwrap(), v.get());
             assert!(message.contains(&field), "{field}");
         }
-        // And through the NDJSON line Snowpipe Streaming reads.
-        let line = serde_json::to_string(&row).unwrap();
-        let back: LandingRow = serde_json::from_str(&line).unwrap();
+        // And through the NDJSON line Snowpipe Streaming reads, where the
+        // body is the object itself, so it lands as a VARIANT.
+        let line = serde_json::to_vec(&row).unwrap();
+        let mut written = Vec::new();
+        row.write_json(&mut written);
+        assert_eq!(written, line);
+        let back: LandingRow = serde_json::from_slice(&line).unwrap();
+        assert_eq!(back, row);
         assert_eq!(back.to_record().unwrap(), r);
+        let line: serde_json::Value = serde_json::from_slice(&line).unwrap();
+        assert_eq!(line["body"], tree_body(&r));
     }
 }
 
