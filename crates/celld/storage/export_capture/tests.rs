@@ -20,8 +20,11 @@ fn settings() -> Settings {
 }
 
 struct Fixture {
-    connection: Connection,
+    /// Declared before `connection` so it drops first: the session and the
+    /// hooks `Capture::drop` removes hold the connection's handle, and
+    /// touching them after `sqlite3_close` is a use-after-free.
     capture: Capture,
+    connection: Connection,
     queue: DirtyList,
     /// `DROP TABLE`s and `ALTER TABLE`s the authorizer saw, as `storage`
     /// collects them.
