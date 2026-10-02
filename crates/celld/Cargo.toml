@@ -125,6 +125,17 @@ webpki-roots.workspace = true
 libc.workspace = true
 nix.workspace = true
 
+# `background_threads` makes the shipped allocator purge freed pages on its
+# timer. Runtime enablement alone failed in the Linux image, so the cgroup
+# hard-cap latch stayed closed after a node shed its cells. jemalloc runs the
+# thread only on Linux and FreeBSD. Elsewhere the compiled-in
+# `background_thread:true` fails `background_thread_boot0`, jemalloc never
+# finishes initializing, and every slow-path allocation on every thread then
+# takes jemalloc's global init lock (and heap profiling never starts). Keep
+# this cfg in step with `memory::tune_allocator`.
+[target.'cfg(any(target_os = "linux", target_os = "freebsd"))'.dependencies]
+tikv-jemallocator = { workspace = true, features = ["background_threads"] }
+
 [dev-dependencies]
 criterion.workspace = true
 lz4_flex.workspace = true
