@@ -304,7 +304,7 @@ def test_bulk_only_generation_needs_repair(warehouse):
         "cell_name": None, "facet": None, "incarnation": 1,
         "epoch": 1, "txid": 1, "commit": 1, "committed_at": 1790000000000,
         "node": "node-a", "origin": "live", "fragment": 1, "fragments": 1,
-        "body": json.dumps({"tables": [{"table": "items", "generation": 1}]}),
+        "body": {"tables": [{"table": "items", "generation": 1}]},
         "source": "test",
     }
     load(warehouse, {"tombstones": [], "landing_rows": [bulk], "dynamic_tables": []})

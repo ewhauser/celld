@@ -1,9 +1,9 @@
 //! The row layout `insert_landing` reads: one per record the loader lands.
 //!
 //! One field per envelope field, named as the record's JSON fields are,
-//! `body`: the record's other fields as a JSON object string, and `source`:
-//! where the loader read the record. `kind` is its own column, so routing
-//! never parses the body.
+//! `body`: the record's other fields as a JSON object, and `source`: where
+//! the loader read the record. `kind` is its own column, so routing never
+//! looks inside the body.
 
 use std::borrow::Cow;
 use std::fmt;
@@ -54,7 +54,9 @@ pub struct LandingRow {
     pub origin: String,
     pub fragment: u32,
     pub fragments: u32,
-    /// The kind-specific fields as a JSON object.
+    /// The kind-specific fields: a JSON object's text. The row's JSON
+    /// carries it as the object itself, which lands as a VARIANT.
+    #[serde(with = "json_object")]
     pub body: String,
     /// Where the record was read, such as `blob-stream/7/1234` (virtual
     /// partition 7, offset 1234). Only for tracing a row back.
@@ -127,6 +129,55 @@ impl LandingRow {
         })
     }
 
+    /// Append the row's JSON, as `serde_json::to_vec` writes it, with the
+    /// body copied in rather than checked and copied: `body` must hold one
+    /// JSON object, as every row this crate builds does.
+    pub fn write_json(&self, out: &mut Vec<u8>) {
+        let head = Head {
+            kind: &self.kind,
+            script: &self.script,
+            class: &self.class,
+            cell: &self.cell,
+            cell_name: &self.cell_name,
+            facet: &self.facet,
+            incarnation: self.incarnation,
+            epoch: self.epoch,
+            txid: self.txid,
+            commit: self.commit,
+            committed_at: self.committed_at,
+            node: &self.node,
+            origin: &self.origin,
+            fragment: self.fragment,
+            fragments: self.fragments,
+        };
+        serde_json::to_writer(&mut *out, &head).expect("a row's envelope encodes");
+        out.pop();
+        out.extend_from_slice(b",\"body\":");
+        out.extend_from_slice(self.body.as_bytes());
+        out.extend_from_slice(b",\"source\":");
+        serde_json::to_writer(&mut *out, &self.source).expect("a string encodes");
+        out.push(b'}');
+    }
+
+    /// No less than the length of [`write_json`](Self::write_json)'s
+    /// output: room to write the row into that is never outgrown. Counted
+    /// from lengths, without reading the strings, so it is cheap, and loose
+    /// by at most a few times the strings' lengths, never by the body.
+    pub fn json_len_bound(&self) -> usize {
+        let option = |o: &Option<String>| o.as_ref().map_or(0, String::len);
+        let strings = self.kind.len()
+            + self.script.len()
+            + self.class.len()
+            + self.cell.len()
+            + option(&self.cell_name)
+            + option(&self.facet)
+            + self.node.len()
+            + self.origin.len()
+            + self.source.len();
+        // Each string byte is at most an escape, `\u00XX`.
+        JSON_FIXED_BOUND + 6 * strings + self.body.len()
+    }
+
     /// The record this row holds.
     pub fn to_record(&self) -> Result<Record, DecodeError> {
         let mut fields: Map<String, Json> = serde_json::from_str(&self.body)?;
@@ -154,6 +205,31 @@ impl LandingRow {
         Record::from_json(&serde_json::to_vec(&Json::Object(fields))?)
     }
 }
+
+/// A row's fields before `body`, in order.
+#[derive(Serialize)]
+struct Head<'a> {
+    kind: &'a str,
+    script: &'a str,
+    class: &'a str,
+    cell: &'a str,
+    cell_name: &'a Option<String>,
+    facet: &'a Option<String>,
+    incarnation: u64,
+    epoch: u64,
+    txid: u64,
+    commit: u64,
+    committed_at: i64,
+    node: &'a str,
+    origin: &'a str,
+    fragment: u32,
+    fragments: u32,
+}
+
+/// A row's JSON less its strings' contents and its body: the keys, the
+/// quotes and punctuation, `null` for each option, and each number at its
+/// widest.
+const JSON_FIXED_BOUND: usize = 319;
 
 /// A `kind` or `origin` as the record's JSON names it.
 fn name(v: &impl Serialize) -> String {
@@ -213,5 +289,26 @@ impl<'de> Deserialize<'de> for Key<'de> {
             }
         }
         d.deserialize_str(V)
+    }
+}
+
+/// `body` in a row's JSON: the object, not a string holding it.
+mod json_object {
+    use serde::de::Error as _;
+    use serde::ser::Error as _;
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+    use serde_json::value::RawValue;
+
+    pub fn serialize<S: Serializer>(body: &str, s: S) -> Result<S::Ok, S::Error> {
+        let raw: &RawValue = serde_json::from_str(body).map_err(S::Error::custom)?;
+        raw.serialize(s)
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<String, D::Error> {
+        let raw = Box::<RawValue>::deserialize(d)?;
+        if !raw.get().starts_with('{') {
+            return Err(D::Error::custom("a landing row's body is a JSON object"));
+        }
+        Ok(Box::<str>::from(raw).into_string())
     }
 }

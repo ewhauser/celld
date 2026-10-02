@@ -31,7 +31,8 @@ makes:
 - a task is its EXECUTE IMMEDIATE block, run by `run_task()`, standing in
   for the schedule. EXECUTE TASK only records that a run was asked for,
   since in Snowflake it only schedules one, so nothing may rely on it having
-  run. ALTER TASK RESUME and SUSPEND set a task's state.
+  run. ALTER TASK RESUME and SUSPEND set a task's state. DROP TASK, DROP
+  PIPE and DROP STREAM forget the object.
 """
 
 import base64
@@ -133,6 +134,16 @@ class Emulator:
                 raise RuntimeError(f"Task '{name}' does not exist or not authorized.")
             self.tasks[name]["state"] = "started" if action == "RESUME" else "suspended"
             return ["status"], [["Statement executed successfully."]]
+        if m := re.match(r"DROP (TASK|PIPE) (\w+)$", s):
+            kind, name = m.groups()
+            objects = self.tasks if kind == "TASK" else self.pipes
+            if objects.pop(name, None) is None:
+                raise RuntimeError(f"{kind.title()} '{name}' does not exist or not authorized.")
+            return ["status"], [[f"{name} successfully dropped."]]
+        if s == "DROP STREAM EXPORT_LANDING_NEW":
+            self.cur.execute("DROP VIEW EXPORT_LANDING_NEW")
+            self.stream_offset = None
+            return ["status"], [["EXPORT_LANDING_NEW successfully dropped."]]
         if m := re.match(r"EXECUTE TASK (\w+)$", s):
             if m.group(1) not in self.tasks:
                 raise RuntimeError(f"Task '{m.group(1)}' does not exist or not authorized.")

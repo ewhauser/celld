@@ -6,8 +6,9 @@
 -- the envelope's, named as the record's JSON fields are (`kind`, `script`,
 -- `class`, `cell`, `cell_name`, `facet`, `incarnation`, `epoch`, `txid`,
 -- `commit`, `committed_at`, `node`, `origin`, `fragment`, `fragments`),
--- `body`: the record's other fields as a JSON object string, and `source`:
--- where the record was read. `LandingRow` in this crate is that layout.
+-- `body`: the record's other fields as a JSON object, which lands as a
+-- VARIANT, and `source`: where the record was read. `LandingRow` in this
+-- crate is that layout.
 --
 -- `Deployment::statements` fills in {{WAREHOUSE}}, and a {{NAME}} naming
 -- another statement in this file with that statement's text, so the tasks
@@ -40,7 +41,7 @@ FROM (
         $1:origin::STRING,
         $1:fragment::NUMBER(10, 0),
         $1:fragments::NUMBER(10, 0),
-        $1:body::STRING,
+        $1:body::VARIANT,
         $1:source::STRING
     FROM TABLE(DATA_SOURCE(TYPE => 'STREAMING'))
 );
@@ -65,15 +66,15 @@ SELECT
         || '.' || LPAD(l.commit::STRING, 20, '0'),
     TO_TIMESTAMP_NTZ(l.committed_at, 3), l.node, l.origin,
     l.fragment, l.fragments, l.kind,
-    l.doc:snapshot_id::STRING,
-    l.doc:table::STRING,
-    l.doc:generation::NUMBER(20, 0),
-    l.doc:columns::ARRAY,
-    l.doc:key_columns::ARRAY,
-    l.doc:rows::ARRAY,
+    l.body:snapshot_id::STRING,
+    l.body:table::STRING,
+    l.body:generation::NUMBER(20, 0),
+    l.body:columns::ARRAY,
+    l.body:key_columns::ARRAY,
+    l.body:rows::ARRAY,
     l.source,
     CURRENT_TIMESTAMP()
-FROM (SELECT n.*, PARSE_JSON(n.body) AS doc FROM EXPORT_LANDING_NEW n) l
+FROM EXPORT_LANDING_NEW l
 WHERE l.kind IN ('rows', 'snapshot')
   AND NOT EXISTS (
       SELECT 1 FROM EXPORT_TOMBSTONES t
@@ -96,7 +97,7 @@ SELECT
         || '.' || LPAD(l.commit::STRING, 20, '0'),
     TO_TIMESTAMP_NTZ(l.committed_at, 3), l.node, l.origin,
     l.fragment, l.fragments, l.kind,
-    PARSE_JSON(l.body),
+    l.body,
     l.source,
     CURRENT_TIMESTAMP()
 FROM EXPORT_LANDING_NEW l
