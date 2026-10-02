@@ -5,8 +5,13 @@
 //! where the loader read the record. `kind` is its own column, so routing
 //! never parses the body.
 
+use std::borrow::Cow;
+use std::fmt;
+
 use celld_export_format::{DecodeError, Record};
+use serde::de::{Deserializer, MapAccess, Visitor};
 use serde::{Deserialize, Serialize};
+use serde_json::value::RawValue;
 use serde_json::{Map, Value as Json};
 
 /// `EXPORT_LANDING`'s record columns, in order.
@@ -57,56 +62,69 @@ pub struct LandingRow {
 }
 
 impl LandingRow {
+    /// One record's JSON, as read from the topic, as a row. Fails as
+    /// [`Record::from_json`] does when the JSON is not a record. The body
+    /// is cut from `json`: each field keeps the bytes it was encoded with,
+    /// and nothing is decoded into a tree and encoded again.
+    pub fn from_json(json: &[u8], source: impl Into<String>) -> Result<Self, DecodeError> {
+        let record = Record::from_json(json)?;
+        Ok(Self::split(&record, json, source.into())?)
+    }
+
     pub fn from_record(record: &Record, source: impl Into<String>) -> Self {
-        let Json::Object(mut fields) =
-            serde_json::to_value(record).expect("export records always encode")
-        else {
-            unreachable!("a record encodes as an object");
-        };
-        let mut take = |k: &str| fields.remove(k).unwrap_or(Json::Null);
-        let string = |v: Json| match v {
-            Json::String(s) => s,
-            other => unreachable!("envelope field is a string: {other}"),
-        };
-        let opt_string = |v: Json| match v {
-            Json::Null => None,
-            Json::String(s) => Some(s),
-            other => unreachable!("envelope field is a string: {other}"),
-        };
-        let row = LandingRow {
-            kind: string(take("kind")),
-            script: string(take("script")),
-            class: string(take("class")),
-            cell: string(take("cell")),
-            cell_name: opt_string(take("cell_name")),
-            facet: opt_string(take("facet")),
-            incarnation: record.envelope.stream.incarnation,
-            epoch: record.envelope.position.epoch,
-            txid: record.envelope.position.txid,
-            commit: record.envelope.position.commit,
-            committed_at: record.envelope.committed_at,
-            node: string(take("node")),
-            origin: string(take("origin")),
-            fragment: record.envelope.fragment,
-            fragments: record.envelope.fragments,
-            body: String::new(),
-            source: source.into(),
-        };
-        for k in [
-            "incarnation",
-            "epoch",
-            "txid",
-            "commit",
-            "committed_at",
-            "fragment",
-            "fragments",
-        ] {
-            fields.remove(k);
+        Self::split(record, &record.to_json(), source.into()).expect("an encoded record splits")
+    }
+
+    /// The row of `record`, which is `json` decoded.
+    pub(crate) fn split(
+        record: &Record,
+        json: &[u8],
+        source: String,
+    ) -> Result<Self, serde_json::Error> {
+        let Fields(fields) = serde_json::from_slice(json)?;
+        let envelope = &LANDING_COLUMNS[..LANDING_COLUMNS.len() - 2];
+        let mut body = String::with_capacity(json.len());
+        body.push('{');
+        for (key, value) in fields {
+            if envelope.contains(&&*key) {
+                continue;
+            }
+            if body.len() > 1 {
+                body.push(',');
+            }
+            match key {
+                // Borrowed only when the key had no escapes, so it needs none.
+                Cow::Borrowed(key) => {
+                    body.push('"');
+                    body.push_str(key);
+                    body.push('"');
+                }
+                Cow::Owned(key) => body.push_str(&serde_json::to_string(&key)?),
+            }
+            body.push(':');
+            body.push_str(value.get());
         }
-        LandingRow {
-            body: Json::Object(fields).to_string(),
-            ..row
-        }
+        body.push('}');
+        let e = &record.envelope;
+        Ok(LandingRow {
+            kind: name(&record.kind()),
+            script: e.stream.script.clone(),
+            class: e.stream.class.clone(),
+            cell: e.stream.cell.clone(),
+            cell_name: e.cell_name.clone(),
+            facet: e.stream.facet.clone(),
+            incarnation: e.stream.incarnation,
+            epoch: e.position.epoch,
+            txid: e.position.txid,
+            commit: e.position.commit,
+            committed_at: e.committed_at,
+            node: e.node.clone(),
+            origin: name(&e.origin),
+            fragment: e.fragment,
+            fragments: e.fragments,
+            body,
+            source,
+        })
     }
 
     /// The record this row holds.
@@ -134,5 +152,66 @@ impl LandingRow {
         };
         fields.extend(envelope);
         Record::from_json(&serde_json::to_vec(&Json::Object(fields))?)
+    }
+}
+
+/// A `kind` or `origin` as the record's JSON names it.
+fn name(v: &impl Serialize) -> String {
+    match serde_json::to_value(v) {
+        Ok(Json::String(s)) => s,
+        other => unreachable!("an envelope name is a string: {other:?}"),
+    }
+}
+
+/// A JSON object's fields in order, each value as its encoded bytes.
+struct Fields<'a>(Vec<(Cow<'a, str>, &'a RawValue)>);
+
+impl<'de> Deserialize<'de> for Fields<'de> {
+    fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        struct V;
+        impl<'de> Visitor<'de> for V {
+            type Value = Fields<'de>;
+            fn expecting(&self, f: &mut fmt::Formatter) -> fmt::Result {
+                f.write_str("a JSON object")
+            }
+            fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<Self::Value, A::Error> {
+                let mut fields = Vec::with_capacity(24);
+                while let Some(Key(key)) = map.next_key()? {
+                    let value = map.next_value()?;
+                    // A record never repeats a field it knows, and decoding
+                    // it refuses one that does. One it does not know keeps
+                    // its last value, as a JSON tree would, since Snowflake
+                    // refuses an object with a repeated key.
+                    match fields.iter_mut().find(|(k, _)| *k == key) {
+                        Some(field) => field.1 = value,
+                        None => fields.push((key, value)),
+                    }
+                }
+                Ok(Fields(fields))
+            }
+        }
+        d.deserialize_map(V)
+    }
+}
+
+/// A field name, borrowed from the input when it has no escapes.
+struct Key<'a>(Cow<'a, str>);
+
+impl<'de> Deserialize<'de> for Key<'de> {
+    fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        struct V;
+        impl<'de> Visitor<'de> for V {
+            type Value = Key<'de>;
+            fn expecting(&self, f: &mut fmt::Formatter) -> fmt::Result {
+                f.write_str("a field name")
+            }
+            fn visit_borrowed_str<E>(self, s: &'de str) -> Result<Self::Value, E> {
+                Ok(Key(Cow::Borrowed(s)))
+            }
+            fn visit_str<E>(self, s: &str) -> Result<Self::Value, E> {
+                Ok(Key(Cow::Owned(s.to_owned())))
+            }
+        }
+        d.deserialize_str(V)
     }
 }
