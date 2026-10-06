@@ -395,7 +395,7 @@ does, so queueing shows in latency rather than slowing the generator
 generator ran behind its schedule. `schedule_lag_max_us` says by how much.
 
 ```sh
-celld-perf compare base/result.json new/result.json [--threshold 0.05]
+celld-perf compare base/result.json new/result.json [--threshold 0.05] [--informational-timings]
 celld-perf summary result.json
 ```
 
@@ -421,7 +421,9 @@ change:
 `perf.yml` runs on a GitHub runner unless the repository variable
 `PERF_RUNNER` names a dedicated one, for example
 `["self-hosted","perf"]`. A shared runner's counts and failures are sound,
-but its timings are too noisy to call regressions, and it stops a job after
+but its timings are too noisy to gate regressions. The scheduled workflow
+uses `--informational-timings` on GitHub-hosted runners: timing changes stay
+in the comparison report, while count regressions still fail. Shared runners stop a job after
 six hours, which is before the soak ends. For a dedicated machine, use
 Linux on bare metal: a fixed CPU frequency, SMT and turbo off if you can,
 local NVMe, and nothing else running.

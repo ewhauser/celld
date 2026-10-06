@@ -16,7 +16,7 @@
 
 use anyhow::{anyhow, bail, Context as _};
 use serde_json::Value;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::net::TcpListener;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
@@ -118,8 +118,26 @@ async fn bucket_address(backend: &Backend) -> anyhow::Result<std::net::SocketAdd
         .ok_or_else(|| anyhow!("{authority} resolves to nothing"))
 }
 
-fn free_port() -> anyhow::Result<u16> {
-    Ok(TcpListener::bind("127.0.0.1:0")?.local_addr()?.port())
+fn free_port(used: &mut BTreeSet<u16>) -> anyhow::Result<u16> {
+    // The socket must close before celld can bind it. Repeated ephemeral
+    // allocations can return the same port during a multi-node startup.
+    for _ in 0..100 {
+        let port = TcpListener::bind("127.0.0.1:0")?.local_addr()?.port();
+        if used.insert(port) {
+            return Ok(port);
+        }
+    }
+    bail!("could not allocate a distinct node port")
+}
+
+async fn proxy_listener(used: &mut BTreeSet<u16>) -> anyhow::Result<tokio::net::TcpListener> {
+    for _ in 0..100 {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+        if used.insert(listener.local_addr()?.port()) {
+            return Ok(listener);
+        }
+    }
+    bail!("could not allocate a distinct proxy port")
 }
 
 fn copy_dir(from: &Path, to: &Path) -> anyhow::Result<()> {
@@ -183,6 +201,7 @@ impl Cluster {
         if matches!(cluster.options.backend, Backend::S3 { .. }) {
             cluster.deploy().await?;
         }
+        let mut used_ports = BTreeSet::new();
         for index in 0..cluster.options.nodes {
             let node = Node {
                 index,
@@ -192,8 +211,8 @@ impl Cluster {
                 pid: None,
                 log: cluster.options.work.join(format!("node-{index}.log")),
                 state: cluster.options.work.join(format!("node-{index}")),
-                public_port: free_port()?,
-                internal_port: free_port()?,
+                public_port: free_port(&mut used_ports)?,
+                internal_port: free_port(&mut used_ports)?,
                 peer_proxy_port: None,
                 bucket_proxy_port: None,
             };
@@ -202,7 +221,7 @@ impl Cluster {
         if let Some(network) = cluster.network.clone() {
             let bucket = bucket_address(&cluster.options.backend).await?;
             for node in &mut cluster.nodes {
-                let peers = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+                let peers = proxy_listener(&mut used_ports).await?;
                 node.peer_proxy_port = Some(peers.local_addr()?.port());
                 let target = format!("127.0.0.1:{}", node.internal_port).parse()?;
                 cluster.proxies.push(network.serve(
@@ -211,7 +230,7 @@ impl Cluster {
                     Endpoint::Node(node.index),
                     None,
                 ));
-                let objects = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+                let objects = proxy_listener(&mut used_ports).await?;
                 node.bucket_proxy_port = Some(objects.local_addr()?.port());
                 cluster.proxies.push(network.serve(
                     objects,
@@ -682,5 +701,25 @@ impl Drop for Cluster {
                     .status();
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn node_and_proxy_ports_are_distinct() {
+        let mut used = BTreeSet::new();
+        let node_ports: Vec<_> = (0..256).map(|_| free_port(&mut used).unwrap()).collect();
+        let mut proxies = Vec::new();
+        for _ in 0..16 {
+            proxies.push(proxy_listener(&mut used).await.unwrap());
+        }
+        assert_eq!(used.len(), node_ports.len() + proxies.len());
+        assert!(node_ports.iter().all(|port| used.contains(port)));
+        assert!(proxies
+            .iter()
+            .all(|listener| used.contains(&listener.local_addr().unwrap().port())));
     }
 }
