@@ -215,13 +215,16 @@ A bucket value can add a key prefix, `s3://YOUR-BUCKET/PREFIX`, so two
 fleets can share one bucket. Without a prefix, the objects stay at the
 bucket root.
 
-The store must provide conditional writes, exact ranged reads, and
-read-after-write consistency. Amazon S3, Cloudflare R2, Google Cloud
-Storage, Tigris, and Azure Blob Storage qualify; Backblaze B2, Hetzner,
-and DigitalOcean Spaces do not. MinIO (community edition) passes the
-storage test but is not qualified for production; do not use
-RELEASE.2025-09-06T17-38-46Z, which rejects the first deploy
-(denoland/celld#162). See [what celld guarantees](guarantees.md).
+The store must provide conditional writes. A ranged read must return the
+exact requested bytes. The store must also provide read-after-write
+consistency. Cell ownership and stored data depend on these properties.
+Amazon S3, Cloudflare R2, Google Cloud Storage, Tigris, and Azure Blob Storage
+qualify; Backblaze B2, Hetzner, and DigitalOcean Spaces do not. MinIO
+(the community edition) passes the storage test, but celld has not
+qualified it for production; do not use RELEASE.2025-09-06T17-38-46Z,
+which rejects the conditional create that the first deploy sends
+(denoland/celld#162). See [what celld guarantees](guarantees.md) for the
+exact requirements.
 
 ## Deploy an application
 
@@ -469,7 +472,7 @@ cancels running alarms (the successor retries them), proves the data
 durable, publishes a final snapshot, and releases each ownership record to
 a peer. The peer keeps the cell dormant until a request arrives. A
 database larger than the durability deadline can upload (80 MiB at the
-default 10 seconds) hands off without the snapshot. Busy cells move first.
+default 10 seconds) is handed off without a snapshot. Busy cells move first.
 `POST /shutdown` on the internal listener starts the same handoff.
 
 | variable | default | effect |
@@ -479,32 +482,93 @@ default 10 seconds) hands off without the snapshot. Busy cells move first.
 | `CELLD_ACTIVATIONS` | see [table](#environment-variables) | Demand-driven restores and startup work |
 | `CELLD_READY_FLEET_GATE_MS` | 120000 | The first-readiness gate deadline; `0` disables the gate |
 
-You must set the orchestrator stop grace (systemd `TimeoutStopSec`,
-Kubernetes `terminationGracePeriodSeconds`) above
-`CELLD_SHUTDOWN_TOTAL_MS`, or SIGKILL can interrupt the handoff. celld
-rejects the removed `CELLD_SHUTDOWN_DRAIN_MS` and
-`CELLD_DRAIN_TOKEN_WAIT_MS` at startup.
+Each successor acknowledgement restarts the no-progress interval. The total
+stop bound still limits the complete shutdown, so progress cannot extend the
+process lifetime beyond the configured grace. A handoff reserves the smaller
+of one second and ten percent of the total bound for the drain-token release.
+A same-node preserve operation uses the no-progress interval as its semantic
+limit because it has no successor acknowledgements. The token-release reserve
+does not apply to a same-node preserve.
 
-Concurrent stops do not flood the survivors: a draining node claims a
-fleet drain token, so nodes hand off one at a time. A node that cannot
-claim the token within its wait proceeds without it.
+celld rejects the removed `CELLD_SHUTDOWN_DRAIN_MS` and
+`CELLD_DRAIN_TOKEN_WAIT_MS` variables at startup. Remove these variables and
+set only `CELLD_SHUTDOWN_TOTAL_MS` when the default total bound is unsuitable.
+The `CELLD_PACED_HANDOFF` switch is also removed. A bucket-backed node
+attempts ownership handoff within this budget. If no successor can accept
+the cells, the existing no-progress and total stop bounds still apply.
 
-A new process does not report healthy until the fleet settles: no node
-drains, every node is below its memory low watermark, the restore backlogs
-are small, and ownership is balanced. At `CELLD_READY_FLEET_GATE_MS`,
-celld logs `ready_gate_expired` once, but readiness stays closed, so set
-an orchestrator rollout deadline. After the first healthy response, fleet
-state does not remove readiness.
+Simultaneous stop signals do not flood the surviving nodes. A draining node
+claims a fleet drain token before it releases cells, so concurrent donors
+hand off one node at a time. A donor that cannot claim the token within its
+derived wait proceeds without it because the orchestrator grace is finite.
+The token is advisory: a dead holder's claim expires, and a handoff without
+the token is still safe.
 
-A cut handoff can leave the log of the stopped process for its
-replacement to recover. Another process can replace a recovery that does
-not respond for 30 seconds.
+A fresh process also holds its first healthy response until the fleet is
+settled. The process requires its live node lease, no active donor, and memory
+below every pressure low watermark on each live node. A donor records each
+node's restore backlog before it releases ownership. The replacement permits
+one `CELLD_ACTIVATIONS` budget above each recorded value. The incumbent
+ownership counts must remain within one equal successor share above the fleet
+mean. A joining process can satisfy this condition when it advertises paced
+handoff support and owns fewer cells than the busiest incumbent. The process
+publishes this successor capacity before readiness, so an idle rollout can
+repair the ownership distribution during the next donor handoff.
 
-A remote call to a cell that is changing owner waits for the new owner,
-for at most `CELLD_OPERATION_DEADLINE_MS` (default 15000). celld retries
-only an attempt that provably did not start. An application must keep one
-stable operation ID when it retries an ambiguous fetch, RPC, D1, or
-service operation. A WebSocket client must reconnect.
+An initial spare has no drain token, so it has no rollout restore baseline to
+check. It still requires memory headroom and acceptable ownership distribution.
+
+The rollout headroom check excludes reclaimable inactive file cache from the
+hard-cap reserve, while each node's local pressure latch still uses its full
+cgroup charge. A peer shedding on that charge cannot receive new cells;
+the gate permits it only when the joining node has headroom and can receive
+paced handoffs. An older peer does not publish the low-watermark result, so
+the gate uses that peer's pressure latch during a mixed-version update. An
+unreadable fleet or an unsettled condition keeps the process unhealthy until
+the condition clears.
+`CELLD_READY_FLEET_GATE_MS` sets the observation deadline in milliseconds
+(default 120000; `0` disables the gate). celld emits `ready_gate_expired` once
+at that deadline and `ready_gate_waiting` every minute afterward with the
+current blocking reason. It keeps checking and opens readiness when the fleet
+settles. Set an orchestrator rollout deadline so a persistent capacity problem
+fails the rollout. After the first healthy response, fleet state does not
+remove readiness again.
+
+A deadline-cut handoff can leave a node-log recovery for the replacement.
+One process reads and uploads that dead session, and the other processes wait
+for its result. A waiting process can replace an unresponsive recovery after
+30 seconds, so a failed recovery cannot block the fleet permanently. A
+recovery store error keeps the session unsealed, so a later recovery must read
+every retained bundle before the replacement can restore the acknowledged
+state.
+
+Recovery records a checkpoint after each group of 32 completed cell epochs.
+A later attempt uses these checkpoints to skip repeated coverage checks and
+uploads for the recorded transactions. Each checkpoint follows the data uploads,
+so an interrupted upload cannot create a checkpoint for incomplete data.
+An unavailable or invalid checkpoint causes recovery to check the cell coverage
+again. A checkpoint write failure does not stop recovery. The checkpoints do
+not replace the follower evidence or the session seal, and different sessions
+continue to recover independently.
+
+The internal listener continues to accept `/state` requests during the
+drain, and the response reports the handoff and restore counters. The
+public health response identifies the active drain with a 503 status.
+
+A remote cell call can resolve an owner generation that a replacement process
+rejects. celld then waits for a different `(node, epoch)` and refreshes the
+route. The wait uses `CELLD_OPERATION_DEADLINE_MS` as its total bound (default
+15000). celld retries only a peer attempt that proves that the handler did not
+start. It does not retry an ambiguous attempt because the handler can have
+completed without returning its response.
+
+A marked stale-owner response to the outer peer tunnel proves that the
+application request did not start. celld can therefore refresh that route for
+an HTTP, an RPC, or a WebSocket request.
+
+An application must keep one stable operation ID when it retries an ambiguous
+fetch, RPC, D1, or service operation. A WebSocket transport cannot move between
+owners, so a client must reconnect and keep the same application operation ID.
 
 To roll out a new version, use the rolling update of your orchestrator:
 stop each node with SIGTERM, wait for its replacement to report healthy,
@@ -670,9 +734,9 @@ unset variable selects its default. A Boolean variable accepts only `0` or
 | `CELLD_ZONE` | The node's availability zone, such as `us-east-1a`. Use 1 to 128 ASCII letters, numbers, dots, dashes, or underscores. Change export's blob-stream sink uses it to pick the node's writer (see [export](export.md)) |
 | `CELLD_WATCH` | The local work directory for SQLite and replication |
 | `CELLD_ESBUILD` | The path of the esbuild executable |
-| `CELLD_ACTIVATIONS` | Concurrent cold-cell activations (default: 8 per CPU, at least 16, at most 128) |
-| `CELLD_DEPLOY_POLL_S` | The deployment pointer poll interval in seconds (default: 30) |
-| `CELLD_DEPLOY_MAX_AGE_S` | Seconds before celld forces a resident Durable Object onto a new deployment (default: 60; 0 forces at once) |
+| `CELLD_ACTIVATIONS` | The limit for concurrent cold-cell activations (default: 8 for each available CPU, at least 16 and at most 128). A cold activation waits on the object store for most of its time, so the default is above the CPU count |
+| `CELLD_DEPLOY_POLL_S` | The interval in seconds at which a node reads the deployment pointer and adopts a new deployment in place (default: 30) |
+| `CELLD_DEPLOY_MAX_AGE_S` | How long a resident Durable Object can keep the previous deployment's code after an adoption before celld forces the move (default: 60; 0 forces at once) |
 | `CELLD_OPERATION_DEADLINE_MS` | The deadline for a non-restore operation (default: 15000) |
 | `CELLD_MAX_CELL_REQUESTS` | Concurrent fetch events for one Durable Object (default: 64) |
 | `CELLD_MAX_REQUEST_BODY_BYTES` | The body limit for a public Worker request or a direct Durable Object request (default: 1 GiB) |

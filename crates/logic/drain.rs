@@ -101,9 +101,29 @@ pub fn fleet_status(
     if !live.iter().any(|peer| peer.node == node) {
         return Err(FleetUnsettled::SelfUnpublished);
     }
+    let joining_has_successor_capacity =
+        joining_contributes_successor_capacity(peers, node, now_ms)
+            && live
+                .iter()
+                .find(|peer| peer.node == node)
+                .is_some_and(|peer| !peer.pressured && peer.memory_headroom == Some(true));
     if let Some(node) = live
         .iter()
-        .filter(|peer| peer.pressured || peer.memory_headroom == Some(false))
+        .filter(|peer| {
+            if peer.memory_headroom == Some(false) {
+                return true;
+            }
+            // A modern peer can still be shedding on the complete cgroup
+            // charge while its active working set has ample room. It cannot
+            // receive cells until its local hard latch clears. A healthy,
+            // paced joining node supplies the successor capacity instead;
+            // without one, or for an older peer without a headroom report,
+            // preserve the pressure gate.
+            peer.pressured
+                && !(peer.node != node
+                    && peer.memory_headroom == Some(true)
+                    && joining_has_successor_capacity)
+        })
         .map(|peer| &peer.node)
         .min()
     {

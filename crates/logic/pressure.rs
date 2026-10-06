@@ -127,6 +127,19 @@ impl Load {
             .saturating_add(self.container_reserved_bytes)
     }
 
+    /// Memory a rollout must leave room for under the absolute cap. Inactive
+    /// file pages can be reclaimed by the kernel, so their charge must not
+    /// indefinitely hold a successor's first readiness closed. Keep RSS as a
+    /// floor in case cgroup and process accounting differ.
+    pub fn rollout_hard_bytes(self) -> u64 {
+        self.cgroup_working_set_bytes
+            .map_or(
+                self.cgroup_current_bytes.unwrap_or(self.rss_bytes),
+                |working_set| working_set.max(self.rss_bytes),
+            )
+            .saturating_add(self.container_reserved_bytes)
+    }
+
     pub fn metric_bytes(self, metric: Metric) -> u64 {
         match metric {
             Metric::InUse => self.memory_bytes(),
@@ -244,15 +257,17 @@ impl PressureConfig {
     }
 
     /// Whether the sample leaves the reserve below every configured low
-    /// watermark. A rollout uses this stricter state instead of `!pressured`:
-    /// a node can be below the high watermark without enough room to absorb a
-    /// donor. A disabled ceiling imposes no headroom condition.
+    /// watermark. A rollout uses this stricter state: a node can be below the
+    /// high watermark without enough room to absorb a donor. The hard-cap
+    /// shedding latch still uses the complete cgroup charge, but inactive file
+    /// cache is reclaimable and does not consume the rollout reserve. A
+    /// disabled ceiling imposes no headroom condition.
     pub fn has_headroom(self, sample: Load) -> bool {
         let below = |ceiling: Option<u64>, bytes: u64| {
             ceiling.is_none_or(|ceiling| bytes <= Self::low_watermark(ceiling))
         };
         below(self.high_bytes, sample.memory_bytes())
-            && below(self.rss_hard_bytes, sample.hard_bytes())
+            && below(self.rss_hard_bytes, sample.rollout_hard_bytes())
     }
 
     /// Where the walk down against `metric` has to get the sample to.
