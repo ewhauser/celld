@@ -271,8 +271,9 @@ fn bootstrap(base: &[f64], new: &[f64]) -> (f64, f64) {
 
 /// Compare two result files. A count regression, or a timing regression
 /// whose 95% interval clears `threshold` in the bad direction, fails the
-/// comparison; a single-run timing change past the threshold is a warning.
-pub fn compare(base: &Value, new: &Value, threshold: f64) -> (String, bool) {
+/// comparison when `gate_timings` is true. A single-run timing change past
+/// the threshold is only a warning.
+pub fn compare(base: &Value, new: &Value, threshold: f64, gate_timings: bool) -> (String, bool) {
     let collect = |result: &Value| {
         let mut phases: BTreeMap<(String, String), Vec<Value>> = BTreeMap::new();
         for run in result["runs"].as_array().into_iter().flatten() {
@@ -358,11 +359,17 @@ pub fn compare(base: &Value, new: &Value, threshold: f64) -> (String, bool) {
                     if base_values.len() >= 3 && new_values.len() >= 3 {
                         let (low, high) = bootstrap(&base_values, &new_values);
                         if worse(low) && worse(high) {
-                            regressed = true;
+                            regressed |= gate_timings;
                             format!(
-                                "REGRESSION (95% CI {:+.1}%..{:+.1}%)",
+                                "{} (95% CI {:+.1}%..{:+.1}%{})",
+                                if gate_timings {
+                                    "REGRESSION"
+                                } else {
+                                    "timing increase"
+                                },
                                 low * 100.0,
-                                high * 100.0
+                                high * 100.0,
+                                if gate_timings { "" } else { "; informational" }
                             )
                         } else if better(low) && better(high) {
                             format!(
@@ -412,22 +419,44 @@ mod tests {
 
     #[test]
     fn a_count_regression_fails_and_noise_does_not() {
-        let (_, regressed) = compare(&result(&[1000.0], 0.0), &result(&[1000.0], 1.0), 0.05);
+        let (_, regressed) = compare(&result(&[1000.0], 0.0), &result(&[1000.0], 1.0), 0.05, true);
         assert!(regressed);
-        let (_, regressed) = compare(&result(&[1000.0], 0.01), &result(&[1000.0], 0.02), 0.05);
+        let (_, regressed) = compare(
+            &result(&[1000.0], 0.0),
+            &result(&[1000.0], 1.0),
+            0.05,
+            false,
+        );
+        assert!(regressed, "count changes must still gate");
+        let (_, regressed) = compare(
+            &result(&[1000.0], 0.01),
+            &result(&[1000.0], 0.02),
+            0.05,
+            true,
+        );
         assert!(!regressed);
     }
 
     #[test]
     fn a_throughput_drop_needs_repeats_to_fail() {
-        let (text, regressed) = compare(&result(&[1000.0], 0.0), &result(&[500.0], 0.0), 0.05);
+        let (text, regressed) =
+            compare(&result(&[1000.0], 0.0), &result(&[500.0], 0.0), 0.05, true);
         assert!(!regressed, "{text}");
         assert!(text.contains("possible regression"), "{text}");
         let (_, regressed) = compare(
             &result(&[1000.0, 1010.0, 990.0], 0.0),
             &result(&[500.0, 505.0, 495.0], 0.0),
             0.05,
+            true,
         );
         assert!(regressed);
+        let (text, regressed) = compare(
+            &result(&[1000.0, 1010.0, 990.0], 0.0),
+            &result(&[500.0, 505.0, 495.0], 0.0),
+            0.05,
+            false,
+        );
+        assert!(!regressed, "{text}");
+        assert!(text.contains("informational"), "{text}");
     }
 }
