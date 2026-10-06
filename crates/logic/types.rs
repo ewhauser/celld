@@ -219,8 +219,8 @@ pub struct CapacityPeer {
     /// `None` from a peer that predates the field.
     pub in_use_bytes: Option<u64>,
     pub pressured: bool,
-    /// Whether every configured memory measurement is below its low
-    /// watermark. `None` from a peer that predates this field.
+    /// Whether active memory is below the rollout low watermarks, excluding
+    /// reclaimable inactive file cache. `None` from an older peer.
     pub memory_headroom: Option<bool>,
     /// Cold routes that have not finished on this peer.
     pub restoring: u64,

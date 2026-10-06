@@ -845,8 +845,8 @@ pub struct State {
     /// simulation could not reach. It is carried here so a sample
     /// sequence is replayable.
     shedding: bool,
-    /// Whether the last load sample is below every configured low watermark.
-    /// This is stricter than `!shedding` and reserves room for a fleet handoff.
+    /// Whether the last load sample reserves active memory for a fleet handoff.
+    /// Unlike local hard-cap shedding, this excludes inactive file cache.
     memory_headroom: bool,
     /// Which resource is holding the latch, for the effect the shell logs.
     shed_reason: Option<&'static str>,
@@ -1032,8 +1032,8 @@ impl State {
         self.shedding
     }
 
-    /// Whether the last load sample reserves memory below every pressure
-    /// resume line. False until the first `LoadSampled` event. The actor must
+    /// Whether the last load sample reserves active memory below the rollout
+    /// resume lines. False until the first `LoadSampled` event. The actor must
     /// fold a sample before it publishes a lease, or the lease reports no
     /// headroom.
     pub fn memory_headroom(&self) -> bool {

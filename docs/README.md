@@ -844,14 +844,21 @@ repair the ownership distribution during the next donor handoff.
 An initial spare has no drain token, so it has no rollout restore baseline to
 check. It still requires memory headroom and acceptable ownership distribution.
 
-An older peer does not publish the low-watermark result, so the gate uses that
-peer's pressure latch during a mixed-version update. An unreadable fleet or an
-unsettled condition keeps the process unhealthy until the condition clears.
+The rollout headroom check excludes reclaimable inactive file cache from the
+hard-cap reserve, while each node's local pressure latch still uses its full
+cgroup charge. A peer shedding on that charge cannot receive new cells;
+the gate permits it only when the joining node has headroom and can receive
+paced handoffs. An older peer does not publish the low-watermark result, so
+the gate uses that peer's pressure latch during a mixed-version update. An
+unreadable fleet or an unsettled condition keeps the process unhealthy until
+the condition clears.
 `CELLD_READY_FLEET_GATE_MS` sets the observation deadline in milliseconds
 (default 120000; `0` disables the gate). celld emits `ready_gate_expired` once
-at that deadline, but readiness stays closed. Set an orchestrator rollout
-deadline so a persistent capacity problem fails the rollout. After the first
-healthy response, fleet state does not remove readiness again.
+at that deadline and `ready_gate_waiting` every minute afterward with the
+current blocking reason. It keeps checking and opens readiness when the fleet
+settles. Set an orchestrator rollout deadline so a persistent capacity problem
+fails the rollout. After the first healthy response, fleet state does not
+remove readiness again.
 
 A deadline-cut handoff can leave a node-log recovery for the replacement.
 One process reads and uploads that dead session, and the other processes wait
