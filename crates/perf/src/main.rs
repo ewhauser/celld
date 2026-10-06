@@ -31,7 +31,7 @@ const USAGE: &str = "celld-perf — performance scenarios for celld
 
 USAGE:
   celld-perf run [OPTIONS] SCENARIO...
-  celld-perf compare BASE.json NEW.json [--threshold FRACTION]
+  celld-perf compare BASE.json NEW.json [--threshold FRACTION] [--informational-timings]
   celld-perf summary RESULT.json
   celld-perf list
 
@@ -55,7 +55,8 @@ RUN OPTIONS:
 
 A run exits 1 when a count check or the verification sweep fails.
 compare exits 1 on a count regression, or a timing regression that is
-significant across at least three repeats on each side.
+significant across at least three repeats on each side. With
+--informational-timings, timing changes are reported but do not fail.
 ";
 
 fn main() -> anyhow::Result<()> {
@@ -358,6 +359,7 @@ async fn run_command(arguments: &[String]) -> anyhow::Result<i32> {
 
 fn compare_command(arguments: &[String]) -> anyhow::Result<()> {
     let mut threshold = 0.05;
+    let mut gate_timings = true;
     let mut files = Vec::new();
     let mut arguments = arguments.iter();
     while let Some(argument) = arguments.next() {
@@ -368,13 +370,15 @@ fn compare_command(arguments: &[String]) -> anyhow::Result<()> {
                     .ok_or_else(|| anyhow!("--threshold needs a value"))?
                     .parse()?;
             }
+            "--informational-timings" => gate_timings = false,
             file => files.push(PathBuf::from(file)),
         }
     }
     let [base, new] = files.as_slice() else {
         bail!("compare needs BASE.json and NEW.json");
     };
-    let (text, regressed) = report::compare(&read_json(base)?, &read_json(new)?, threshold);
+    let (text, regressed) =
+        report::compare(&read_json(base)?, &read_json(new)?, threshold, gate_timings);
     print!("{text}");
     if regressed {
         std::process::exit(1);

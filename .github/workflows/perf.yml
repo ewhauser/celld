@@ -182,12 +182,20 @@ jobs:
           shopt -s nullglob
           status=0
           : > compare.txt
+          # Timings from shared GitHub runners vary between otherwise
+          # identical builds. Keep reporting them, but gate only on a
+          # dedicated runner. Count regressions still fail either way.
+          compare_options=()
+          if [[ "${RUNNER_ENVIRONMENT:-}" != self-hosted ]]; then
+            compare_options=(--informational-timings)
+          fi
           for kind in dev fleet; do
             new=(perf-out/"$kind"/*/result.json)
             old=(baseline/"$kind"/*/result.json)
             if (( ${#new[@]} && ${#old[@]} )); then
               echo "== $kind" >> compare.txt
-              target/lab/celld-perf compare "${old[0]}" "${new[0]}" >> compare.txt || status=1
+              target/lab/celld-perf compare "${old[0]}" "${new[0]}" \
+                "${compare_options[@]}" >> compare.txt || status=1
             else
               echo "== $kind: comparison skipped (no result or successful baseline)" >> compare.txt
             fi
