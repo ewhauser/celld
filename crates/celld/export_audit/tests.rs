@@ -216,9 +216,42 @@ fn kinds(r: &Reconciled) -> Vec<(FindingKind, String)> {
 
 fn ltx_key(scope: &str, epoch: u64, level: u32, min: u64, max: u64) -> String {
     format!(
-        "cells/{scope}/ltx/e{epoch}/ltx/{level}/{}",
+        "cells/{scope}/ltx/e{epoch}/{level:04x}/{}",
         ltx::format_filename(TXID(min), TXID(max))
     )
+}
+
+#[test]
+fn inventory_reads_the_object_store_clients_layout() {
+    block_on(async {
+        let bucket = bucket();
+        put_image(
+            &bucket,
+            CELL,
+            1,
+            "CREATE TABLE t (id INTEGER PRIMARY KEY)",
+            1,
+        )
+        .await;
+        let mut inventory = Inventory::new();
+        for object in bucket.list("cells").await.unwrap() {
+            inventory.add(object.location.as_ref(), 10);
+        }
+        inventory.ensure_ltx_layout().unwrap();
+        let head = inventory.head(CELL).await.unwrap();
+        assert_eq!((head.epoch, head.txid), (1, 1));
+    });
+}
+
+#[test]
+fn inventory_rejects_unrecognized_ltx_layout() {
+    let mut inventory = Inventory::new();
+    inventory.add(
+        "cells/Cart:one/ltx/e1/ltx/0000/0000000000000001-0000000000000001.ltx",
+        10,
+    );
+    assert!(inventory.ensure_ltx_layout().is_err());
+    assert!(inventory.scopes().next().is_none());
 }
 
 #[test]

@@ -44,8 +44,8 @@ jobs:
           - x86_64-unknown-linux-gnu
           - aarch64-unknown-linux-gnu
           - aarch64-apple-darwin
-        # The default binary, and the `kafka` variant with the Kafka change
-        # export sink compiled in, published as `celld-kafka-<target>.gz`.
+        # The default binary, and the `kafka` variant with its export sink
+        # and Snowflake audit, published as `celld-kafka-<target>.gz`.
         variant: ["", kafka]
         include:
           - target: x86_64-unknown-linux-gnu
@@ -55,7 +55,7 @@ jobs:
           - target: aarch64-apple-darwin
             runner: macos-14
           - variant: kafka
-            features: export-kafka
+            features: export-kafka,export-snowflake
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 90
     env:
@@ -116,13 +116,13 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # The default image, and the `-kafka` variant with the Kafka change
-        # export sink compiled in.
+        # The default image, and the `-kafka` variant with the Kafka sink
+        # and Snowflake audit compiled in.
         include:
           - variant: ""
             features: ""
           - variant: kafka
-            features: export-kafka
+            features: export-kafka,export-snowflake
     runs-on: ubuntu-22.04
     timeout-minutes: 60
     permissions:
@@ -181,7 +181,7 @@ jobs:
           cd assets
           # Each variant prefix, with the feature list it must have been built
           # with.
-          for variant in "celld-=[]" 'celld-kafka-=["export-kafka"]'; do
+          for variant in "celld-=[]" 'celld-kafka-=["export-kafka","export-snowflake"]'; do
             prefix=${variant%%=*}
             features=${variant#*=}
             for target in \
@@ -281,16 +281,16 @@ jobs:
             platform: linux/arm64
             suffix: arm64
             features: ""
-          # The `-kafka` variant compiles in the Kafka change export sink,
+          # The `-kafka` variant compiles the Kafka sink and Snowflake audit,
           # which the default image leaves out.
           - runner: ubuntu-22.04
             platform: linux/amd64
             suffix: amd64-kafka
-            features: export-kafka
+            features: export-kafka,export-snowflake
           - runner: ubuntu-22.04-arm
             platform: linux/arm64
             suffix: arm64-kafka
-            features: export-kafka
+            features: export-kafka,export-snowflake
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 90
     permissions:
