@@ -302,8 +302,8 @@ pub struct NodeLoadWire {
     pub open_fds: u64,
     pub fd_limit: u64,
     pub pressured: bool,
-    /// Every configured memory measurement is below its low watermark. `None`
-    /// means that a peer predates this field.
+    /// Active memory is below the rollout low watermarks, excluding reclaimable
+    /// inactive file cache. `None` means that a peer predates this field.
     #[serde(default)]
     pub memory_headroom: Option<bool>,
     pub shed_cells: u64,
@@ -479,7 +479,7 @@ pub struct LiveLoad {
     pub resident_cells: AtomicUsize,
     pub host_websockets: AtomicUsize,
     pub pressured: AtomicBool,
-    /// Stricter than not pressured: the last sample cleared every resume line.
+    /// The last sample leaves the rollout reserve below its low watermarks.
     pub memory_headroom: AtomicBool,
     /// Cells shed since this process started. Monotonic, and only ever read
     /// by a human or a diagnostic -- placement uses the levels, not the rate.

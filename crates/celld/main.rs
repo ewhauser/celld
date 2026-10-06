@@ -4498,6 +4498,7 @@ async fn async_main(
             tokio::spawn(async move {
                 let started = std::time::Instant::now();
                 let mut deadline_reported = false;
+                let mut next_wait_report_ms = gate_ms;
                 let mut tick = tokio::time::interval(std::time::Duration::from_secs(1));
                 tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
                 loop {
@@ -4541,8 +4542,7 @@ async fn async_main(
                         );
                         return;
                     }
-                    if waited_ms >= gate_ms && !deadline_reported {
-                        deadline_reported = true;
+                    if waited_ms >= next_wait_report_ms {
                         let holder = current
                             .as_ref()
                             .ok()
@@ -4550,13 +4550,25 @@ async fn async_main(
                             .and_then(|current| current.token.as_ref())
                             .map(|token| token.node.as_str())
                             .unwrap_or_default();
-                        tracing::warn!(
-                            event = "ready_gate_expired",
-                            holder,
-                            reason = ?status.err(),
-                            waited_ms,
-                            "the ready-gate observation deadline expired; readiness stays closed"
-                        );
+                        if !deadline_reported {
+                            deadline_reported = true;
+                            tracing::warn!(
+                                event = "ready_gate_expired",
+                                holder,
+                                reason = ?status.err(),
+                                waited_ms,
+                                "the ready-gate observation deadline expired; still checking until the fleet settles"
+                            );
+                        } else {
+                            tracing::info!(
+                                event = "ready_gate_waiting",
+                                holder,
+                                reason = ?status.err(),
+                                waited_ms,
+                                "serving readiness is still waiting for the fleet to settle"
+                            );
+                        }
+                        next_wait_report_ms = waited_ms.saturating_add(60_000);
                     }
                 }
             });
