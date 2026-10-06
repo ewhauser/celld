@@ -48,8 +48,10 @@ const HELP: &str = "celld export reconcile | verify | erase
                       under the same scope exports again
 
   --consumer KIND     The consumer to compare with (or CELLD_EXPORT_CONSUMER):
-                      bucket (default), the bucket sink's records; or
-                      snowflake, the loader's tables (SNOWFLAKE_* settings)
+                      bucket (default for a bucket sink), its records; or
+                      snowflake, the blob-stream/Kafka loader's tables
+                      (needs export-snowflake and SNOWFLAKE_* settings)
+                      Select snowflake for a blob-stream or Kafka sink.
   --export-bucket B   Where the export writes, if not the fleet bucket
                       (or CELLD_EXPORT_BUCKET)
   --cache PATH        Reuse a local SQLite index of export objects (bucket)
@@ -218,6 +220,19 @@ impl Command {
         }
     }
 
+    fn validate_consumer(&self, config: &Config) -> anyhow::Result<()> {
+        if self.consumer == ConsumerKind::Bucket && !config.sinks.bucket {
+            bail!(
+                "CELLD_EXPORT_SINK has no bucket sink; use --consumer snowflake (or \
+                 CELLD_EXPORT_CONSUMER=snowflake) with a celld built with export-snowflake"
+            );
+        }
+        if self.consumer == ConsumerKind::Snowflake && !cfg!(feature = "export-snowflake") {
+            bail!("--consumer snowflake needs a celld built with the export-snowflake feature");
+        }
+        Ok(())
+    }
+
     /// The fleet bucket, and the bucket the export writes to.
     async fn buckets(&self, name: &str) -> anyhow::Result<(Bucket, Bucket)> {
         let storage = self.fleet.clone().resolve(name)?;
@@ -300,6 +315,7 @@ async fn run_reconcile(mut command: Command) -> anyhow::Result<()> {
         command.cache = Some(file.path().to_path_buf());
     }
     let config = config()?;
+    command.validate_consumer(&config)?;
     let (fleet, export) = command.buckets("celld export reconcile").await?;
     loop {
         reconcile_once(&command, &config, &fleet, &export).await?;
@@ -326,6 +342,7 @@ async fn reconcile_once(
             );
         }
     }
+    inventory.ensure_ltx_layout()?;
     let heads = inventory.heads().await;
     let tombstones = tombstone::load(export).await?;
     let consumer = command.consumer(export, None).await?;
@@ -383,6 +400,7 @@ async fn reconcile_once(
 
 async fn run_verify(command: Command) -> anyhow::Result<()> {
     let config = config()?;
+    command.validate_consumer(&config)?;
     let (fleet, export) = command.buckets("celld export verify").await?;
     let consumer = command.consumer(&export, command.cell.clone()).await?;
     let streams = consumer.streams().await?;
@@ -455,11 +473,44 @@ fn verdict_text(v: &Verdict) -> String {
     }
 }
 
+#[cfg(test)]
+mod consumer_tests {
+    use super::*;
+
+    #[test]
+    fn kafka_sink_cannot_use_bucket_consumer() {
+        let config = Config::from_lookup(|name| {
+            Ok(match name {
+                "CELLD_EXPORT" => Some("1".into()),
+                "CELLD_EXPORT_SINK" => Some("kafka".into()),
+                "CELLD_EXPORT_KAFKA_BROKERS" => Some("localhost:9092".into()),
+                _ => None,
+            })
+        })
+        .unwrap()
+        .unwrap();
+        let mut command = Command::parse(Vec::new()).unwrap().unwrap();
+        command.consumer = ConsumerKind::Bucket;
+        assert!(command
+            .validate_consumer(&config)
+            .unwrap_err()
+            .to_string()
+            .contains("CELLD_EXPORT_SINK has no bucket sink"));
+
+        command.consumer = ConsumerKind::Snowflake;
+        assert_eq!(
+            command.validate_consumer(&config).is_ok(),
+            cfg!(feature = "export-snowflake")
+        );
+    }
+}
+
 async fn run_erase(command: Command) -> anyhow::Result<()> {
     let cell = command
         .cell
         .clone()
         .context("celld export erase needs --cell SCOPE")?;
+    command.validate_consumer(&config()?)?;
     let (_, export) = command.buckets("celld export erase").await?;
     let class = super::inventory::class_of(&cell).to_string();
     let now = crate::asyncrt::wall_ms();

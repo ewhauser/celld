@@ -874,8 +874,9 @@ them up; with `--consumer snowflake`, both go to Snowflake (see
 `reconcile`, `verify` and `erase` compare the bucket with a consumer's
 copy. `--consumer` (or `CELLD_EXPORT_CONSUMER`) picks it:
 
-- `bucket`, the default: the reference consumer over the bucket sink's
-  records under `export/changes/`. Use it for a fleet on the bucket sink.
+- `bucket`, the default for a bucket sink: the reference consumer over its
+  records under `export/changes/`. A fleet without a bucket sink must select
+  `snowflake`; the command refuses to compare against an empty bucket consumer.
 - `snowflake`: the tables `celld-export-loader` fills, for a fleet on the
   blob-stream or Kafka sink. It reads `CELL_STREAMS`, `CELL_CERTIFIED`,
   `CELL_SNAPSHOTS` and, for `verify`, one cell's records from
@@ -897,6 +898,12 @@ copy. `--consumer` (or `CELLD_EXPORT_CONSUMER`) picks it:
 cargo build --release -p celld --features export-snowflake
 CELLD_EXPORT_CONSUMER=snowflake celld export reconcile --schedule
 ```
+
+The published `celld-kafka-*` binaries and `-kafka` image include both
+`export-kafka` and `export-snowflake`. Supply `CELLD_EXPORT_SINK=kafka`, its
+broker settings, and `CELLD_EXPORT_CONSUMER=snowflake` when reconciling a
+Kafka-sink fleet. For a blob-stream fleet, build with `export-snowflake` in
+addition to `export-blob-stream`.
 
 Run the scheduled reconciler beside the loader, with the fleet bucket's
 settings and the loader's Snowflake settings. `--cache` and

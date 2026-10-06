@@ -13,7 +13,7 @@ ARG TARGETARCH
 # the fat-LTO relink and keep incremental state in the target cache.
 ARG CELLD_PROFILE=release
 # Optional Cargo features of the celld crate, comma separated. The release
-# workflow passes `export-kafka` for the `-kafka` image variant.
+# workflow passes `export-kafka,export-snowflake` for the `-kafka` image variant.
 ARG CELLD_FEATURES=
 WORKDIR /src
 # rusqlite's `session` feature regenerates libsqlite3-sys bindings with

@@ -19,7 +19,7 @@ use celld_ltx::error::{Error as LtxError, Result as LtxResult};
 use celld_ltx::ltx::{parse_filename, FileInfo};
 use celld_ltx::{replica, TXID};
 
-/// Where a bucket's LTX objects live: `cells/<scope>/ltx/e<epoch>/ltx/<level>/<min>-<max>.ltx`.
+/// Where a bucket's LTX objects live: `cells/<scope>/ltx/e<epoch>/<level>/<min>-<max>.ltx`.
 const CELLS_PREFIX: &str = "cells/";
 
 /// One dead-node recovery that declared a bounded loss:
@@ -52,6 +52,9 @@ pub struct Inventory {
     /// Per cell scope, every LTX object with its last-modified time.
     landed: BTreeMap<String, Vec<Landed>>,
     losses: Vec<Loss>,
+    /// An LTX-looking key that this version cannot parse must not make a
+    /// reconcile of a populated bucket appear clean.
+    unparsed_ltx: Option<String>,
 }
 
 /// One LTX object and when it reached the bucket.
@@ -147,6 +150,9 @@ impl Inventory {
             return;
         }
         let Some((scope, epoch, level, file)) = parse_ltx(key) else {
+            if key.starts_with(CELLS_PREFIX) && key.contains("/ltx/e") && key.ends_with(".ltx") {
+                self.unparsed_ltx.get_or_insert_with(|| key.to_string());
+            }
             return;
         };
         let levels = self
@@ -169,6 +175,13 @@ impl Inventory {
 
     pub fn losses(&self) -> &[Loss] {
         &self.losses
+    }
+
+    pub fn ensure_ltx_layout(&self) -> anyhow::Result<()> {
+        if let Some(key) = &self.unparsed_ltx {
+            anyhow::bail!("unrecognized cell LTX object {key:?}; refusing to reconcile an incomplete inventory");
+        }
+        Ok(())
     }
 
     pub fn scopes(&self) -> impl Iterator<Item = &str> {
@@ -243,14 +256,17 @@ impl Inventory {
     }
 }
 
-/// `cells/<scope>/ltx/e<epoch>/ltx/<level>/<min>-<max>.ltx`.
+/// `cells/<scope>/ltx/e<epoch>/<level:04x>/<min>-<max>.ltx`.
 fn parse_ltx(key: &str) -> Option<(&str, u64, i32, FileInfo)> {
     let rest = key.strip_prefix(CELLS_PREFIX)?;
     let (scope, rest) = rest.split_once("/ltx/e")?;
-    let (epoch, rest) = rest.split_once("/ltx/")?;
+    let (epoch, rest) = rest.split_once('/')?;
     let (level, name) = rest.split_once('/')?;
     let epoch: u64 = epoch.parse().ok()?;
-    let level: i32 = level.parse().ok()?;
+    if level.len() != 4 {
+        return None;
+    }
+    let level = i32::from_str_radix(level, 16).ok()?;
     if !(0..=SNAPSHOT_LEVEL).contains(&level) || name.contains('/') {
         return None;
     }
