@@ -302,12 +302,15 @@ export, as a convergent mirror of each cell's tables. It is off by default;
   (`export-kafka`) and the Snowflake audit (`export-snowflake`,
   `celld export ... --consumer snowflake`) are Cargo features that the
   release binaries and default image do not enable. Each release also
-  publishes a `kafka` variant built with `export-kafka`: binaries named
-  `celld-kafka-<target>.gz` beside the default `celld-<target>.gz`, and an
-  image tagged `ghcr.io/ewhauser/celld:<tag>-kafka`. For any other feature,
+  publishes a `kafka` variant built with `export-kafka,export-snowflake`:
+  binaries named `celld-kafka-<target>.gz` beside the default
+  `celld-<target>.gz`, and an image tagged
+  `ghcr.io/ewhauser/celld:<tag>-kafka`. For any other feature,
   build celld with it
-  (the Dockerfile takes `--build-arg CELLD_FEATURES=...`). A node configured
-  for a sink it was not built with refuses to start.
+  (the Dockerfile takes `--build-arg CELLD_FEATURES=...`). The Kafka variant
+  can run `celld export reconcile --consumer snowflake` with the loader's
+  `SNOWFLAKE_*` settings. A node configured for a sink it was not built with
+  refuses to start.
 - `celld-export-loader` loads a blob-stream or Kafka topic into Snowflake
   through Snowpipe Streaming. It is built from `crates/export-snowflake` and
   is not a release asset.
