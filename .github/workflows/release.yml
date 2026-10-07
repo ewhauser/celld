@@ -178,6 +178,7 @@ jobs:
         run: |
           set -euo pipefail
           version=$(sed -n 's/^version = "\(.*\)"$/\1/p' crates/celld/Cargo.toml | head -1)
+          cp LICENSE NOTICE assets/
           cd assets
           # Each variant prefix, with the feature list it must have been built
           # with.

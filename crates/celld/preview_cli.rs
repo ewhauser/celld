@@ -11,10 +11,7 @@ use crate::{
 };
 use anyhow::{bail, ensure, Context};
 use serde_json::{json, Value};
-use std::{
-    collections::BTreeMap,
-    time::{Duration, Instant},
-};
+use std::time::{Duration, Instant};
 mod executor;
 mod kubernetes;
 use kubernetes::{field, live, uid, Kubernetes};
@@ -401,7 +398,7 @@ async fn deploy_preview(kube: &Kubernetes, o: &Options) -> anyhow::Result<()> {
         region: None,
         dry_run: false,
         json: false,
-        vars: BTreeMap::new(),
+        vars: deploy::VarOverrides::None,
         local_images: false,
     })?;
     let created = if let Some(mut p) = existing {

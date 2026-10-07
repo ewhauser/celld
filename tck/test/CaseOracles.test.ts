@@ -29,7 +29,7 @@ const reference = {
   engine: "workerd" as const,
 };
 const candidate = { ...reference, name: "candidate" };
-const celld = { ...candidate, engine: "celld" as const, version: "0.6.1" };
+const celld = { ...candidate, engine: "celld" as const, version: "0.6.2" };
 const transport = {
   request: () => Effect.die("Observation replay must not perform HTTP"),
   websocket: () => Effect.die("Observation replay must not open sockets"),
@@ -230,19 +230,28 @@ it.effect("actual known-bug cases reject additional semantic corruption", () =>
       const test = cases.find((test) => test.id === bug.caseId)!;
       const input = inputFor(test, corpus);
       const good = corpus.cases[test.id];
+      const reviewedCelld = {
+        ...celld,
+        version: `${bug.celldVersion}-ewhauser.1`,
+      };
       expect(
         (yield* evaluate(
           replay(test, good, bug.candidate),
           reference,
-          celld,
+          reviewedCelld,
           input,
           bug,
         )).status,
       ).toBe("known-bug");
       const bad = applyMutation(bug.candidate, knownBugMutations[test.id]!);
       expect(
-        (yield* evaluate(replay(test, good, bad), reference, celld, input, bug))
-          .status,
+        (yield* evaluate(
+          replay(test, good, bad),
+          reference,
+          reviewedCelld,
+          input,
+          bug,
+        )).status,
       ).toBe("fail");
     }
   }).pipe(

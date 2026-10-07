@@ -389,6 +389,17 @@ impl Ownership {
     }
 }
 
+/// The identity that lets a request finish on a quiescing resident, where an
+/// ordinary request waits for the successor route. One field holds it, so a
+/// request cannot claim two identities.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ResidentWork {
+    /// An event from this exact registered WebSocket.
+    WebSocket(u64),
+    /// The output gate for an effect that the cell's running work raised.
+    OutputGate,
+}
+
 pub enum Message {
     /// The change exporter asks the output gate to prove a cell's committed
     /// position durable before it releases what it captured.
@@ -438,10 +449,9 @@ pub enum Message {
         /// settles this channel as soon as the ownership CAS is authoritative;
         /// the ordinary route reply remains pending until it is cancelled.
         handoff_accept: Option<HandoffAcceptWaiter>,
-        /// An event from this exact registered WebSocket can finish on a
-        /// quiescing resident. Ordinary requests carry no identity and wait
-        /// for the successor route.
-        websocket: Option<u64>,
+        /// Work that can finish on a quiescing resident. Ordinary requests
+        /// carry none and wait for the successor route.
+        resident_work: Option<ResidentWork>,
         reply: oneshot::Sender<Result<Routed, RequestError>>,
     },
     /// A caller disappeared before routing finished. The request identity is
@@ -1285,6 +1295,13 @@ impl AppHandle {
         self.request_with_mode(cell, false, None).await
     }
 
+    /// Route the output gate for an effect raised inside one of `cell`'s
+    /// handlers. See `ResidentWork::OutputGate`.
+    pub async fn gate_request(&self, cell: String) -> Result<Routed, RequestError> {
+        self.request_with_mode(cell, false, Some(ResidentWork::OutputGate))
+            .await
+    }
+
     /// Route one test request and retain which asynchronous seam produced the
     /// result. The shipping method keeps its compact public result, while this
     /// receipt prevents an inference from `NodeFenced` or an error string.
@@ -1317,16 +1334,21 @@ impl AppHandle {
         cell: String,
         websocket: u64,
     ) -> Result<Routed, RequestError> {
-        self.request_with_mode(cell, false, Some(websocket)).await
+        self.request_with_mode(cell, false, Some(ResidentWork::WebSocket(websocket)))
+            .await
     }
 
     async fn request_with_mode(
         &self,
         cell: String,
         capacity_handoff: bool,
-        websocket: Option<u64>,
+        resident_work: Option<ResidentWork>,
     ) -> Result<Routed, RequestError> {
-        match self.request_path(cell, capacity_handoff, websocket).await.1 {
+        match self
+            .request_path(cell, capacity_handoff, resident_work)
+            .await
+            .1
+        {
             RequestPathOutcome::Returned(result) => result,
             RequestPathOutcome::SubmissionFailure | RequestPathOutcome::ReplyChannelClosed => {
                 Err(RequestError::NodeFenced)
@@ -1338,7 +1360,7 @@ impl AppHandle {
         &self,
         cell: String,
         capacity_handoff: bool,
-        websocket: Option<u64>,
+        resident_work: Option<ResidentWork>,
     ) -> (u64, RequestPathOutcome) {
         let request = crate::asyncrt::next_core_request();
         let (reply, receive) = oneshot::channel();
@@ -1349,7 +1371,7 @@ impl AppHandle {
                 cell,
                 capacity_handoff,
                 handoff_accept: None,
-                websocket,
+                resident_work,
                 reply,
             })
             .is_err()
@@ -1387,7 +1409,7 @@ impl AppHandle {
                     released_epoch,
                     reply: accept_reply,
                 }),
-                websocket: None,
+                resident_work: None,
                 reply: route_reply,
             })
             .is_err()
@@ -2703,7 +2725,7 @@ impl Actor {
                 cell,
                 capacity_handoff,
                 handoff_accept,
-                websocket,
+                resident_work,
                 reply,
             } => {
                 self.pending.insert(request, reply);
@@ -2714,12 +2736,18 @@ impl Actor {
                 self.begin_route_if_cold(&cell);
                 self.request_cells.insert(request, cell.clone());
                 self.drive(
-                    if let Some(websocket) = websocket {
+                    if let Some(ResidentWork::WebSocket(websocket)) = resident_work {
                         Event::WebSocketRequestAt {
                             request,
                             cell: cell.clone(),
                             websocket,
                             now_ms: now_ms(),
+                            now_mono_ms: crate::asyncrt::mono_ms(),
+                        }
+                    } else if resident_work == Some(ResidentWork::OutputGate) {
+                        Event::GateRequestAt {
+                            request,
+                            cell: cell.clone(),
                             now_mono_ms: crate::asyncrt::mono_ms(),
                         }
                     } else if ownership_handoff {
