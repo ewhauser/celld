@@ -1562,26 +1562,6 @@ impl LtxRepl {
         )
     }
 
-    /// Build the same loop topology and route managed SQLite through `vfs`.
-    #[cfg(any(test, celld_internal_tests))]
-    pub(crate) fn start_with_store_on_vfs(
-        watch: &Path,
-        store: Arc<dyn ObjectStore>,
-        compaction: Option<CompactionConfig>,
-        flush_ms: u64,
-        vfs: &str,
-        config: LtxConfig,
-    ) -> Self {
-        Self::start_with_store_and_optional_vfs(
-            watch,
-            store,
-            compaction,
-            flush_ms,
-            Some(vfs.to_string()),
-            config,
-        )
-    }
-
     #[cfg(any(test, celld_internal_tests))]
     fn start_with_store_and_optional_vfs(
         watch: &Path,
