@@ -95,8 +95,8 @@
     {
       "caseId": "http.body-consumption",
       "bugIds": ["CELL-001"],
-      "celldVersion": "0.6.1",
-      "evidenceRun": "tck-0452d947-a060-465d-aa05-998488a89cdd",
+      "celldVersion": "0.6.2",
+      "evidenceRun": "tck-a32e9674-a59b-49bb-94af-a7c6ee503681",
       "candidate": {
         "status": 200,
         "headers": {
@@ -117,8 +117,8 @@
     {
       "caseId": "storage.invalid-input",
       "bugIds": ["CELL-002", "CELL-003"],
-      "celldVersion": "0.6.1",
-      "evidenceRun": "tck-0452d947-a060-465d-aa05-998488a89cdd",
+      "celldVersion": "0.6.2",
+      "evidenceRun": "tck-a32e9674-a59b-49bb-94af-a7c6ee503681",
       "candidate": {
         "status": 200,
         "headers": {
@@ -318,8 +318,8 @@
     {
       "caseId": "assets.html-routing",
       "bugIds": ["CELL-004"],
-      "celldVersion": "0.6.1",
-      "evidenceRun": "tck-0452d947-a060-465d-aa05-998488a89cdd",
+      "celldVersion": "0.6.2",
+      "evidenceRun": "tck-a32e9674-a59b-49bb-94af-a7c6ee503681",
       "candidate": {
         "status": 200,
         "headers": {
@@ -369,8 +369,8 @@
     {
       "caseId": "crypto.ecdsa-p256",
       "bugIds": ["CELL-005"],
-      "celldVersion": "0.6.1",
-      "evidenceRun": "tck-0452d947-a060-465d-aa05-998488a89cdd",
+      "celldVersion": "0.6.2",
+      "evidenceRun": "tck-a32e9674-a59b-49bb-94af-a7c6ee503681",
       "candidate": {
         "status": 200,
         "headers": {
@@ -410,8 +410,8 @@
     {
       "caseId": "crypto.invalid-input",
       "bugIds": ["CELL-006"],
-      "celldVersion": "0.6.1",
-      "evidenceRun": "tck-0452d947-a060-465d-aa05-998488a89cdd",
+      "celldVersion": "0.6.2",
+      "evidenceRun": "tck-a32e9674-a59b-49bb-94af-a7c6ee503681",
       "candidate": {
         "status": 200,
         "headers": {
@@ -435,8 +435,8 @@
     {
       "caseId": "node.stream-timers",
       "bugIds": ["CELL-007"],
-      "celldVersion": "0.6.1",
-      "evidenceRun": "tck-0452d947-a060-465d-aa05-998488a89cdd",
+      "celldVersion": "0.6.2",
+      "evidenceRun": "tck-a32e9674-a59b-49bb-94af-a7c6ee503681",
       "candidate": {
         "status": 200,
         "headers": {
@@ -458,8 +458,8 @@
     {
       "caseId": "flags.enabled-defaults",
       "bugIds": ["CELL-008"],
-      "celldVersion": "0.6.1",
-      "evidenceRun": "tck-0452d947-a060-465d-aa05-998488a89cdd",
+      "celldVersion": "0.6.2",
+      "evidenceRun": "tck-a32e9674-a59b-49bb-94af-a7c6ee503681",
       "candidate": {
         "status": 200,
         "headers": {
@@ -479,10 +479,10 @@
     {
       "caseId": "crypto.x25519",
       "bugIds": ["CELL-009"],
-      "celldVersion": "0.6.1",
+      "celldVersion": "0.6.2",
       "compatibilityDate": "2026-07-30",
       "compatibilityFlags": [],
-      "evidenceRun": "tck-0452d947-a060-465d-aa05-998488a89cdd",
+      "evidenceRun": "tck-a32e9674-a59b-49bb-94af-a7c6ee503681",
       "candidate": {
         "status": 200,
         "headers": {
@@ -498,10 +498,10 @@
     {
       "caseId": "r2.key-identity",
       "bugIds": ["CELL-010"],
-      "celldVersion": "0.6.1",
+      "celldVersion": "0.6.2",
       "compatibilityDate": "2026-07-30",
       "compatibilityFlags": [],
-      "evidenceRun": "tck-0452d947-a060-465d-aa05-998488a89cdd",
+      "evidenceRun": "tck-a32e9674-a59b-49bb-94af-a7c6ee503681",
       "candidate": {
         "status": 200,
         "headers": {
