@@ -6,8 +6,8 @@ description: Download and verify fork artifacts, select a container image, and p
 Use artifacts from **ewhauser/celld**. The installer linked by the upstream site
 installs upstream celld; it does not select this fork.
 
-The examples below pin **v0.6.0-ewhauser.2**, a fork prerelease based on upstream
-v0.6.0. Check [fork releases](https://github.com/ewhauser/celld/releases) for the
+The examples below pin **v0.6.2-ewhauser.2**, a fork prerelease based on upstream
+v0.6.2. Check [fork releases](https://github.com/ewhauser/celld/releases) for the
 artifact you intend to deploy.
 
 ## Native binary
@@ -19,7 +19,7 @@ downloads the Linux x86_64 binary with the GitHub CLI:
 mkdir -p celld-fork-download
 cd celld-fork-download
 
-gh release download v0.6.0-ewhauser.2 --repo ewhauser/celld \
+gh release download v0.6.2-ewhauser.2 --repo ewhauser/celld \
   --pattern 'celld-x86_64-unknown-linux-gnu.*' --pattern SHA256SUMS
 
 # Verify the compressed asset before extracting it.
@@ -37,8 +37,9 @@ the source repository, commit, version, target, and SHA-256 digest. The macOS
 binary is not signed or notarized by Apple.
 
 Releases after v0.6.1-ewhauser.2 also publish a `kafka` variant of every
-target, `celld-kafka-<target>.gz`, built with the `export-kafka` feature for the
-Kafka change export sink. Download it the same way with
+target, `celld-kafka-<target>.gz`, built with `export-kafka` and
+`export-snowflake` for the Kafka change export sink and Snowflake audit commands.
+Download it the same way with
 `--pattern 'celld-kafka-x86_64-unknown-linux-gnu.*'`; its `.build.json` lists
 the features it was built with.
 
@@ -49,12 +50,12 @@ also need [esbuild](https://esbuild.github.io/) on `PATH`. Continue with the
 ## Container image
 
 ```sh
-docker run --rm ghcr.io/ewhauser/celld:0.6.0-ewhauser.2 --version
+docker run --rm ghcr.io/ewhauser/celld:0.6.2-ewhauser.2 --version
 ```
 
 Releases after v0.6.1-ewhauser.2 also publish the `kafka` variant, with every
 tag suffixed `-kafka` (`ghcr.io/ewhauser/celld:<version>-kafka`); it never takes
-`latest`.
+`latest`. The separate `celld-export-loader` is a source build.
 
 Fork prereleases do **not** update `latest`. The image is published for Linux
 amd64 and arm64 after the verified draft release is published. Native artifacts

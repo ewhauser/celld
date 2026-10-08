@@ -13,8 +13,8 @@ hold with two stores.
 
 ## Status
 
-DynamoDB coordination is on `main` and is not in a fork release yet. What
-works today:
+DynamoDB coordination is in **v0.6.2-ewhauser.2**. It has not been qualified
+against real AWS. What works today:
 
 - Keeping the coordination records of a **new** fleet in a table:
   `celld control init`, then nodes started with `CELLD_CONTROL`.

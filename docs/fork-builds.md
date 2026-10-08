@@ -1,8 +1,7 @@
 # Fork builds
 
 The operator still requires this fork for process identity, recovery safeguards,
-idle-follower failure handling, and preview support. Stock celld v0.6.1 does not
-provide all of these behaviors.
+idle-follower failure handling, and preview support.
 
 ## Retired operator APIs (removed in 0.6.0-ewhauser.2)
 
@@ -363,3 +362,22 @@ raise `CELLD_MAX_ASSET_FILE_BYTES` above 25 MiB only after every node runs
 this build. With epoch GC on, change export repair and backfill can no longer
 restore positions in a deleted epoch; they restore at the chain's base
 instead.
+
+## 0.6.2-ewhauser.2
+
+Based on upstream v0.6.2 and including the fork's change export, DynamoDB
+coordination, recovery safeguards, and default and Kafka artifact variants.
+The new `--consumer-topic T` option lets the Snowflake audit commands inspect
+and repair a topic-keyed loader whose tables are shared by several fleets.
+It scopes reads, findings, tombstones, and landed rows to that topic. In topic
+mode it starts the loader's `EXPORT_ROUTE` and `EXPORT_ERASE` tasks; the
+commands report that the tasks started, not that they finished.
+
+The option is available in the `-kafka` binaries and image, which include
+`export-kafka,export-snowflake`. The standard artifacts omit the Snowflake
+audit feature. The separate Snowflake loader still requires a source build.
+The six native artifacts passed the release build and checksum verification;
+the Kafka macOS binary reported this version and exposed `--consumer-topic`.
+CI, TCK, and both container smoke builds passed. The Snowflake path has been
+tested against an emulator, not a real Snowflake account, and DynamoDB
+coordination has not been qualified against real AWS.
