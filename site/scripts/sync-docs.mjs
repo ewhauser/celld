@@ -12,8 +12,8 @@ const pages = [
   { source: 'docs/fork-builds.md', slug: 'releases', title: 'Release notes', description: 'Fork build history, recovery changes, removed APIs, and rollout requirements.' },
   { source: 'docs/previews.md', slug: 'previews', title: 'Application previews', description: 'User guide: deploy isolated Kubernetes previews and seed them with objects copied from an approved fleet.' },
   { source: 'docs/telemetry.md', slug: 'metrics', title: 'OTLP metrics', description: 'Node gauges and cell CPU and heap distributions added by the fork.', section: 'Metrics' },
-  { source: 'docs/export.md', slug: 'export', title: 'Change export', description: 'User guide: stream cell changes to a warehouse, load them into Snowflake, and keep the copy complete.', onMain: 'Change export' },
-  { source: 'docs/dynamodb-control.md', slug: 'dynamodb', title: 'DynamoDB coordination', description: 'User guide: keep a fleet’s ownership records, node leases and deploy pointers in a DynamoDB table instead of the bucket.', onMain: 'DynamoDB coordination' },
+  { source: 'docs/export.md', slug: 'export', title: 'Change export', description: 'User guide: stream cell changes to a warehouse, load them into Snowflake, and keep the copy complete.' },
+  { source: 'docs/dynamodb-control.md', slug: 'dynamodb', title: 'DynamoDB coordination', description: 'User guide: keep a fleet’s ownership records, node leases and deploy pointers in a DynamoDB table instead of the bucket.' },
 ];
 const routes = new Map(pages.map(p => [p.source, p.slug]));
 rmSync(out, { recursive: true, force: true });
@@ -48,12 +48,9 @@ for (const page of pages) {
       return `](${url}${fragment ? `#${fragment}` : ''})`;
     });
   }).join('\n');
-  const notice = page.onMain
-    ? `:::caution[On main — not in v0.6.0-ewhauser.2]\nThis page follows development on main. ${page.onMain} is not in a fork release yet. See the status below before enabling it.\n:::\n\n`
-    : '';
   const metadata = { title: page.title, description: page.description, editUrl: `${repo}/edit/main/${page.source}` };
   const frontmatter = Object.entries(metadata).map(([key, value]) => `${key}: ${JSON.stringify(value)}`).join('\n');
-  writeFileSync(path.join(out, `${page.slug}.md`), `---\n${frontmatter}\n---\n\n${notice}${body.trim()}\n`);
+  writeFileSync(path.join(out, `${page.slug}.md`), `---\n${frontmatter}\n---\n\n${body.trim()}\n`);
 }
 console.log(`Synced ${pages.length} fork pages.`);
 
