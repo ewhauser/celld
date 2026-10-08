@@ -52,6 +52,10 @@ const HELP: &str = "celld export reconcile | verify | erase
                       snowflake, the blob-stream/Kafka loader's tables
                       (needs export-snowflake and SNOWFLAKE_* settings)
                       Select snowflake for a blob-stream or Kafka sink.
+  --consumer-topic T  With snowflake: the loader's tables key streams by
+                      topic, as one that several fleets share does; audit
+                      only topic T's streams, usually CELLD_EXPORT_TOPIC
+                      (or CELLD_EXPORT_CONSUMER_TOPIC)
   --export-bucket B   Where the export writes, if not the fleet bucket
                       (or CELLD_EXPORT_BUCKET)
   --cache PATH        Reuse a local SQLite index of export objects (bucket)
@@ -81,6 +85,7 @@ impl ConsumerKind {
 struct Command {
     fleet: FleetFlags,
     consumer: ConsumerKind,
+    consumer_topic: Option<String>,
     export_bucket: Option<String>,
     cache: Option<std::path::PathBuf>,
     max_cell_history: usize,
@@ -106,6 +111,7 @@ impl Command {
         let mut command = Command {
             fleet: FleetFlags::default(),
             consumer,
+            consumer_topic: crate::env_vars::value("CELLD_EXPORT_CONSUMER_TOPIC")?,
             export_bucket: None,
             cache: None,
             max_cell_history: super::cache::MAX_CELL_HISTORY,
@@ -135,6 +141,7 @@ impl Command {
                 "--help" | "-h" => return Ok(None),
                 "--export-bucket" => command.export_bucket = Some(value("--export-bucket")?),
                 "--consumer" => command.consumer = ConsumerKind::parse(&value("--consumer")?)?,
+                "--consumer-topic" => command.consumer_topic = Some(value("--consumer-topic")?),
                 "--cache" => command.cache = Some(value("--cache")?.into()),
                 "--max-cell-history" => {
                     command.max_cell_history = value("--max-cell-history")?
@@ -189,7 +196,7 @@ impl Command {
     ) -> anyhow::Result<Box<dyn ConsumerView>> {
         match self.consumer {
             ConsumerKind::Bucket => Ok(Box::new(self.bucket_consumer(export, cell).await?)),
-            ConsumerKind::Snowflake => snowflake_consumer(cell),
+            ConsumerKind::Snowflake => snowflake_consumer(cell, self.consumer_topic.clone()),
         }
     }
 
@@ -227,6 +234,12 @@ impl Command {
                  CELLD_EXPORT_CONSUMER=snowflake) with a celld built with export-snowflake"
             );
         }
+        if self.consumer != ConsumerKind::Snowflake && self.consumer_topic.is_some() {
+            bail!("--consumer-topic (or CELLD_EXPORT_CONSUMER_TOPIC) needs --consumer snowflake");
+        }
+        if self.consumer_topic.as_deref() == Some("") {
+            bail!("--consumer-topic (or CELLD_EXPORT_CONSUMER_TOPIC) is empty");
+        }
         if self.consumer == ConsumerKind::Snowflake && !cfg!(feature = "export-snowflake") {
             bail!("--consumer snowflake needs a celld built with the export-snowflake feature");
         }
@@ -258,12 +271,18 @@ impl Command {
 }
 
 #[cfg(feature = "export-snowflake")]
-fn snowflake_consumer(cell: Option<String>) -> anyhow::Result<Box<dyn ConsumerView>> {
-    Ok(Box::new(super::snowflake::from_env(cell)?))
+fn snowflake_consumer(
+    cell: Option<String>,
+    topic: Option<String>,
+) -> anyhow::Result<Box<dyn ConsumerView>> {
+    Ok(Box::new(super::snowflake::from_env(cell, topic)?))
 }
 
 #[cfg(not(feature = "export-snowflake"))]
-fn snowflake_consumer(_: Option<String>) -> anyhow::Result<Box<dyn ConsumerView>> {
+fn snowflake_consumer(
+    _: Option<String>,
+    _: Option<String>,
+) -> anyhow::Result<Box<dyn ConsumerView>> {
     bail!("--consumer snowflake needs a celld built with the export-snowflake feature")
 }
 
@@ -503,6 +522,49 @@ mod consumer_tests {
             cfg!(feature = "export-snowflake")
         );
     }
+
+    #[test]
+    fn a_consumer_topic_needs_the_snowflake_consumer() {
+        let config = Config::from_lookup(|name| {
+            Ok(match name {
+                "CELLD_EXPORT" => Some("1".into()),
+                _ => None,
+            })
+        })
+        .unwrap()
+        .unwrap();
+        let arguments = |a: &[&str]| a.iter().map(|s| s.to_string()).collect();
+        let command = Command::parse(arguments(&["--consumer-topic", "changes"]))
+            .unwrap()
+            .unwrap();
+        assert_eq!(command.consumer_topic.as_deref(), Some("changes"));
+        assert!(command
+            .validate_consumer(&config)
+            .unwrap_err()
+            .to_string()
+            .contains("needs --consumer snowflake"));
+        let command = Command::parse(arguments(&[
+            "--consumer",
+            "snowflake",
+            "--consumer-topic",
+            "",
+        ]))
+        .unwrap()
+        .unwrap();
+        assert!(command.validate_consumer(&config).is_err());
+        let command = Command::parse(arguments(&[
+            "--consumer",
+            "snowflake",
+            "--consumer-topic",
+            "changes",
+        ]))
+        .unwrap()
+        .unwrap();
+        assert_eq!(
+            command.validate_consumer(&config).is_ok(),
+            cfg!(feature = "export-snowflake")
+        );
+    }
 }
 
 async fn run_erase(command: Command) -> anyhow::Result<()> {
@@ -563,7 +625,9 @@ async fn run_erase(command: Command) -> anyhow::Result<()> {
             Vec::new(),
             &[],
         )?),
-        ConsumerKind::Snowflake => snowflake_consumer(Some(cell.clone()))?,
+        ConsumerKind::Snowflake => {
+            snowflake_consumer(Some(cell.clone()), command.consumer_topic.clone())?
+        }
     };
     let mut out = Output::new(command.format());
     for t in &targets {

@@ -471,6 +471,7 @@ mod tests {
 
     fn row(source: &str, body_bytes: usize) -> LandingRow {
         LandingRow {
+            topic: None,
             kind: "watermark".into(),
             script: "app".into(),
             class: "Room".into(),
