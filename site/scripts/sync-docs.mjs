@@ -47,12 +47,9 @@ for (const page of pages) {
       return `](${url}${fragment ? `#${fragment}` : ''})`;
     });
   }).join('\n');
-  const notice = page.slug === 'export'
-    ? ':::caution[On main — not in v0.6.0-ewhauser.2]\nThis page follows development on main. Change export is not in a fork release yet. See the status below before enabling it.\n:::\n\n'
-    : '';
   const metadata = { title: page.title, description: page.description, editUrl: `${repo}/edit/main/${page.source}` };
   const frontmatter = Object.entries(metadata).map(([key, value]) => `${key}: ${JSON.stringify(value)}`).join('\n');
-  writeFileSync(path.join(out, `${page.slug}.md`), `---\n${frontmatter}\n---\n\n${notice}${body.trim()}\n`);
+  writeFileSync(path.join(out, `${page.slug}.md`), `---\n${frontmatter}\n---\n\n${body.trim()}\n`);
 }
 console.log(`Synced ${pages.length} fork pages.`);
 
