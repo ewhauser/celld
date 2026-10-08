@@ -11,6 +11,16 @@
 //! [`SnowflakeConsumer`] is the [`ConsumerView`] that runs them, so
 //! `celld export reconcile | verify | erase --consumer snowflake` audit the
 //! tables a blob-stream or Kafka fleet's loader fills.
+//!
+//! A loader that several fleets share may key the same tables by topic: a
+//! `TOPIC` column on `EXPORT_LANDING`, `CELL_CHANGES` and `CELL_META` and on
+//! every view over them, and a nullable one on `EXPORT_TOMBSTONES` (NULL
+//! for every topic) and `EXPORT_RECONCILER_FINDINGS`. Given the fleet's
+//! topic ([`SnowflakeConsumer::in_topic`]), the consumer reads only that
+//! topic's streams ([`in_topic`]), writes the topic with every finding,
+//! tombstone and landed record (the `*_IN_TOPIC` statements), and leaves
+//! routing and erasing to that loader's `EXPORT_ROUTE` and `EXPORT_ERASE`
+//! tasks, whose statements know the topic.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, Mutex};
@@ -136,6 +146,96 @@ WHERE script = ? AND class = ? AND cell = ? AND facet = ?
   AND EQUAL_NULL(incarnation, ?)
   AND cleared_at IS NULL";
 
+/// [`INSERT_FINDING`] with the finding's topic. Binds: as
+/// [`finding_binds`], then the topic.
+pub const INSERT_FINDING_IN_TOPIC: &str = "\
+INSERT INTO EXPORT_RECONCILER_FINDINGS
+    (script, class, cell, facet, incarnation, finding, head_epoch, head_txid, detail, found_at,
+     topic)
+SELECT ?, ?, ?, ?, ?, ?, ?, ?, PARSE_JSON(?), CURRENT_TIMESTAMP(), ?";
+
+/// [`RESOLVE_FINDINGS`] for one topic's findings. Binds: the run, the topic.
+pub const RESOLVE_FINDINGS_IN_TOPIC: &str = "\
+UPDATE EXPORT_RECONCILER_FINDINGS
+SET resolved_at = CURRENT_TIMESTAMP()
+WHERE resolved_at IS NULL
+  AND (detail:run::STRING IS NULL OR detail:run::STRING <> ?)
+  AND topic = ?";
+
+/// Tombstone a stream of one topic unless an open tombstone of that topic
+/// matches it, as [`Loader::erase`] does without one. Binds: the topic,
+/// then as [`tombstone_binds`].
+pub const TOMBSTONE_IN_TOPIC: &str = "\
+INSERT INTO EXPORT_TOMBSTONES
+    (topic, script, class, cell, facet, incarnation, erased_at, reason)
+SELECT n.topic, n.script, n.class, n.cell, n.facet, n.incarnation,
+       TO_TIMESTAMP_LTZ(n.erased_at_ms, 3), n.reason
+FROM (SELECT ? AS topic, ? AS script, ? AS class, ? AS cell, ? AS facet,
+             ? AS incarnation, ? AS erased_at_ms, ? AS reason) n
+WHERE NOT EXISTS (SELECT 1 FROM EXPORT_TOMBSTONES t
+    WHERE t.cleared_at IS NULL AND t.topic = n.topic AND t.script = n.script
+      AND t.class = n.class AND t.cell = n.cell AND t.facet = n.facet
+      AND EQUAL_NULL(t.incarnation, n.incarnation))";
+
+/// [`CLEAR_TOMBSTONE`] for one topic's tombstone. Binds: as
+/// [`clear_binds`], then the topic.
+pub const CLEAR_TOMBSTONE_IN_TOPIC: &str = "\
+UPDATE EXPORT_TOMBSTONES
+SET cleared_at = TO_TIMESTAMP_LTZ(?, 3)
+WHERE script = ? AND class = ? AND cell = ? AND facet = ?
+  AND EQUAL_NULL(incarnation, ?)
+  AND cleared_at IS NULL
+  AND topic = ?";
+
+/// Start a topic-keyed loader's route task, which routes what landed with
+/// the topic each row names. It returns before the task has run.
+pub const ROUTE_TASK: &str = "EXECUTE TASK EXPORT_ROUTE";
+
+/// Start a topic-keyed loader's erase task, which deletes the rows of each
+/// open tombstone's topic, or of every topic for a tombstone without one.
+pub const ERASE_TASK: &str = "EXECUTE TASK EXPORT_ERASE";
+
+/// The views and tables a topic-keyed loader keys by topic, as the read
+/// statements name them.
+const TOPIC_KEYED: [&str; 7] = [
+    "CELL_STREAMS",
+    "CELL_CERTIFIED",
+    "CELL_SNAPSHOTS",
+    "CELL_CHANGES_CURRENT",
+    "CELL_META_CURRENT",
+    "CELL_CHANGES",
+    "CELL_META",
+];
+
+/// A read statement narrowed to `topic`'s streams: each topic-keyed view or
+/// table it reads from, only that topic's rows, and each tombstone it
+/// checks, only one for that topic or for every topic. The topic is written
+/// as a literal, so the statement's binds are unchanged.
+pub fn in_topic(sql: &str, topic: &str) -> String {
+    let topic = celld_export_snowflake::literal(topic);
+    let mut out = String::with_capacity(sql.len() + 64);
+    let mut rest = sql;
+    while let Some(at) = rest.find("FROM ") {
+        let (before, from) = rest.split_at(at + "FROM ".len());
+        out.push_str(before);
+        let end = from
+            .find(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
+            .unwrap_or(from.len());
+        let (name, after) = from.split_at(end);
+        if TOPIC_KEYED.contains(&name) {
+            out.push_str(&format!("(SELECT * FROM {name} WHERE topic = {topic})"));
+        } else {
+            out.push_str(name);
+        }
+        rest = after;
+    }
+    out.push_str(rest);
+    out.replace(
+        "t.cleared_at IS NULL AND",
+        &format!("t.cleared_at IS NULL AND (t.topic IS NULL OR t.topic = {topic}) AND"),
+    )
+}
+
 /// The position key the loader's views compare positions by.
 pub fn position_key(epoch: u64, txid: u64, commit: u64) -> String {
     format!("{epoch:020}.{txid:020}.{commit:020}")
@@ -177,6 +277,13 @@ pub fn tombstone_binds(t: &Tombstone) -> Vec<Json> {
     ]
 }
 
+/// `binds` with the topic after them, for the `*_IN_TOPIC` statements that
+/// bind it last.
+pub fn then_topic(mut binds: Vec<Json>, topic: &str) -> Vec<Json> {
+    binds.push(json!(topic));
+    binds
+}
+
 pub fn clear_binds(t: &Tombstone) -> Vec<Json> {
     vec![
         json!(t.cleared_at_ms),
@@ -195,6 +302,8 @@ pub fn clear_binds(t: &Tombstone) -> Vec<Json> {
 pub struct SnowflakeConsumer<W, L> {
     inner: Arc<Mutex<Inner<W, L>>>,
     only_cell: Option<String>,
+    /// The fleet's topic, for tables keyed by topic.
+    topic: Option<String>,
 }
 
 struct Inner<W, L> {
@@ -219,6 +328,23 @@ where
                 visible_timeout,
             })),
             only_cell: None,
+            topic: None,
+        }
+    }
+
+    /// Only the streams of `topic`, for a loader whose tables key streams
+    /// by topic: usually the fleet's `CELLD_EXPORT_TOPIC`. `None` for a
+    /// loader whose tables hold one fleet and have no topic.
+    pub fn in_topic(mut self, topic: Option<String>) -> Self {
+        self.topic = topic;
+        self
+    }
+
+    /// A read statement as this consumer runs it.
+    fn read(&self, sql: &str) -> String {
+        match &self.topic {
+            Some(topic) => in_topic(sql, topic),
+            None => sql.to_string(),
         }
     }
 
@@ -248,12 +374,13 @@ where
 
     /// A statement over every stream, narrowed to [`Self::only_cell`].
     fn scoped(&self, sql: &str) -> (String, Vec<Json>) {
+        let sql = self.read(sql);
         match &self.only_cell {
             Some(cell) => (
                 format!("SELECT * FROM ({sql}) WHERE cell = ?"),
                 vec![json!(cell)],
             ),
-            None => (sql.to_string(), Vec::new()),
+            None => (sql, Vec::new()),
         }
     }
 }
@@ -467,11 +594,15 @@ where
             json!(stream.cell),
             json!(position_key(at.epoch, at.txid, at.commit)),
         ];
+        let (changes_at, meta_at) = (
+            self.read(SELECT_CELL_CHANGES_AT),
+            self.read(SELECT_CELL_META_AT),
+        );
         let (changes, meta) = self
             .with(move |inner| {
                 Ok((
-                    query(&mut inner.loader, SELECT_CELL_CHANGES_AT, &binds)?,
-                    query(&mut inner.loader, SELECT_CELL_META_AT, &binds)?,
+                    query(&mut inner.loader, &changes_at, &binds)?,
+                    query(&mut inner.loader, &meta_at, &binds)?,
                 ))
             })
             .await?;
@@ -487,8 +618,9 @@ where
     }
 
     async fn recovered(&self) -> anyhow::Result<Vec<RecoveredSession>> {
+        let recovered = self.read(SELECT_RECOVERED);
         let rows = self
-            .with(|inner| query(&mut inner.loader, SELECT_RECOVERED, &[]))
+            .with(move |inner| query(&mut inner.loader, &recovered, &[]))
             .await?;
         (0..rows.len())
             .map(|row| {
@@ -504,14 +636,24 @@ where
 
     async fn record_findings(&self, findings: &[Finding]) -> anyhow::Result<()> {
         let run = crate::asyncrt::wall_ms().to_string();
-        let inserts: Vec<Vec<Json>> = findings.iter().map(|f| finding_binds(f, &run)).collect();
+        let inserts = findings.iter().map(|f| finding_binds(f, &run));
+        let resolve = vec![json!(run)];
+        let (insert, inserts, resolve_sql, resolve): (_, Vec<_>, _, _) = match &self.topic {
+            Some(topic) => (
+                INSERT_FINDING_IN_TOPIC,
+                inserts.map(|b| then_topic(b, topic)).collect(),
+                RESOLVE_FINDINGS_IN_TOPIC,
+                then_topic(resolve, topic),
+            ),
+            None => (INSERT_FINDING, inserts.collect(), RESOLVE_FINDINGS, resolve),
+        };
         self.with(move |inner| {
             for binds in &inserts {
-                query(&mut inner.loader, INSERT_FINDING, binds)?;
+                query(&mut inner.loader, insert, binds)?;
             }
             // Only once this run's findings are in, so EXPORT_GAPS never
             // loses one that is still open.
-            query(&mut inner.loader, RESOLVE_FINDINGS, &[json!(run)])?;
+            query(&mut inner.loader, resolve_sql, &resolve)?;
             Ok(())
         })
         .await
@@ -519,7 +661,23 @@ where
 
     async fn tombstone(&self, tombstone: &Tombstone) -> anyhow::Result<()> {
         let t = tombstone.clone();
+        let topic = self.topic.clone();
         self.with(move |inner| {
+            if let Some(topic) = &topic {
+                // The erase task deletes only this topic's rows of the
+                // stream; Loader::erase's own statements would delete
+                // every topic's.
+                if t.cleared_at_ms.is_some() {
+                    let binds = then_topic(clear_binds(&t), topic);
+                    query(&mut inner.loader, CLEAR_TOMBSTONE_IN_TOPIC, &binds)?;
+                } else {
+                    let mut binds = vec![json!(topic)];
+                    binds.extend(tombstone_binds(&t));
+                    query(&mut inner.loader, TOMBSTONE_IN_TOPIC, &binds)?;
+                    query(&mut inner.loader, ERASE_TASK, &[])?;
+                }
+                return Ok(());
+            }
             if t.cleared_at_ms.is_some() {
                 query(&mut inner.loader, CLEAR_TOMBSTONE, &clear_binds(&t))?;
                 return Ok(());
@@ -547,8 +705,9 @@ where
         }
         // No `%` or `_`: `visible` matches the tag with LIKE.
         let tag = format!(" (reconciler {})", crate::asyncrt::wall_ms());
+        let topic = self.topic.clone();
         self.with(move |inner| {
-            let mut batch = Batch::tagged(&tag);
+            let mut batch = Batch::tagged(&tag).in_topic(topic.clone());
             let landed = records.len() as u64;
             for record in &records {
                 batch.push(record, super::AUDIT_NODE);
@@ -559,16 +718,30 @@ where
             batch.land(&inner.land).map_err(|e| anyhow!("{e}"))?;
             let deadline = std::time::Instant::now() + inner.visible_timeout;
             let mut pause = Duration::from_millis(100);
+            let wait = || {
+                if std::time::Instant::now() >= deadline {
+                    return false;
+                }
+                std::thread::sleep(pause);
+                pause = (pause * 2).min(Duration::from_secs(2));
+                true
+            };
+            if topic.is_some() {
+                // The loader's own route statements do not know the topic,
+                // so the route task routes what landed.
+                let visible = inner
+                    .loader
+                    .await_visible(&tag, landed, wait)
+                    .map_err(|e| anyhow!("{e}"))?;
+                query(&mut inner.loader, ROUTE_TASK, &[])?;
+                return Ok(Some(format!(
+                    "Snowflake: landed {landed} record(s), {visible} visible so far; \
+                     started the route task to route them"
+                )));
+            }
             let visible = inner
                 .loader
-                .settle(&tag, landed, || {
-                    if std::time::Instant::now() >= deadline {
-                        return false;
-                    }
-                    std::thread::sleep(pause);
-                    pause = (pause * 2).min(Duration::from_secs(2));
-                    true
-                })
+                .settle(&tag, landed, wait)
                 .map_err(|e| anyhow!("{e}"))?;
             Ok(Some(if visible < landed {
                 format!(
@@ -585,10 +758,11 @@ where
 
 /// The consumer `--consumer snowflake` audits: the loader's tables, with the
 /// loader's settings (`SNOWFLAKE_*`, `EXPORT_BATCH_*`,
-/// `EXPORT_VISIBLE_SECONDS`).
+/// `EXPORT_VISIBLE_SECONDS`), keyed by `topic` when it is set.
 #[cfg(feature = "export-snowflake")]
 pub fn from_env(
     only_cell: Option<String>,
+    topic: Option<String>,
 ) -> anyhow::Result<
     SnowflakeConsumer<
         celld_export_snowflake::sql_api::SqlApi,
@@ -603,5 +777,6 @@ pub fn from_env(
         settings::limits().map_err(e)?,
         settings::visible_timeout().map_err(e)?,
     )
-    .only_cell(only_cell))
+    .only_cell(only_cell)
+    .in_topic(topic))
 }

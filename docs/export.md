@@ -899,6 +899,34 @@ cargo build --release -p celld --features export-snowflake
 CELLD_EXPORT_CONSUMER=snowflake celld export reconcile --schedule
 ```
 
+Some loaders share one set of tables among several fleets and key every
+stream by the Kafka topic it came from: `EXPORT_LANDING`, `CELL_CHANGES`
+and `CELL_META` carry a `topic` column, the views expose it, and a
+tombstone or finding with a `NULL` topic applies to every topic. For those
+tables, `--consumer-topic T` (or `CELLD_EXPORT_CONSUMER_TOPIC`), usually the
+fleet's `CELLD_EXPORT_TOPIC`, audits only topic `T`'s streams:
+
+- Every read is narrowed to topic `T`'s rows, and only tombstones for `T`
+  or for every topic hide a stream's records.
+- Findings and tombstones are written with topic `T`, and a run closes only
+  `T`'s earlier findings.
+- The reconciler's records land with topic `T`. The loader's route
+  statements don't know the topic, so the command waits until the records
+  are visible in `EXPORT_LANDING` and then starts `EXPORT_ROUTE`
+  (`EXECUTE TASK`), which routes them.
+- `erase` writes the tombstone and starts `EXPORT_ERASE`, which deletes
+  only `T`'s rows of the stream.
+
+Both tasks run in the background, so the command reports that it started
+them, not that they finished. The deployment must define the two tasks, and
+the role needs `OPERATE` on them. Without `--consumer-topic`, nothing
+changes for tables that hold one fleet and have no `topic` column.
+
+```sh
+CELLD_EXPORT_CONSUMER=snowflake CELLD_EXPORT_CONSUMER_TOPIC=cell-changes \
+  celld export reconcile --schedule
+```
+
 The published `celld-kafka-*` binaries and `-kafka` image include both
 `export-kafka` and `export-snowflake`. Supply `CELLD_EXPORT_SINK=kafka`, its
 broker settings, and `CELLD_EXPORT_CONSUMER=snowflake` when reconciling a

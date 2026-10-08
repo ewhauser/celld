@@ -289,6 +289,7 @@ fn a_rows_json_len_bound_holds_and_is_tight() {
     };
     // Every fixed part at its widest: the bound is exact.
     let widest = LandingRow {
+        topic: None,
         kind: String::new(),
         script: String::new(),
         class: String::new(),
@@ -308,6 +309,11 @@ fn a_rows_json_len_bound_holds_and_is_tight() {
         source: String::new(),
     };
     assert_eq!(widest.json_len_bound(), written(&widest));
+    let topical = LandingRow {
+        topic: Some(String::new()),
+        ..widest.clone()
+    };
+    assert_eq!(topical.json_len_bound(), written(&topical));
     // Escapes, control characters, and non-ASCII never pass it.
     let odd = "q\"b\\s\n\u{1}\u{1f}\u{7f}é😀";
     let mut rows: Vec<LandingRow> = every_record()
@@ -328,6 +334,7 @@ fn a_rows_json_len_bound_holds_and_is_tight() {
         }
         row.cell_name = Some(odd.into());
         row.facet = Some(odd.repeat(3));
+        row.topic = Some(odd.into());
         rows.push(row);
     }
     for row in &rows {
@@ -342,7 +349,8 @@ fn a_rows_json_len_bound_holds_and_is_tight() {
             + row.facet.as_ref().map_or(0, String::len)
             + row.node.len()
             + row.origin.len()
-            + row.source.len();
+            + row.source.len()
+            + row.topic.as_ref().map_or(0, String::len);
         assert!(bound - len <= 6 * strings + 400, "{bound} - {len}");
     }
 }
@@ -412,4 +420,26 @@ fn a_message_that_is_not_a_record_has_no_row() {
             "{bad}"
         );
     }
+}
+
+#[test]
+fn a_row_names_its_topic_only_when_it_has_one() {
+    let r = every_record().remove(0);
+    let plain = LandingRow::from_record(&r, "kafka/0/1");
+    let line: serde_json::Value = serde_json::to_value(&plain).unwrap();
+    assert!(line.get("topic").is_none());
+
+    let row = LandingRow {
+        topic: Some(AWKWARD[0].into()),
+        ..plain
+    };
+    let line = serde_json::to_vec(&row).unwrap();
+    let mut written = Vec::new();
+    row.write_json(&mut written);
+    assert_eq!(written, line);
+    let back: LandingRow = serde_json::from_slice(&line).unwrap();
+    assert_eq!(back, row);
+    assert_eq!(back.to_record().unwrap(), r);
+    let line: serde_json::Value = serde_json::from_slice(&line).unwrap();
+    assert_eq!(line["topic"], AWKWARD[0]);
 }
