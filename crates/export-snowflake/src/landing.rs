@@ -4,6 +4,10 @@
 //! `body`: the record's other fields as a JSON object, and `source`: where
 //! the loader read the record. `kind` is its own column, so routing never
 //! looks inside the body.
+//!
+//! A row may also name its `topic`, for a landing table that several fleets
+//! share and that keys every stream by the topic its records came from. A
+//! row without one carries no `topic` field at all.
 
 use std::borrow::Cow;
 use std::fmt;
@@ -38,6 +42,10 @@ pub const LANDING_COLUMNS: [&str; 17] = [
 /// One record as one `EXPORT_LANDING` row.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LandingRow {
+    /// The topic the record belongs to, for a landing table keyed by
+    /// topic; `None` for this crate's own tables, which have no such column.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub topic: Option<String>,
     pub kind: String,
     pub script: String,
     pub class: String,
@@ -88,6 +96,7 @@ impl LandingRow {
         let body = fields.object_without(|key| envelope.contains(&key))?;
         let e = &record.envelope;
         Ok(LandingRow {
+            topic: None,
             kind: name(&record.kind()),
             script: e.stream.script.clone(),
             class: e.stream.class.clone(),
@@ -113,6 +122,7 @@ impl LandingRow {
     /// JSON object, as every row this crate builds does.
     pub fn write_json(&self, out: &mut Vec<u8>) {
         let head = Head {
+            topic: &self.topic,
             kind: &self.kind,
             script: &self.script,
             class: &self.class,
@@ -153,8 +163,10 @@ impl LandingRow {
             + self.node.len()
             + self.origin.len()
             + self.source.len();
+        // `"topic":"",` and its string, only when the row has one.
+        let topic = self.topic.as_ref().map_or(0, |t| 11 + 6 * t.len());
         // Each string byte is at most an escape, `\u00XX`.
-        JSON_FIXED_BOUND + 6 * strings + self.body.len()
+        JSON_FIXED_BOUND + topic + 6 * strings + self.body.len()
     }
 
     /// The record this row holds.
@@ -188,6 +200,8 @@ impl LandingRow {
 /// A row's fields before `body`, in order.
 #[derive(Serialize)]
 struct Head<'a> {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    topic: &'a Option<String>,
     kind: &'a str,
     script: &'a str,
     class: &'a str,
@@ -205,9 +219,9 @@ struct Head<'a> {
     fragments: u32,
 }
 
-/// A row's JSON less its strings' contents and its body: the keys, the
-/// quotes and punctuation, `null` for each option, and each number at its
-/// widest.
+/// A row's JSON less its strings' contents, its body and its topic: the
+/// keys, the quotes and punctuation, `null` for each option, and each
+/// number at its widest.
 const JSON_FIXED_BOUND: usize = 319;
 
 /// A `kind` or `origin` as the record's JSON names it.

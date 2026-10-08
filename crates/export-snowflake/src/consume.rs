@@ -83,6 +83,8 @@ pub struct Batch {
     offsets: BTreeMap<u32, u64>,
     /// Appended to every row's source.
     tag: String,
+    /// Every row's topic, as [`LandingRow::topic`].
+    topic: Option<String>,
 }
 
 impl Batch {
@@ -93,6 +95,13 @@ impl Batch {
             tag: tag.into(),
             ..Batch::default()
         }
+    }
+
+    /// The same batch, its rows all naming `topic`: for a landing table
+    /// that keys streams by topic.
+    pub fn in_topic(mut self, topic: Option<String>) -> Batch {
+        self.topic = topic;
+        self
     }
 
     /// Add the message at `offset` in partition `partition` of the
@@ -162,7 +171,8 @@ impl Batch {
 
     fn push_row(&mut self, mut row: LandingRow, bytes: usize) {
         row.source.push_str(&self.tag);
-        self.bytes += bytes + row.source.len();
+        row.topic.clone_from(&self.topic);
+        self.bytes += bytes + row.source.len() + self.topic.as_ref().map_or(0, String::len);
         self.rows.push(row);
     }
 
@@ -294,6 +304,21 @@ mod tests {
         assert_eq!(landed.len(), 4);
         assert_eq!(landed[0].source, "blob-stream/3/10");
         assert_eq!(landed[3].to_record().unwrap(), record(4));
+    }
+
+    #[test]
+    fn a_batch_in_a_topic_names_it_on_every_row() {
+        let mut batch = Batch::tagged(" (reconciler 1)").in_topic(Some("changes".into()));
+        batch.push(&record(1), "reconciler");
+        batch
+            .push_message("kafka", 0, 2, &record(2).to_json())
+            .unwrap();
+        let l = Fake::default();
+        batch.land(&l).unwrap();
+        let landed = &l.landed.lock().unwrap()[0];
+        assert!(landed.iter().all(|r| r.topic.as_deref() == Some("changes")));
+        assert_eq!(landed[0].source, "reconciler (reconciler 1)");
+        assert_eq!(landed[0].to_record().unwrap(), record(1));
     }
 
     #[test]

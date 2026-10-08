@@ -1075,6 +1075,131 @@ fn the_snowflake_binds_follow_the_statements() {
 }
 
 #[test]
+fn the_snowflake_topic_binds_follow_the_statements() {
+    let finding = Finding {
+        stream: root(),
+        kind: FindingKind::Gap,
+        scope: CELL.into(),
+        head: None,
+        from: None,
+        certified: None,
+        epochs: vec![],
+        detail: "d".into(),
+    };
+    let binds = snowflake::then_topic(snowflake::finding_binds(&finding, "1"), "t");
+    assert_eq!(
+        snowflake::INSERT_FINDING_IN_TOPIC.matches('?').count(),
+        binds.len()
+    );
+    assert_eq!(binds.last(), Some(&serde_json::json!("t")));
+    assert_eq!(snowflake::RESOLVE_FINDINGS_IN_TOPIC.matches('?').count(), 2);
+    let t = tombstone_for(&root(), None);
+    assert_eq!(
+        snowflake::TOMBSTONE_IN_TOPIC.matches('?').count(),
+        snowflake::tombstone_binds(&t).len() + 1
+    );
+    assert_eq!(
+        snowflake::CLEAR_TOMBSTONE_IN_TOPIC.matches('?').count(),
+        snowflake::clear_binds(&t).len() + 1
+    );
+}
+
+#[test]
+fn a_read_in_a_topic_reads_only_that_topics_rows() {
+    let keyed = [
+        "CELL_STREAMS",
+        "CELL_CERTIFIED",
+        "CELL_SNAPSHOTS",
+        "CELL_CHANGES_CURRENT",
+        "CELL_META_CURRENT",
+        "CELL_CHANGES",
+        "CELL_META",
+    ];
+    for sql in [
+        snowflake::SELECT_STREAMS,
+        snowflake::SELECT_CERTIFIED,
+        snowflake::SELECT_STREAM_SNAPSHOTS,
+        snowflake::SELECT_ACTIVITY,
+        snowflake::SELECT_RECOVERED,
+        snowflake::SELECT_CELL_CHANGES_AT,
+        snowflake::SELECT_CELL_META_AT,
+    ] {
+        let narrowed = snowflake::in_topic(sql, "it's");
+        assert_eq!(narrowed.matches('?').count(), sql.matches('?').count());
+        let reads = sql.matches("FROM ").count();
+        let filtered = narrowed.matches("WHERE topic = 'it''s')").count();
+        let unkeyed = sql
+            .split("FROM ")
+            .skip(1)
+            .filter(|rest| {
+                !keyed.iter().any(|k| {
+                    rest.strip_prefix(k).is_some_and(|r| {
+                        !r.starts_with(|c: char| c.is_ascii_alphanumeric() || c == '_')
+                    })
+                })
+            })
+            .count();
+        assert!(filtered > 0, "{sql}");
+        assert_eq!(filtered, reads - unkeyed, "{narrowed}");
+        assert_eq!(
+            narrowed
+                .matches("(t.topic IS NULL OR t.topic = 'it''s')")
+                .count(),
+            sql.matches("FROM EXPORT_TOMBSTONES t").count(),
+            "{narrowed}"
+        );
+    }
+    let changes = snowflake::in_topic(snowflake::SELECT_CELL_CHANGES_AT, "x");
+    assert!(changes.contains("FROM (SELECT * FROM CELL_CHANGES WHERE topic = 'x') c\n"));
+}
+
+#[test]
+fn the_snowflake_consumer_in_a_topic_writes_and_routes_by_topic() {
+    let fake = FakeSnowflake::default();
+    crate::asyncrt::test_block_on(async {
+        let consumer = snowflake_consumer(&fake).in_topic(Some("t".into()));
+        let finding = Finding {
+            stream: root(),
+            kind: FindingKind::Gap,
+            scope: CELL.into(),
+            head: None,
+            from: None,
+            certified: None,
+            epochs: vec![],
+            detail: "d".into(),
+        };
+        consumer.record_findings(&[finding]).await.unwrap();
+        let mut t = tombstone_for(&root(), None);
+        consumer.tombstone(&t).await.unwrap();
+        t.cleared_at_ms = Some(t.erased_at_ms + 1);
+        consumer.tombstone(&t).await.unwrap();
+        let gap = rows(&root(), at(2, 1, 1), "items", &[(9, "z")]);
+        let delivered = consumer.deliver(vec![gap]).await.unwrap().unwrap();
+        assert!(delivered.contains("started the route task"), "{delivered}");
+    });
+    let statements = fake.statements.lock().unwrap();
+    let sqls: Vec<&str> = statements.iter().map(|(sql, _)| sql.as_str()).collect();
+    assert_eq!(
+        sqls,
+        [
+            snowflake::INSERT_FINDING_IN_TOPIC,
+            snowflake::RESOLVE_FINDINGS_IN_TOPIC,
+            snowflake::TOMBSTONE_IN_TOPIC,
+            snowflake::ERASE_TASK,
+            snowflake::CLEAR_TOMBSTONE_IN_TOPIC,
+            sqls[5],
+            snowflake::ROUTE_TASK,
+        ]
+    );
+    assert!(sqls[5].starts_with("SELECT COUNT(*)"), "{}", sqls[5]);
+    for (sql, binds) in &statements[..5] {
+        assert_eq!(sql.matches('?').count(), binds.len(), "{sql}");
+    }
+    assert_eq!(statements[0].1.last(), Some(&serde_json::json!("t")));
+    assert_eq!(statements[2].1[0], serde_json::json!("t"));
+}
+
+#[test]
 fn bucket_cache_reuses_objects_replaces_changes_and_expires_deleted_history() {
     block_on(async {
         let bucket = bucket();

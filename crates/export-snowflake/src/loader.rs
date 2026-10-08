@@ -391,13 +391,26 @@ impl<W: Warehouse> Loader<W> {
         &mut self,
         tag: &str,
         landed: u64,
+        wait: impl FnMut() -> bool,
+    ) -> Result<u64, LoadError> {
+        let visible = self.await_visible(tag, landed, wait)?;
+        self.route()?;
+        Ok(visible)
+    }
+
+    /// [`settle`](Self::settle) without routing: wait until queries see
+    /// `landed` rows tagged `tag`, or `wait` says to stop, and return how
+    /// many they see.
+    pub fn await_visible(
+        &mut self,
+        tag: &str,
+        landed: u64,
         mut wait: impl FnMut() -> bool,
     ) -> Result<u64, LoadError> {
         let mut visible = self.visible(tag)?;
         while visible < landed && wait() {
             visible = self.visible(tag)?;
         }
-        self.route()?;
         Ok(visible)
     }
 
