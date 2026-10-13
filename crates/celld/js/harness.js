@@ -2018,6 +2018,16 @@ class DurableObjectStorage {
       if (!started) release();
       throw error;
     }
+    // The block can also resolve without running the callback at all. A
+    // block that queued as another event's cross-entry waiter is retired with
+    // its origin event (a spent budget, a shutdown), and the owner consumes
+    // the ticket without running the retired callback. Nothing else settles
+    // the slot then, and every later transaction would wait on it while it
+    // holds the gate, which shuts the object until the block limit resets it.
+    if (!started) {
+      release();
+      throw new Error("the cell event ended before its transaction could start");
+    }
     if ("error" in outcome) throw outcome.error;
     return outcome.value;
   }
