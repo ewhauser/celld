@@ -14,7 +14,8 @@ format and the delivery guarantees.
 
 ## Status
 
-Change export is in **v0.6.2-ewhauser.2**. The standard binary includes the
+Change export is in fork releases since **v0.6.2-ewhauser.2**. The standard
+binary includes the
 bucket sink. The `-kafka` binary also includes the Kafka sink and Snowflake
 audit commands. The blob-stream sink and separate Snowflake loader require
 source builds. What works today:

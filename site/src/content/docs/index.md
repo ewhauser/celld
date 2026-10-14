@@ -24,14 +24,15 @@ fleet operation, use the [main celld documentation](https://celld.dev/docs/).
 | --- | --- | --- |
 | Recovery | Keep unavailable witnesses undecided; bind recovery requests to members and disks; handle replacement disks. | [Recovery fixes](./fixes/#recovery-witnesses) |
 | Idle fleets | Detect failed follower probes and reconfigure the ensemble without waiting for writes. | [Idle-follower fix](./fixes/#idle-follower-failures) |
-| Actor storage | Roll back transactions left open by an aborted actor. | [Transaction fix](./fixes/#aborted-actor-transactions) |
+| Actor storage | Roll back transactions left open by an aborted actor, and release the queue place of a transaction whose block is retired. | [Transaction fixes](./fixes/#aborted-actor-transactions) |
+| Peer calls | Close idle pooled peer tunnels and bound each peer reply, so a silently dead network path cannot hang a call. | [Peer tunnel fix](./fixes/#silently-dead-peer-tunnels) |
 | Development previews | Deploy isolated previews and seed them from approved persisted object checkpoints. | [Preview workflow](./fork/previews/) |
 | Observability | Export node gauges and cell CPU and heap distributions through OTLP. | [Metrics](./fork/metrics/) |
 | Change export | Stream cell changes to a bucket or Kafka and audit a Snowflake copy. The Kafka sink and Snowflake audit require the `-kafka` variant; the separate loader is a source build. | [User guide](./fork/export/) |
 
 ## Releases and compatibility
 
-The documented release baseline is **v0.6.2-ewhauser.2**, based on upstream
+The documented release baseline is **v0.6.2-ewhauser.4**, based on upstream
 **v0.6.2**. Fork builds are published as prereleases. The Snowflake path has
 been tested against an emulator.
 Check the [release notes](./fork/releases/) and the
