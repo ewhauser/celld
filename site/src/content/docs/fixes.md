@@ -3,7 +3,7 @@ title: Bug fixes
 description: The failures addressed by the fork and the operational boundaries of each fix.
 ---
 
-These fixes are included in the documented **v0.6.0-ewhauser.2** baseline.
+These fixes are included in the documented **v0.6.2-ewhauser.4** baseline.
 Version references below identify the fork history; they do not assert that
 later upstream releases still have each bug. See [release notes](../fork/releases/)
 for rollout details.
@@ -73,3 +73,39 @@ aborted writes. This fix landed after 0.5.1-ewhauser.4 and is included in
 
 [Issue #10](https://github.com/ewhauser/celld/issues/10) ·
 [Implementation](https://github.com/ewhauser/celld/commit/818f63e)
+
+### Retired transaction blocks
+
+A `storage.transaction()` call whose block was retired before its callback ran
+kept its place in the object's transaction queue. A retired block results from
+a spent handler budget, a shutdown cancel, or a terminated isolate. Every later
+transaction then waited, holding the input gate, so the object served nothing,
+including plain reads, until the 30-second block limit reset it.
+
+Since **0.6.2-ewhauser.3**, the transaction gives back its place and rejects
+with `the cell event ended before its transaction could start`.
+
+[Pull request #131](https://github.com/ewhauser/celld/pull/131)
+
+## Silently dead peer tunnels
+
+Peer calls reuse pooled tunnels. A stateful firewall, NAT, or proxy between
+nodes can expire an idle flow and then drop its packets in both directions,
+with no FIN or RST. The pooled tunnel still looked usable, so a call reused it
+and waited about 15 minutes for the kernel to abandon the socket. TCP keepalive
+does not help when a sidecar proxy terminates the local hop.
+
+Since **0.6.2-ewhauser.4**, a tunnel idle for `CELLD_PEER_TUNNEL_IDLE_MS`
+(default 60000) is closed instead of reused. Each call also has a reply bound:
+the admission wait, the handler budget, and `CELLD_OPERATION_DEADLINE_MS` added
+together. A call that reaches the bound fails as ambiguous and is not replayed,
+because the owner may already have run it.
+
+:::note[Set the idle limit below the path's timeout]
+The default suits the common 300-second idle timeouts. Lower
+`CELLD_PEER_TUNNEL_IDLE_MS` if any device between nodes expires idle flows
+sooner.
+:::
+
+[Issue #133](https://github.com/ewhauser/celld/issues/133) ·
+[Pull request #134](https://github.com/ewhauser/celld/pull/134)
