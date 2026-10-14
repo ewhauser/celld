@@ -6,7 +6,7 @@ description: Download and verify fork artifacts, select a container image, and p
 Use artifacts from **ewhauser/celld**. The installer linked by the upstream site
 installs upstream celld; it does not select this fork.
 
-The examples below pin **v0.6.2-ewhauser.2**, a fork prerelease based on upstream
+The examples below pin **v0.6.2-ewhauser.4**, a fork prerelease based on upstream
 v0.6.2. Check [fork releases](https://github.com/ewhauser/celld/releases) for the
 artifact you intend to deploy.
 
@@ -19,7 +19,7 @@ downloads the Linux x86_64 binary with the GitHub CLI:
 mkdir -p celld-fork-download
 cd celld-fork-download
 
-gh release download v0.6.2-ewhauser.2 --repo ewhauser/celld \
+gh release download v0.6.2-ewhauser.4 --repo ewhauser/celld \
   --pattern 'celld-x86_64-unknown-linux-gnu.*' --pattern SHA256SUMS
 
 # Verify the compressed asset before extracting it.
@@ -50,7 +50,7 @@ also need [esbuild](https://esbuild.github.io/) on `PATH`. Continue with the
 ## Container image
 
 ```sh
-docker run --rm ghcr.io/ewhauser/celld:0.6.2-ewhauser.2 --version
+docker run --rm ghcr.io/ewhauser/celld:0.6.2-ewhauser.4 --version
 ```
 
 Releases after v0.6.1-ewhauser.2 also publish the `kafka` variant, with every
@@ -73,6 +73,7 @@ guide for bucket credentials, listeners, and persistent local storage.
 | 0.5.1-ewhauser builds → 0.6.0-ewhauser builds with `fleet` durability | Stop every member, then start every member on the new build. A mixed fleet cannot supply the ranged recovery tail required by 0.6.0. |
 | 0.5.1 → 0.6.0 with `bucket` durability | A rolling upgrade is supported; this mode has no follower recovery dependency. |
 | 0.6.0-ewhauser.1 → 0.6.0-ewhauser.2 | Nodes can roll; there is no record or storage format change. |
+| 0.6.2-ewhauser.2 → 0.6.2-ewhauser.4 | Nodes can roll; there is no storage-format or protocol change. If a device between nodes expires idle flows in under 60 seconds, set `CELLD_PEER_TUNNEL_IDLE_MS` below that timeout. |
 
 All potential recovery nodes must run compatible fork builds before you rely on
 the recovery fixes. Reuse a node name on a replacement disk only when the prior

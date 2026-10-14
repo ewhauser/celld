@@ -394,3 +394,35 @@ The six native artifacts passed the release build and checksum verification;
 the Kafka macOS binary reported this version and exposed `--consumer-topic`.
 CI, TCK, and both container smoke builds passed. The Snowflake path has been
 tested against an emulator, not a real Snowflake account.
+
+## 0.6.2-ewhauser.3
+
+`storage.transaction()` now gives back its place in the object's transaction
+queue when its block is retired before the callback runs. A retired block
+results from a spent handler budget, a shutdown cancel, or a terminated
+isolate. The transaction rejects with
+`the cell event ended before its transaction could start`. Previously the
+leaked place made every later transaction on the object wait, holding the input
+gate, until the 30-second block limit reset the object. Plain reads waited too.
+
+Rollout: nodes can roll from 0.6.2-ewhauser.2. There is no storage-format or
+protocol change.
+
+## 0.6.2-ewhauser.4
+
+A peer call no longer hangs on a pooled tunnel whose network path died without
+a FIN or RST. A stateful firewall, NAT, or proxy can expire an idle flow this
+way. Previously such a call waited about 15 minutes for the kernel to abandon
+the socket, and each hung call left another dead tunnel in the pool.
+
+- A pooled peer tunnel idle for `CELLD_PEER_TUNNEL_IDLE_MS` (default 60000) is
+  closed instead of reused. Keep the value below the idle timeout of any
+  middlebox between nodes.
+- Each tunneled call waits for its reply at most the admission wait, the
+  handler budget, and `CELLD_OPERATION_DEADLINE_MS` added together. On expiry
+  celld closes the tunnel and fails the call as ambiguous. The call is not
+  replayed, because the owner may already have run it.
+
+Rollout: nodes can roll from 0.6.2-ewhauser.2 or .3. There is no storage-format
+or protocol change. The six native artifacts passed the release build and
+checksum verification, and the macOS binary reported this version.
