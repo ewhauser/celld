@@ -1467,6 +1467,10 @@ async fn dispatch_rpc_call(app: AppHandle, call: RpcCallReq) {
             );
             let expects_structured_response = matches!(args, celld::js::RpcData::V8(_));
             {
+                // A unary reply is complete only with its body, so one
+                // deadline bounds both. A path that dies silently would
+                // otherwise hold this call until the kernel gives up.
+                let deadline_ms = peer_tunnel::reply_deadline_ms();
                 let response = peer_tunnel::rpc(
                     &peer_tunnel::Peer {
                         http: &app.peer_http,
@@ -1474,6 +1478,7 @@ async fn dispatch_rpc_call(app: AppHandle, call: RpcCallReq) {
                         addr: &addr,
                         node: &node,
                     },
+                    deadline_ms,
                     &scope,
                     name.as_deref(),
                     &method,
@@ -1524,10 +1529,14 @@ async fn dispatch_rpc_call(app: AppHandle, call: RpcCallReq) {
                     "remote RPC failed with {}",
                     response.status()
                 );
-                let body = response
-                    .into_body()
-                    .collect()
+                let body = celld::asyncrt::timeout_at(deadline_ms, response.into_body().collect())
                     .await
+                    .map_err(|_| {
+                        anyhow::anyhow!(
+                            "remote RPC body: peer did not finish within {} ms",
+                            peer_tunnel::reply_budget_ms()
+                        )
+                    })?
                     .map_err(|error| anyhow::anyhow!("remote RPC body: {error}"))?
                     .to_bytes();
                 return Ok(if expects_structured_response {
