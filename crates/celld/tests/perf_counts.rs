@@ -54,7 +54,26 @@ impl Node {
     }
 
     /// A node with `env` set on top of a clean `CELLD_` environment.
+    ///
+    /// The port is free when it is picked but not held, and the tests here
+    /// run in parallel: another node's ephemeral listener can take it before
+    /// this one binds it. A node that lost its port is started again on a
+    /// new one.
     async fn start_with(env: &[(&str, &str)]) -> Node {
+        let mut attempts = 0;
+        loop {
+            match Self::try_start(env).await {
+                Ok(node) => return node,
+                Err(log) if attempts < 5 && log.contains("Address already in use") => {
+                    attempts += 1;
+                }
+                Err(log) => panic!("celld dev did not start:\n{log}"),
+            }
+        }
+    }
+
+    /// A started node, or the log of one that did not start.
+    async fn try_start(env: &[(&str, &str)]) -> Result<Node, String> {
         let dir = tempfile::tempdir().unwrap();
         for file in ["wrangler.json", "index.js"] {
             std::fs::copy(fixture().join(file), dir.path().join(file)).unwrap();
@@ -114,10 +133,10 @@ impl Node {
                 .await
                 .is_ok_and(|response| response.status().is_success());
             if ready && !node.internal.is_empty() {
-                return node;
+                return Ok(node);
             }
             if node.child.try_wait().unwrap().is_some() || Instant::now() >= deadline {
-                panic!("celld dev did not start:\n{}", node.log_text());
+                return Err(node.log_text());
             }
             tokio::time::sleep(Duration::from_millis(50)).await;
         }
