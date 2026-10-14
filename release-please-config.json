@@ -1,0 +1,29 @@
+{
+  "$schema": "https://raw.githubusercontent.com/googleapis/release-please/main/schemas/config.json",
+  "bootstrap-sha": "75ed745b8ea71bd0bde8c0b74b09ceae2f7dc87c",
+  "include-component-in-tag": false,
+  "skip-github-release": true,
+  "packages": {
+    ".": {
+      "release-type": "simple",
+      "package-name": "celld",
+      "changelog-path": "CHANGELOG.md",
+      "versioning": "prerelease",
+      "prerelease": true,
+      "bump-minor-pre-major": true,
+      "bump-patch-for-minor-pre-major": true,
+      "extra-files": [
+        {
+          "type": "toml",
+          "path": "crates/celld/Cargo.toml",
+          "jsonpath": "$.package.version"
+        },
+        {
+          "type": "toml",
+          "path": "Cargo.lock",
+          "jsonpath": "$.package[?(@.name.value=='celld')].version"
+        }
+      ]
+    }
+  }
+}

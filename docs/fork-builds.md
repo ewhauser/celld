@@ -30,7 +30,35 @@ After all native builds and the container smoke build pass, the workflow creates
 a draft prerelease with the same artifacts, `SHA256SUMS`, and build attestations.
 A release tag that already identifies a different commit is rejected.
 
-Run the candidate build from an exact reviewed branch or tag:
+### Cutting a release
+
+release-please keeps one release PR open against `main`. The PR bumps the
+version in `crates/celld/Cargo.toml` and `Cargo.lock` and adds a
+`CHANGELOG.md` entry. It is built from the Conventional Commit subjects merged
+since the last release. Merge feature PRs with squash, so the PR title becomes
+the commit subject. The `PR title` check requires the `type: summary` or
+`type(scope): summary` form.
+
+- `fix:`, `feat:`, `perf:`, and `revert:` start a release.
+- `docs:`, `test:`, `build:`, `ci:`, `chore:`, `refactor:`, and `style:` are
+  left out of the changelog.
+- Every release advances only the `-ewhauser.N` counter. The check rejects a
+  breaking-change marker (`!`), because release-please would leave the
+  `0.6.2` base. Describe a break in the PR body. A `BREAKING CHANGE:` footer
+  in a commit body has the same effect, so do not use one.
+- After a rebase onto a new upstream release, set the new base version, such
+  as `0.6.3-ewhauser.0`, in `.release-please-manifest.json`,
+  `crates/celld/Cargo.toml`, and `Cargo.lock`.
+
+Merging the release PR pushes its commit to the `candidate` branch and starts
+the release workflow. The workflow builds the draft prerelease, and its notes
+come from that version's `CHANGELOG.md` section. After you verify and publish
+the draft, the workflow marks the release PR `autorelease: tagged`, and
+release-please can then open the next one. Until you publish, no new release PR
+opens. If a candidate fails, delete the draft and merge the fix. Then push
+`main` to `candidate` and run the release workflow on `candidate` again.
+
+To run a candidate build by hand from an exact reviewed branch or tag:
 
 ```sh
 gh workflow run release.yml --repo ewhauser/celld --ref <reviewed-ref>
