@@ -562,6 +562,13 @@ route. The wait uses `CELLD_OPERATION_DEADLINE_MS` as its total bound (default
 start. It does not retry an ambiguous attempt because the handler can have
 completed without returning its response.
 
+A peer that does not answer within its reply bound is treated the same way.
+The bound is the admission wait, the handler budget, and
+`CELLD_OPERATION_DEADLINE_MS` added together, because the owner answers by
+then even when the handler runs out of budget. celld closes that tunnel and
+fails the call as ambiguous. A path that drops packets without a FIN or RST
+would otherwise hold the call until the kernel gives up on the socket.
+
 A marked stale-owner response to the outer peer tunnel proves that the
 application request did not start. celld can therefore refresh that route for
 an HTTP, an RPC, or a WebSocket request.
@@ -744,6 +751,7 @@ unset variable selects its default. A Boolean variable accepts only `0` or
 | `CELLD_DEPLOY_POLL_S` | The interval in seconds at which a node reads the deployment pointer and adopts a new deployment in place (default: 30) |
 | `CELLD_DEPLOY_MAX_AGE_S` | How long a resident Durable Object can keep the previous deployment's code after an adoption before celld forces the move (default: 60; 0 forces at once) |
 | `CELLD_OPERATION_DEADLINE_MS` | The deadline for a non-restore operation (default: 15000) |
+| `CELLD_PEER_TUNNEL_IDLE_MS` | How long an idle peer tunnel stays pooled for reuse before celld closes it (default: 60000). Keep it below the idle timeout of any stateful firewall, NAT, or proxy between nodes |
 | `CELLD_MAX_CELL_REQUESTS` | Concurrent fetch events for one Durable Object (default: 64) |
 | `CELLD_MAX_REQUEST_BODY_BYTES` | The body limit for a public Worker request or a direct Durable Object request (default: 1 GiB) |
 | `CELLD_MAX_RESIDENT_CELLS` | The hard limit for resident cells, enforced at admission |
