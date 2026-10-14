@@ -267,6 +267,7 @@ pub fn validate() -> anyhow::Result<()> {
         "CELLD_RECOVERY_RETRIES",
         "CELLD_MAX_STATELESS_ISOLATES",
         "CELLD_OPERATION_DEADLINE_MS",
+        "CELLD_PEER_TUNNEL_IDLE_MS",
         "CELLD_PLACEMENT_WEIGHT",
         "CELLD_RELEASES",
         "CELLD_TOKIO_THREADS",

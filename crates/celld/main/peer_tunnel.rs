@@ -328,28 +328,113 @@ pub(crate) struct Peer<'a> {
     pub(crate) node: &'a str,
 }
 
-/// Idle tunnels per (peer, kind). A sender goes back only after its response
-/// body reaches a clean end, so active replies do not consume the idle bound.
-/// A dropped or poisoned connection reports `is_closed` and is purged on scan.
-static TUNNELS: std::sync::OnceLock<std::sync::Mutex<HashMap<String, Vec<TunnelSender>>>> =
+/// The peer did not answer one tunneled call before its reply deadline. The
+/// request may have reached the owner and run, so the attempt is ambiguous:
+/// it is never replayed, and the tunnel that carried it is closed rather than
+/// pooled.
+#[derive(Debug)]
+pub(crate) struct TunnelReplyDeadline {
+    budget_ms: u64,
+}
+
+impl std::fmt::Display for TunnelReplyDeadline {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            formatter,
+            "peer did not answer within {} ms; the tunnel is presumed dead",
+            self.budget_ms
+        )
+    }
+}
+
+impl std::error::Error for TunnelReplyDeadline {}
+
+/// How long node A waits for one tunneled call to answer. The owner bounds
+/// the same call by its admission wait, its handler budget, and an operation
+/// deadline to settle, the same parts a Queue lease covers. A live owner has
+/// answered by then, with an error if the handler ran out of budget, so a
+/// call that reaches this bound is on a path that died without a FIN or RST.
+pub(crate) fn reply_budget_ms() -> u64 {
+    static BUDGET: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
+    *BUDGET.get_or_init(|| {
+        let ms = |duration: std::time::Duration| duration.as_millis().min(u64::MAX as u128) as u64;
+        ms(celld::engine_api::admission_wait())
+            .saturating_add(ms(celld::js::handler_budget()))
+            .saturating_add(
+                celld::actor::operation_deadline_ms()
+                    .expect("validated CELLD_OPERATION_DEADLINE_MS"),
+            )
+    })
+}
+
+/// The absolute reply deadline for a call that starts now.
+pub(crate) fn reply_deadline_ms() -> u64 {
+    celld::asyncrt::mono_ms().saturating_add(reply_budget_ms())
+}
+
+/// One idle tunnel and the monotonic time it went back into the pool.
+struct IdleTunnel {
+    sender: TunnelSender,
+    parked_ms: u64,
+}
+
+/// Idle tunnels per (peer, kind), oldest first. A sender goes back only after
+/// its response body reaches a clean end, so active replies do not consume
+/// the idle bound. A dropped or poisoned connection reports `is_closed` and
+/// is purged on scan, and so is one idle past `tunnel_idle_ms`.
+static TUNNELS: std::sync::OnceLock<std::sync::Mutex<HashMap<String, Vec<IdleTunnel>>>> =
     std::sync::OnceLock::new();
 /// Completed idle tunnels count against this bound. Active calls own their
 /// senders outside the pool, so concurrency cannot evict a reusable tunnel.
 const TUNNEL_POOL_CAP: usize = 64;
+const DEFAULT_TUNNEL_IDLE_MS: u64 = 60_000;
 
-fn checkout(key: &str) -> Option<TunnelSender> {
-    let mut pool = TUNNELS.get_or_init(Default::default).lock().unwrap();
-    let senders = pool.get_mut(key)?;
-    senders.retain(|sender| !sender.is_closed());
-    let index = senders.iter().position(TunnelSender::is_ready)?;
-    Some(senders.swap_remove(index))
+/// How long a tunnel may sit idle in the pool, `CELLD_PEER_TUNNEL_IDLE_MS`.
+///
+/// A stateful middlebox on the path (a conntrack-based policy enforcer, a
+/// NAT, a proxy's upstream socket) can expire an idle flow and then drop its
+/// packets in both directions. Neither end sees a FIN or RST, so the sender
+/// still reports ready, and TCP keepalive on this socket reaches only the
+/// first hop when a sidecar proxy sits in between. Only the pool can know
+/// how long the flow sat unused. The default stays well under the common
+/// 300-second idle timeouts.
+fn tunnel_idle_ms() -> u64 {
+    static LIMIT: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
+    *LIMIT.get_or_init(|| {
+        celld::env_vars::positive_or("CELLD_PEER_TUNNEL_IDLE_MS", DEFAULT_TUNNEL_IDLE_MS)
+            .expect("validated CELLD_PEER_TUNNEL_IDLE_MS")
+    })
 }
 
-fn park(key: &str, sender: TunnelSender) {
+/// Drop each closed tunnel and each one idle for `idle_limit_ms` or more.
+/// Dropping the last sender ends its connection task and closes the socket.
+fn retain_live(tunnels: &mut Vec<IdleTunnel>, now_ms: u64, idle_limit_ms: u64) {
+    tunnels.retain(|tunnel| {
+        !tunnel.sender.is_closed() && now_ms.saturating_sub(tunnel.parked_ms) < idle_limit_ms
+    });
+}
+
+fn checkout(key: &str, now_ms: u64, idle_limit_ms: u64) -> Option<TunnelSender> {
     let mut pool = TUNNELS.get_or_init(Default::default).lock().unwrap();
-    let senders = pool.entry(key.to_string()).or_default();
-    if senders.len() < TUNNEL_POOL_CAP {
-        senders.push(sender);
+    let tunnels = pool.get_mut(key)?;
+    retain_live(tunnels, now_ms, idle_limit_ms);
+    // Newest first. Reuse keeps one warm tunnel busy, and the surplus a burst
+    // parked ages out instead of staying alive through round-robin reuse.
+    let index = tunnels
+        .iter()
+        .rposition(|tunnel| tunnel.sender.is_ready())?;
+    Some(tunnels.remove(index).sender)
+}
+
+fn park(key: &str, sender: TunnelSender, now_ms: u64, idle_limit_ms: u64) {
+    let mut pool = TUNNELS.get_or_init(Default::default).lock().unwrap();
+    let tunnels = pool.entry(key.to_string()).or_default();
+    retain_live(tunnels, now_ms, idle_limit_ms);
+    if tunnels.len() < TUNNEL_POOL_CAP {
+        tunnels.push(IdleTunnel {
+            sender,
+            parked_ms: now_ms,
+        });
     }
 }
 
@@ -426,12 +511,34 @@ fn inner_request(
     Ok(inner.body(body)?)
 }
 
+/// Send one inner request and wait for its response head until
+/// `deadline_ms`. A path that dies silently never fails the send, so without
+/// the deadline the call waits for the kernel to abandon the socket, about 15
+/// minutes of retransmits. Expiry drops the tunnel with the attempt and fails
+/// with `TunnelReplyDeadline`, which the caller treats as ambiguous.
+async fn send_inner(
+    peer: &Peer<'_>,
+    kind: &'static str,
+    deadline_ms: u64,
+    build: impl Fn(TunnelBody) -> anyhow::Result<Request<TunnelBody>>,
+    body: celld::js::RequestBody,
+) -> anyhow::Result<Response<PooledResponseBody>> {
+    let started_ms = celld::asyncrt::mono_ms();
+    match celld::asyncrt::timeout_at(deadline_ms, send_pooled(peer, kind, build, body)).await {
+        Ok(result) => result,
+        Err(celld::asyncrt::Elapsed) => Err(TunnelReplyDeadline {
+            budget_ms: deadline_ms.saturating_sub(started_ms),
+        }
+        .into()),
+    }
+}
+
 /// Send one inner request, preferring a pooled tunnel. A pooled connection
 /// can die between checkout and use, so a replayable body retries once on a
 /// fresh tunnel — the same stale keep-alive race every h1 pool has. A
 /// streamed body is not replayable; its pooled failure surfaces as the
 /// attempt failure the caller already handles.
-async fn send_inner(
+async fn send_pooled(
     peer: &Peer<'_>,
     kind: &'static str,
     build: impl Fn(TunnelBody) -> anyhow::Result<Request<TunnelBody>>,
@@ -451,7 +558,7 @@ async fn send_inner(
         }
     };
     let mut body = Some(body);
-    if let Some(sender) = checkout(&key) {
+    if let Some(sender) = checkout(&key, celld::asyncrt::mono_ms(), tunnel_idle_ms()) {
         match send_on_tunnel(&key, sender, build(body.take().unwrap())?).await {
             Ok(response) => {
                 return Ok(response);
@@ -499,7 +606,7 @@ impl Body for PooledResponseBody {
         match std::pin::Pin::new(&mut self.body).poll_frame(cx) {
             std::task::Poll::Ready(None) => {
                 if let Some((key, sender)) = self.reusable.take() {
-                    park(&key, sender);
+                    park(&key, sender, celld::asyncrt::mono_ms(), tunnel_idle_ms());
                 }
                 std::task::Poll::Ready(None)
             }
@@ -534,6 +641,7 @@ pub(crate) async fn fetch(
     send_inner(
         peer,
         "do",
+        reply_deadline_ms(),
         |body| inner_request(control, &url, &method, &headers, body),
         body,
     )
@@ -607,9 +715,11 @@ async fn serve_rpc(upgraded: hyper::upgrade::Upgraded, app: AppHandle) {
         .await;
 }
 
-/// Node A: one RPC through the pooled rpc tunnel.
+/// Node A: one RPC through the pooled rpc tunnel. The caller owns
+/// `deadline_ms` so one bound covers the response head and the unary body.
 pub(crate) async fn rpc(
     peer: &Peer<'_>,
+    deadline_ms: u64,
     scope: &str,
     name: Option<&str>,
     method: &str,
@@ -622,6 +732,7 @@ pub(crate) async fn rpc(
     send_inner(
         peer,
         "rpc",
+        deadline_ms,
         |body| {
             let mut inner = Request::builder()
                 .method("POST")
@@ -777,4 +888,255 @@ pub(crate) fn response_stream(body: PooledResponseBody) -> HttpChunkStream {
 #[cfg(all(test, celld_internal_tests))]
 mod private_tests {
     include!(env!("CELLD_CONFORMANCE_PEER_TUNNEL_TESTS"));
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::atomic::AtomicU64;
+    use std::sync::atomic::Ordering;
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    use tokio::io::AsyncReadExt;
+    use tokio::io::AsyncWriteExt;
+
+    use super::*;
+
+    /// `asyncrt` reads its clock from a process domain that `main` installs.
+    fn install_domain() {
+        static RUNTIME: std::sync::OnceLock<tokio::runtime::Runtime> = std::sync::OnceLock::new();
+        RUNTIME.get_or_init(|| {
+            let runtime = tokio::runtime::Builder::new_multi_thread()
+                .worker_threads(1)
+                .enable_all()
+                .build()
+                .unwrap();
+            celld::asyncrt::set_host_handle(runtime.handle().clone());
+            runtime
+        });
+    }
+
+    /// A ready sender over an in-memory stream, and the stream's far end.
+    async fn idle_sender() -> (TunnelSender, tokio::io::DuplexStream) {
+        let (near, far) = tokio::io::duplex(4096);
+        let (mut sender, connection) = hyper::client::conn::http1::Builder::new()
+            .handshake(TokioIo::new(near))
+            .await
+            .unwrap();
+        tokio::spawn(connection);
+        sender.ready().await.unwrap();
+        (sender, far)
+    }
+
+    async fn closed(far: &mut tokio::io::DuplexStream) -> bool {
+        let mut byte = [0u8; 1];
+        matches!(
+            tokio::time::timeout(Duration::from_secs(5), far.read(&mut byte)).await,
+            Ok(Ok(0))
+        )
+    }
+
+    #[tokio::test]
+    async fn checkout_closes_tunnels_idle_past_the_limit() {
+        let key = "checkout-idle#rpc";
+        let (stale, mut stale_far) = idle_sender().await;
+        let (fresh, mut fresh_far) = idle_sender().await;
+        park(key, stale, 0, 1_000);
+        park(key, fresh, 500, 1_000);
+
+        let reused = checkout(key, 1_200, 1_000).expect("the fresh tunnel is reusable");
+        assert!(
+            closed(&mut stale_far).await,
+            "the tunnel idle for 1200 ms is closed, not reused or leaked"
+        );
+        assert!(checkout(key, 1_200, 1_000).is_none());
+
+        // The checked-out sender is the fresh tunnel: dropping it closes the
+        // fresh stream.
+        drop(reused);
+        assert!(closed(&mut fresh_far).await);
+    }
+
+    #[tokio::test]
+    async fn checkout_prefers_the_newest_tunnel() {
+        let key = "checkout-newest#rpc";
+        let (older, mut older_far) = idle_sender().await;
+        let (newer, mut newer_far) = idle_sender().await;
+        park(key, older, 0, 60_000);
+        park(key, newer, 10, 60_000);
+
+        drop(checkout(key, 20, 60_000).unwrap());
+        assert!(
+            closed(&mut newer_far).await,
+            "the newest tunnel serves first"
+        );
+        drop(checkout(key, 20, 60_000).unwrap());
+        assert!(closed(&mut older_far).await);
+    }
+
+    /// A TCP relay that can turn every connection it holds into a black hole:
+    /// both sockets stay open and every byte in either direction is dropped,
+    /// like a middlebox that expired the flow. Later connections pass.
+    struct Relay {
+        addr: String,
+        accepted: Arc<AtomicU64>,
+        holed_below: Arc<AtomicU64>,
+    }
+
+    impl Relay {
+        async fn start(upstream: std::net::SocketAddr) -> Relay {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let addr = listener.local_addr().unwrap().to_string();
+            let accepted = Arc::new(AtomicU64::new(0));
+            let holed_below = Arc::new(AtomicU64::new(0));
+            let relay = Relay {
+                addr,
+                accepted: accepted.clone(),
+                holed_below: holed_below.clone(),
+            };
+            tokio::spawn(async move {
+                loop {
+                    let (client, _) = listener.accept().await.unwrap();
+                    let index = accepted.fetch_add(1, Ordering::SeqCst);
+                    let server = tokio::net::TcpStream::connect(upstream).await.unwrap();
+                    let (client_read, client_write) = client.into_split();
+                    let (server_read, server_write) = server.into_split();
+                    tokio::spawn(Self::pump(
+                        client_read,
+                        server_write,
+                        index,
+                        holed_below.clone(),
+                    ));
+                    tokio::spawn(Self::pump(
+                        server_read,
+                        client_write,
+                        index,
+                        holed_below.clone(),
+                    ));
+                }
+            });
+            relay
+        }
+
+        async fn pump(
+            mut from: tokio::net::tcp::OwnedReadHalf,
+            mut to: tokio::net::tcp::OwnedWriteHalf,
+            index: u64,
+            holed_below: Arc<AtomicU64>,
+        ) {
+            let mut buffer = [0u8; 8192];
+            loop {
+                let read = match from.read(&mut buffer).await {
+                    Ok(0) | Err(_) => return,
+                    Ok(read) => read,
+                };
+                if index < holed_below.load(Ordering::SeqCst) {
+                    continue;
+                }
+                if to.write_all(&buffer[..read]).await.is_err() {
+                    return;
+                }
+            }
+        }
+
+        fn black_hole_existing(&self) {
+            self.holed_below
+                .store(self.accepted.load(Ordering::SeqCst), Ordering::SeqCst);
+        }
+
+        fn connections(&self) -> u64 {
+            self.accepted.load(Ordering::SeqCst)
+        }
+    }
+
+    /// The owner side of `/peer/tunnel`, without an app: it upgrades and
+    /// answers every inner request with `ok`.
+    async fn owner() -> std::net::SocketAddr {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            loop {
+                let (stream, _) = listener.accept().await.unwrap();
+                tokio::spawn(async move {
+                    let service = service_fn(|mut request: Request<Incoming>| async move {
+                        let upgrade = hyper::upgrade::on(&mut request);
+                        tokio::spawn(async move {
+                            let Ok(upgraded) = upgrade.await else {
+                                return;
+                            };
+                            let inner = service_fn(|_: Request<Incoming>| async {
+                                Ok::<_, Infallible>(peer_response(response(StatusCode::OK, "ok")))
+                            });
+                            let _ = hyper::server::conn::http1::Builder::new()
+                                .serve_connection(upgraded, inner)
+                                .await;
+                        });
+                        let mut reply = response(StatusCode::SWITCHING_PROTOCOLS, "");
+                        reply.headers_mut().insert(
+                            hyper::header::UPGRADE,
+                            hyper::header::HeaderValue::from_static(TUNNEL_PROTOCOL),
+                        );
+                        reply.headers_mut().insert(
+                            hyper::header::CONNECTION,
+                            hyper::header::HeaderValue::from_static("upgrade"),
+                        );
+                        Ok::<_, Infallible>(peer_response(reply))
+                    });
+                    let _ = hyper::server::conn::http1::Builder::new()
+                        .serve_connection(TokioIo::new(stream), service)
+                        .with_upgrades()
+                        .await;
+                });
+            }
+        });
+        addr
+    }
+
+    async fn call(peer: &Peer<'_>, budget_ms: u64) -> anyhow::Result<Bytes> {
+        let deadline_ms = celld::asyncrt::mono_ms() + budget_ms;
+        let args = celld::js::RpcData::Json("[]".to_string());
+        let response = rpc(peer, deadline_ms, "scope", None, "ping", &args).await?;
+        Ok(response.into_body().collect().await?.to_bytes())
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_silently_dead_pooled_tunnel_fails_by_its_deadline_and_is_not_reused() {
+        install_domain();
+        let relay = Relay::start(owner().await).await;
+        let http = reqwest::Client::new();
+        let auth = PeerAuth::new([7; 32], "node-a").unwrap();
+        let peer = Peer {
+            http: &http,
+            auth: &auth,
+            addr: &relay.addr,
+            node: "node-b",
+        };
+
+        assert_eq!(call(&peer, 10_000).await.unwrap(), "ok");
+        assert_eq!(relay.connections(), 1, "the first call parks its tunnel");
+
+        // The pooled tunnel's path dies with no FIN or RST. The sender still
+        // reports ready, so the next call takes it.
+        relay.black_hole_existing();
+        let started = std::time::Instant::now();
+        let error = call(&peer, 500).await.unwrap_err();
+        assert!(
+            error.downcast_ref::<TunnelReplyDeadline>().is_some(),
+            "a dead tunnel fails by its deadline: {error:#}"
+        );
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "the dead tunnel held the call for {:?}",
+            started.elapsed()
+        );
+        assert_eq!(
+            relay.connections(),
+            1,
+            "an ambiguous attempt is not replayed on a fresh tunnel"
+        );
+
+        // The dead tunnel went down with the attempt, so the next call dials.
+        assert_eq!(call(&peer, 10_000).await.unwrap(), "ok");
+        assert_eq!(relay.connections(), 2);
+    }
 }
