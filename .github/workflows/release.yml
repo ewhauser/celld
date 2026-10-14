@@ -240,19 +240,29 @@ jobs:
           if [ "$existing" = "true" ]; then
             gh release delete "$tag" --yes
           fi
-          # The release body is the release commit's message: subject
-          # dropped (it is the title), trailers stripped, hard wraps
-          # unfolded so paragraphs and bullets render without awkward
-          # line breaks.
-          git log -1 --format=%b "$GITHUB_SHA" |
-            sed '/^[A-Za-z-]*-by:/d' |
-            awk '
-              /^$/  { if (buf != "") print buf; buf = ""; print; next }
-              /^- / { if (buf != "") print buf; buf = $0; next }
-                    { sub(/^[ \t]+/, "")
-                      buf = (buf == "" ? $0 : buf " " $0) }
-              END   { if (buf != "") print buf }
-            ' | cat -s > /tmp/notes.md
+          # The release body is this version's CHANGELOG.md section, which
+          # release-please writes. Without one it is the release commit's
+          # message: subject dropped (it is the title), trailers stripped,
+          # hard wraps unfolded so paragraphs and bullets render without
+          # awkward line breaks.
+          : > /tmp/notes.md
+          if [ -f CHANGELOG.md ]; then
+            awk -v heading="## [$version]" '
+              /^## / { if (found) exit; found = index($0, heading) == 1; next }
+              found  { print }
+            ' CHANGELOG.md | sed '/./,$!d' | cat -s > /tmp/notes.md
+          fi
+          if [ ! -s /tmp/notes.md ]; then
+            git log -1 --format=%b "$GITHUB_SHA" |
+              sed '/^[A-Za-z-]*-by:/d' |
+              awk '
+                /^$/  { if (buf != "") print buf; buf = ""; print; next }
+                /^- / { if (buf != "") print buf; buf = $0; next }
+                      { sub(/^[ \t]+/, "")
+                        buf = (buf == "" ? $0 : buf " " $0) }
+                END   { if (buf != "") print buf }
+              ' | cat -s > /tmp/notes.md
+          fi
           prerelease=()
           if [[ "$version" == *-* ]]; then
             prerelease=(--prerelease)
@@ -420,3 +430,35 @@ jobs:
           set -euo pipefail
           docker logout ghcr.io
           docker buildx imagetools inspect "$IMAGE:sha-$TAG_SHA$VARIANT_SUFFIX"
+
+  mark-release-pr:
+    # release-please skips tagging here (skip-github-release), so it cannot
+    # see that its merged release PR shipped. Until the PR leaves
+    # `autorelease: pending`, release-please refuses to open the next one.
+    name: Mark the release PR tagged
+    if: github.event_name == 'release'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      actions: write
+      issues: write
+      pull-requests: write
+    steps:
+      - name: Swap the pending label and refresh the release PR
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+        run: |
+          set -euo pipefail
+          version=${RELEASE_TAG#v}
+          gh label create "autorelease: tagged" --color ededed --force
+          prs=$(gh pr list --state merged --label "autorelease: pending" \
+            --json number,title \
+            --jq ".[] | select(.title | endswith(\" $version\")) | .number")
+          for pr in $prs; do
+            gh pr edit "$pr" --remove-label "autorelease: pending" \
+              --add-label "autorelease: tagged"
+            echo "Marked #$pr tagged for $RELEASE_TAG." >> "$GITHUB_STEP_SUMMARY"
+          done
+          gh workflow run release-please.yml --ref main
