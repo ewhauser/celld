@@ -246,13 +246,22 @@ mod client {
         }
         sink.close().await;
 
+        // Read every partition from its start by assignment, not as a group
+        // member: a group's first join can wait out the whole deadline on a
+        // fresh broker while it creates its offsets topic.
         let consumer: BaseConsumer = rdkafka::ClientConfig::new()
             .set("bootstrap.servers", &brokers)
             .set("group.id", format!("{topic}-check"))
-            .set("auto.offset.reset", "earliest")
+            .set("enable.auto.commit", "false")
             .create()
             .unwrap();
-        consumer.subscribe(&[&topic]).unwrap();
+        let mut partitions = rdkafka::TopicPartitionList::new();
+        for partition in 0..TEST_PARTITIONS {
+            partitions
+                .add_partition_offset(&topic, partition, rdkafka::Offset::Beginning)
+                .unwrap();
+        }
+        consumer.assign(&partitions).unwrap();
         let read = tokio::task::spawn_blocking(move || {
             let mut read = Vec::new();
             let deadline = std::time::Instant::now() + Duration::from_secs(60);
@@ -389,6 +398,9 @@ mod client {
         assert!(reason.contains("delivery"), "{reason}");
     }
 
+    /// The partitions of a topic `create_topic` makes.
+    const TEST_PARTITIONS: i32 = 3;
+
     async fn create_topic(brokers: &str, topic: &str) {
         create_topic_with(brokers, topic, &[]).await
     }
@@ -404,7 +416,7 @@ mod client {
             .set("bootstrap.servers", brokers)
             .create()
             .unwrap();
-        let mut new = NewTopic::new(topic, 3, TopicReplication::Fixed(1));
+        let mut new = NewTopic::new(topic, TEST_PARTITIONS, TopicReplication::Fixed(1));
         for (name, value) in configs {
             new = new.set(name, value);
         }
