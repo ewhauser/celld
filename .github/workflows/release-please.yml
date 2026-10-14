@@ -1,0 +1,86 @@
+name: Release Please
+
+# release-please keeps one release PR open against main. It bumps
+# crates/celld/Cargo.toml, Cargo.lock and CHANGELOG.md from the Conventional
+# Commit subjects merged since the last release; only fix, feat, perf and
+# revert commits start one. Every bump advances the -ewhauser.N counter. The
+# upstream base version changes only by hand, on a rebase onto a new upstream
+# release (edit .release-please-manifest.json with it).
+#
+# release-please never tags or creates a GitHub release here. Merging the
+# release PR pushes that commit to `candidate` and starts release.yml, which
+# builds the draft prerelease for a human to verify and publish. Publishing
+# creates the tag, and release.yml then marks the release PR tagged so
+# release-please can open the next one. Until then the merged PR stays
+# `autorelease: pending` and no new release PR opens.
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-please
+  cancel-in-progress: false
+
+jobs:
+  release-pr:
+    name: Update the release PR
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: write
+      pull-requests: write
+      issues: write
+    steps:
+      # The default token opens a PR only when the repository lets Actions
+      # create pull requests, and CI does not run on a PR it opens. A
+      # RELEASE_PLEASE_TOKEN secret (a fine-grained token with contents and
+      # pull requests write on this repository) avoids both.
+      - uses: googleapis/release-please-action@v5
+        with:
+          token: ${{ secrets.RELEASE_PLEASE_TOKEN || github.token }}
+          config-file: release-please-config.json
+          manifest-file: .release-please-manifest.json
+
+  candidate:
+    name: Start the candidate build
+    if: github.event_name == 'push'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: write
+      actions: write
+      pull-requests: read
+    steps:
+      - name: Find a merged release PR in this push
+        id: release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          pr=$(gh api "repos/$GITHUB_REPOSITORY/commits/$GITHUB_SHA/pulls" --jq '
+            [.[] | select(.merged_at != null)
+                 | select(any(.labels[]; .name == "autorelease: pending"))
+                 | .number] | first // empty')
+          echo "pr=$pr" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/checkout@v6
+        if: steps.release.outputs.pr != ''
+
+      # A push made with the default token starts no workflow, so the
+      # candidate build is dispatched explicitly, exactly once.
+      - name: Push the release commit to candidate
+        if: steps.release.outputs.pr != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_PR: ${{ steps.release.outputs.pr }}
+        run: |
+          set -euo pipefail
+          git push --force origin "HEAD:refs/heads/candidate"
+          gh workflow run release.yml --ref candidate
+          version=$(sed -n 's/^version = "\(.*\)"$/\1/p' crates/celld/Cargo.toml | head -1)
+          echo "Started the v$version candidate build from #$RELEASE_PR." >> "$GITHUB_STEP_SUMMARY"
