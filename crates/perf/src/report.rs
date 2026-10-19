@@ -194,8 +194,37 @@ pub fn summary(result: &Value) -> String {
 enum Kind {
     /// Wall-clock or throughput: needs repeats to call significant.
     Timing { higher_is_better: bool },
-    /// A count per successful request: machine-independent.
+    /// A count per successful request. Some phases make this load-dependent.
     Count,
+}
+
+/// Aggregate counts are not deterministic when failures change the denominator,
+/// faults change the work performed, or concurrent writes share bucket uploads.
+/// Use recorded evidence from either side, including older result files.
+fn count_variability(phase: &Value, bucket: bool) -> Option<&'static str> {
+    if phase["errors"]
+        .as_object()
+        .is_some_and(|errors| errors.values().any(|n| n.as_u64().unwrap_or(0) > 0))
+        || phase["shed"].as_u64().unwrap_or(0) > 0
+        || phase["abandoned"].as_u64().unwrap_or(0) > 0
+    {
+        return Some("unsuccessful requests");
+    }
+    if phase["during"]
+        .as_array()
+        .is_some_and(|steps| !steps.is_empty())
+    {
+        return Some("mid-phase actions");
+    }
+    if bucket
+        && phase["server"]["histograms"]["durability.proof_bucket_us"]["count"]
+            .as_u64()
+            .unwrap_or(0)
+            > 0
+    {
+        return Some("bucket proof batching");
+    }
+    None
 }
 
 fn metrics(phase: &Value) -> Vec<(&'static str, Kind, Option<f64>)> {
@@ -259,7 +288,11 @@ fn bootstrap(base: &[f64], new: &[f64]) -> (f64, f64) {
             let base = resample(base, &mut rng);
             let new = resample(new, &mut rng);
             if base == 0.0 {
-                0.0
+                if new == 0.0 {
+                    0.0
+                } else {
+                    f64::INFINITY
+                }
             } else {
                 (new - base) / base
             }
@@ -269,10 +302,9 @@ fn bootstrap(base: &[f64], new: &[f64]) -> (f64, f64) {
     (changes[50], changes[1949])
 }
 
-/// Compare two result files. A count regression, or a timing regression
-/// whose 95% interval clears `threshold` in the bad direction, fails the
-/// comparison when `gate_timings` is true. A single-run timing change past
-/// the threshold is only a warning.
+/// Deterministic count regressions always fail. Timing and load-dependent count
+/// regressions need three repeats and a 95% interval beyond `threshold`, and
+/// only fail when `gate_timings` is true.
 pub fn compare(base: &Value, new: &Value, threshold: f64, gate_timings: bool) -> (String, bool) {
     let collect = |result: &Value| {
         let mut phases: BTreeMap<(String, String), Vec<Value>> = BTreeMap::new();
@@ -329,12 +361,37 @@ pub fn compare(base: &Value, new: &Value, threshold: f64, gate_timings: bool) ->
             };
             let verdict = match kind {
                 Kind::Count => {
-                    // Background requests (leases, capacity samples) add a
-                    // little noise to a per-request count; a real change to
-                    // a hot path moves it by far more.
+                    let variability = base_phases.iter().chain(new_phases).find_map(|phase| {
+                        count_variability(phase, name == "bucket requests per ok")
+                    });
+                    // Keep the absolute noise floor for background work.
                     if new_mean - base_mean > 0.05 && change > threshold {
-                        regressed = true;
-                        "REGRESSION (count)".to_string()
+                        if let Some(reason) = variability {
+                            if !gate_timings {
+                                format!("count increase (load-dependent: {reason}; informational)")
+                            } else if base_values.len() < 3 || new_values.len() < 3 {
+                                format!(
+                                    "possible count regression ({reason}; too few repeats to call)"
+                                )
+                            } else {
+                                let (low, high) = bootstrap(&base_values, &new_values);
+                                let significant = low > threshold;
+                                regressed |= significant;
+                                format!(
+                                    "{} (load-dependent: {reason}; 95% CI {:+.1}%..{:+.1}%)",
+                                    if significant {
+                                        "REGRESSION (count)"
+                                    } else {
+                                        "count increase"
+                                    },
+                                    low * 100.0,
+                                    high * 100.0,
+                                )
+                            }
+                        } else {
+                            regressed = true;
+                            "REGRESSION (count)".to_string()
+                        }
                     } else if base_mean - new_mean > 0.05 && -change > threshold {
                         "improved (count)".to_string()
                     } else {
@@ -458,5 +515,82 @@ mod tests {
         );
         assert!(!regressed, "{text}");
         assert!(text.contains("informational"), "{text}");
+    }
+
+    #[test]
+    fn overload_does_not_turn_unchanged_work_into_a_deterministic_regression() {
+        let base = result(&[1000.0; 3], 0.0);
+        let mut new = base.clone();
+        for run in new["runs"].as_array_mut().unwrap() {
+            // The same 3,000 core messages, but fewer successful requests.
+            run["phases"][0]["ok"] = json!(500);
+            run["phases"][0]["errors"] = json!({"http_503": 500});
+        }
+        let (text, regressed) = compare(&base, &new, 0.05, false);
+        assert!(!regressed, "{text}");
+        assert!(
+            text.contains("unsuccessful requests; informational"),
+            "{text}"
+        );
+        let (_, regressed) = compare(&base, &new, 0.05, true);
+        assert!(
+            regressed,
+            "a dedicated runner still gates repeatable changes"
+        );
+    }
+
+    #[test]
+    fn fault_counts_need_repeats_on_a_dedicated_runner() {
+        let base = result(&[1000.0], 1.0);
+        let mut new = result(&[1000.0], 2.0);
+        new["runs"][0]["phases"][0]["during"] = json!([{"step": "signal"}]);
+        let (text, regressed) = compare(&base, &new, 0.05, true);
+        assert!(!regressed, "{text}");
+        assert!(
+            text.contains("mid-phase actions; too few repeats"),
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn bucket_batching_does_not_disable_stable_core_count_gates() {
+        let base = result(&[1000.0; 3], 1.0);
+        let mut new = result(&[1000.0; 3], 2.0);
+        for run in new["runs"].as_array_mut().unwrap() {
+            run["phases"][0]["server"]["histograms"] =
+                json!({"durability.proof_bucket_us": {"count": 1000}});
+        }
+        let (text, regressed) = compare(&base, &new, 0.05, false);
+        assert!(!regressed, "{text}");
+        assert!(
+            text.contains("bucket proof batching; informational"),
+            "{text}"
+        );
+        assert!(compare(&base, &new, 0.05, true).1);
+        for run in new["runs"].as_array_mut().unwrap() {
+            run["phases"][0]["server"]["counters"]["core.messages"] = json!(4000);
+        }
+        assert!(compare(&base, &new, 0.05, false).1);
+    }
+
+    #[test]
+    fn variability_on_the_baseline_side_also_matters() {
+        for field in ["shed", "abandoned"] {
+            let mut base = result(&[1000.0; 3], 1.0);
+            base["runs"][0]["phases"][0][field] = json!(1);
+            let (text, regressed) = compare(&base, &result(&[1000.0; 3], 2.0), 0.05, false);
+            assert!(!regressed, "{text}");
+        }
+    }
+
+    #[test]
+    fn a_repeatable_load_dependent_increase_from_zero_still_gates() {
+        let base = result(&[1000.0; 3], 0.0);
+        let mut new = result(&[1000.0; 3], 1.0);
+        for run in new["runs"].as_array_mut().unwrap() {
+            run["phases"][0]["during"] = json!([{"step": "net"}]);
+        }
+        assert!(compare(&base, &new, 0.05, true).1);
+        assert!(!compare(&base, &new, 0.05, false).1);
     }
 }

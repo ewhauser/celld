@@ -8,7 +8,8 @@ name: Performance
 # Set the repository variable PERF_RUNNER to a JSON runner label list, e.g.
 # ["self-hosted","perf"], to run on a dedicated machine (fixed CPU
 # frequency, nothing else running). Without it the job runs on a GitHub
-# runner: counts and failures stay meaningful, timings do not.
+# runner: explicit count checks and failures gate; timing and load-dependent
+# aggregate count changes are informational.
 on:
   schedule:
     # Nightly: the single-node scenarios and the fleet core.
@@ -184,7 +185,8 @@ jobs:
           : > compare.txt
           # Timings from shared GitHub runners vary between otherwise
           # identical builds. Keep reporting them, but gate only on a
-          # dedicated runner. Count regressions still fail either way.
+          # dedicated runner. Load-dependent aggregate counts follow the
+          # same policy; deterministic counts still fail either way.
           compare_options=()
           if [[ "${RUNNER_ENVIRONMENT:-}" != self-hosted ]]; then
             compare_options=(--informational-timings)
