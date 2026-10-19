@@ -54,9 +54,10 @@ RUN OPTIONS:
   --keep              Keep each run's working directory
 
 A run exits 1 when a count check or the verification sweep fails.
-compare exits 1 on a count regression, or a timing regression that is
-significant across at least three repeats on each side. With
---informational-timings, timing changes are reported but do not fail.
+compare exits 1 on a deterministic count regression, or a timing or
+load-dependent count regression significant across at least three repeats
+on each side. With --informational-timings, timing and load-dependent count
+changes are reported but do not fail. Explicit scenario checks still gate.
 ";
 
 fn main() -> anyhow::Result<()> {

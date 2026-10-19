@@ -410,6 +410,18 @@ change:
   needs at least three repeats on each side. With fewer, a large change is
   only reported as possible.
 
+Aggregate counts per successful request are load-dependent when either
+side records errors, shed or abandoned requests, or actions during the
+phase. Bucket request counts are also load-dependent when bucket durability
+proofs are recorded: concurrent writes can share uploads. These comparisons
+need three repeats and a 95% interval beyond the threshold to fail, and
+`--informational-timings` reports them without failing. For example, a
+saturated cell can process the same number of core messages but return more
+503 responses, increasing messages per successful request without adding
+work per attempt. The report identifies why a count is load-dependent.
+Explicit scenario checks and the verification sweep remain hard gates;
+this policy only affects comparisons between result files.
+
 ## CI and cadence
 
 | When | Where | What | Gate |
@@ -421,9 +433,10 @@ change:
 `perf.yml` runs on a GitHub runner unless the repository variable
 `PERF_RUNNER` names a dedicated one, for example
 `["self-hosted","perf"]`. A shared runner's counts and failures are sound,
-but its timings are too noisy to gate regressions. The scheduled workflow
-uses `--informational-timings` on GitHub-hosted runners: timing changes stay
-in the comparison report, while count regressions still fail. Shared runners stop a job after
+but its timings and load-dependent aggregate counts are too noisy to gate
+regressions. The scheduled workflow uses `--informational-timings` on
+GitHub-hosted runners: those changes stay in the comparison report, while
+deterministic count regressions still fail. Shared runners stop a job after
 six hours, which is before the soak ends. For a dedicated machine, use
 Linux on bare metal: a fixed CPU frequency, SMT and turbo off if you can,
 local NVMe, and nothing else running.
