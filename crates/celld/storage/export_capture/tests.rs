@@ -1983,6 +1983,25 @@ mod on_the_cell_connection {
         assert_eq!(commits.len(), 1);
         assert_eq!(table(&commits[0], "u").rows.len(), 1);
     }
+
+    /// An evicted cell's unfinished `RETURNING` cursor commits when close
+    /// resets it, and that commit is pulled before the session goes.
+    #[test]
+    fn close_pulls_the_write_of_an_unfinished_returning_cursor() {
+        let _cell = open(Some(settings()));
+        create("CREATE TABLE u (id INTEGER PRIMARY KEY, v TEXT)");
+        let (_, _, first, _, done) = storage::sql_cursor_start(
+            CELL,
+            "INSERT INTO u VALUES (1, 'a'), (2, 'b') RETURNING id",
+            &[],
+        )
+        .unwrap();
+        assert!(first.is_some() && !done);
+        storage::close(CELL);
+        let commits = take();
+        assert_eq!(commits.len(), 1);
+        assert_eq!(table(&commits[0], "u").rows.len(), 2);
+    }
 }
 
 #[test]
