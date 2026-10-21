@@ -211,11 +211,21 @@ pub fn parse_properties(text: &str) -> anyhow::Result<Vec<(String, String)>> {
             bail!("line {}: a property needs a name", number + 1);
         }
         // Acknowledged must mean durable, or the delivered position certifies
-        // records a broker failure can still lose.
-        if name == "acks" && !matches!(value, "all" | "-1") {
+        // records a broker failure can still lose. `acks` is librdkafka's
+        // alias for `request.required.acks`, so both names are held to it.
+        if matches!(name, "acks" | "request.required.acks") && !matches!(value, "all" | "-1") {
             bail!(
-                "line {}: acks must stay all; the export counts a record delivered only \
+                "line {}: {name} must stay all; the export counts a record delivered only \
                  once every in-sync replica has it",
+                number + 1
+            );
+        }
+        // Without idempotence a retry can duplicate or reorder records within
+        // a partition, and librdkafka would accept a weaker acks again.
+        if name == "enable.idempotence" && value != "true" {
+            bail!(
+                "line {}: enable.idempotence must stay true; retries may neither \
+                 duplicate nor reorder a stream's records",
                 number + 1
             );
         }
