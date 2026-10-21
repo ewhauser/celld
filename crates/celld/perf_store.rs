@@ -58,9 +58,13 @@ struct CountedStore {
     inner: Arc<dyn ObjectStore>,
 }
 
+/// The inner store's name, unchanged: the LTX client picks its paged-read
+/// path by the backend's name (`AmazonS3(..)` reads by signed requests of its
+/// own), so a counter that renamed the store would quietly move every S3
+/// page fault onto the slower path through the store.
 impl std::fmt::Display for CountedStore {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "Counted({})", self.inner)
+        std::fmt::Display::fmt(&self.inner, f)
     }
 }
 
@@ -410,5 +414,24 @@ impl PaginatedListStore for CountedPaginated {
             |_| 0,
         )
         .await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_counted_store_keeps_its_backend_name() {
+        let s3: Arc<dyn ObjectStore> = Arc::new(
+            object_store::aws::AmazonS3Builder::new()
+                .with_bucket_name("bucket")
+                .with_region("us-east-1")
+                .build()
+                .unwrap(),
+        );
+        let name = s3.to_string();
+        assert!(name.starts_with("AmazonS3"), "{name}");
+        assert_eq!(wrap(s3).to_string(), name);
     }
 }
