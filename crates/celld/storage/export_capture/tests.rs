@@ -1890,6 +1890,48 @@ mod on_the_cell_connection {
         );
     }
 
+    /// Whether drop hints are kept is the cells' business, not the thread
+    /// that turned capture on: a turn runs on whichever worker thread
+    /// enters the isolate.
+    #[test]
+    fn a_recreate_on_another_thread_is_a_new_generation() {
+        struct Moved(Box<storage::Cells>);
+        // SAFETY: the cells hold nothing yet, and one thread at a time has them.
+        unsafe impl Send for Moved {}
+        let cells = Box::new(storage::Cells::default());
+        cells.set_export_capture(Some(settings()));
+        let moved = Moved(cells);
+        std::thread::spawn(move || {
+            let Moved(cells) = moved;
+            let installed = Some(cells.install());
+            storage::open(CELL, ":memory:").unwrap();
+            let _cell = Opened { cells, installed };
+            create("CREATE TABLE plain (v INTEGER, w TEXT)");
+            exec("INSERT INTO plain VALUES (1, 'x')");
+            storage::export_checkpoint();
+            assert_eq!(take().len(), 1);
+            // Dropped and recreated with the same definition between two
+            // check points: only the drop hint tells.
+            exec(
+                "DROP TABLE plain;
+                 CREATE TABLE plain (v INTEGER, w TEXT);
+                 INSERT INTO plain VALUES (2, 'y');",
+            );
+            storage::export_checkpoint();
+            let commits = take();
+            assert_eq!(commits.len(), 1);
+            assert_eq!(
+                schema(&commits[0], "plain").generation,
+                FIRST_GENERATION + 1
+            );
+            let plain = snapshotted(&commits[0], "plain");
+            assert_eq!(plain.rows.len(), 1);
+            assert_eq!(plain.rows[0].row(), [int(2), text("y")]);
+        })
+        .join()
+        .unwrap();
+    }
+
     #[test]
     fn engine_control_tables_are_not_captured() {
         let _cell = open(Some(settings()));

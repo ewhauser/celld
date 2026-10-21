@@ -83,6 +83,16 @@ pub struct Cells {
     export_events: RefCell<HashMap<String, Vec<export_capture::CaptureEvent>>>,
     /// The script of the isolate's deployment, named in export records.
     export_script: RefCell<String>,
+    /// Exported tables a `DROP TABLE` or `ALTER TABLE` was prepared or run
+    /// for since the last check point. A table dropped, or renamed away, and
+    /// another created under its name with the same definition between two
+    /// safe points leaves `sqlite_schema` looking unchanged. Capture compares
+    /// the schema for what changed and takes these only as a hint that a
+    /// table which looks unchanged is new. The authorizer has no cell scope,
+    /// so each check point hands them to every capture of these cells. They
+    /// live with the cells, not the thread: a turn runs on whichever worker
+    /// thread enters the isolate.
+    drop_hints: RefCell<Vec<String>>,
 }
 
 /// The database and the ownership epoch that authorized its activation.
@@ -257,9 +267,6 @@ impl Cells {
     /// Capture row changes on every cell opened from now on, for change
     /// export. Off by default.
     pub(crate) fn set_export_capture(&self, settings: Option<export_capture::Settings>) {
-        if settings.is_some() {
-            DROP_HINTS_WANTED.with(|wanted| wanted.set(true));
-        }
         self.export_capture.set(settings);
     }
 
@@ -564,24 +571,19 @@ thread_local! {
     /// authorizer otherwise denies; toggling the authorizer off instead would
     /// expire every cached statement on each pull.
     static CAPTURE_PULL: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
-    /// Set on a thread whose cells change export captures. Only then is
-    /// `DROP_HINTS` collected.
-    static DROP_HINTS_WANTED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
-    /// Exported tables a `DROP TABLE` or `ALTER TABLE` was prepared or run
-    /// for since the last check point. A table dropped, or renamed away, and
-    /// another created under its name with the same definition between two
-    /// safe points leaves `sqlite_schema` looking unchanged. Capture compares
-    /// the schema for what changed and takes these only as a hint that a
-    /// table which looks unchanged is new. The authorizer has no cell scope,
-    /// so each check point hands them to every capture on the thread.
-    static DROP_HINTS: RefCell<Vec<String>> = const { RefCell::new(Vec::new()) };
 }
 
-/// Note that `table` may be dropped; see `DROP_HINTS`.
+/// Note that `table` may be dropped, when the current cells capture; see
+/// `Cells::drop_hints`.
 fn hint_dropped(table: &str) {
-    if DROP_HINTS_WANTED.with(std::cell::Cell::get) && export_capture::exported_table(table) {
-        DROP_HINTS.with(|hints| hints.borrow_mut().push(table.to_string()));
+    if CURRENT_CELLS.get().is_null() || !export_capture::exported_table(table) {
+        return;
     }
+    cells(|c| {
+        if c.export_capture.get().is_some() {
+            c.drop_hints.borrow_mut().push(table.to_string());
+        }
+    });
 }
 
 /// Run `callback` with application-SQL restrictions in force.
@@ -1233,11 +1235,11 @@ pub(crate) fn export_checkpoint() {
     }
 }
 
-/// Give every capture on the thread the tables dropped since the last check
-/// point. A capture keeps them until its next pull; one whose schema did not
-/// change there discards them.
+/// Give every capture of the current cells the tables dropped since the last
+/// check point. A capture keeps them until its next pull; one whose schema
+/// did not change there discards them.
 fn hand_out_drop_hints() {
-    let hints = DROP_HINTS.with(|hints| std::mem::take(&mut *hints.borrow_mut()));
+    let hints = cells(|c| std::mem::take(&mut *c.drop_hints.borrow_mut()));
     if hints.is_empty() {
         return;
     }
@@ -1254,7 +1256,7 @@ fn hand_out_drop_hints() {
     });
     if !handed {
         // Reached inside a storage call; the next check point hands them out.
-        DROP_HINTS.with(|pending| pending.borrow_mut().extend(hints));
+        cells(|c| c.drop_hints.borrow_mut().extend(hints));
     }
 }
 
