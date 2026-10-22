@@ -1021,7 +1021,7 @@ async fn snapshot_job(
                 Ok(stream) => stream,
                 Err(reason) => return Ok(Scanned::Skipped(reason)),
             };
-            if tombstones.iter().any(|t| t.matches(&stream)) {
+            if tombstones.iter().any(|t| t.erases_bucket_data(&stream)) {
                 return Ok(Scanned::Skipped("the export stream is tombstoned".into()));
             }
             let snapshot = Snapshot {
