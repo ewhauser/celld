@@ -1041,6 +1041,38 @@ UPDATE _cf_METADATA SET incarnation=7;"
 }
 
 #[test]
+fn repair_skips_a_stream_erased_under_another_script() {
+    crate::asyncrt::test_block_on(async {
+        let source = source().await;
+        let destination = bucket("export");
+        crate::export_audit::tombstone::put(
+            &destination,
+            &crate::export_audit::Tombstone {
+                script: String::new(),
+                class: "Cart".into(),
+                cell: SCOPE.into(),
+                facet: None,
+                incarnation: None,
+                erased_at_ms: 1,
+                cleared_at_ms: None,
+                reason: None,
+            },
+        )
+        .await
+        .unwrap();
+        let (reports, records) = snapshot_into(
+            &source,
+            &destination,
+            vec![job(Target::Head)],
+            &settings(1 << 20),
+        )
+        .await;
+        assert_eq!(reports[0].status, Status::Skipped);
+        assert!(records.is_empty(), "resurrected {} records", records.len());
+    });
+}
+
+#[test]
 fn repair_keeps_sql_kv_distinct_when_storage_kv_is_denied() {
     crate::asyncrt::test_block_on(async {
         let source = bucket("fleet");

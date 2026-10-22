@@ -755,6 +755,32 @@ fn a_tombstone_without_an_incarnation_erases_every_incarnation() {
 }
 
 #[test]
+fn bucket_data_is_erased_whatever_script_the_tombstone_names() {
+    let s = root();
+    // Erased under the legacy empty script, or a script since redeployed:
+    // the bucket scope holds the same data either way.
+    let legacy = Tombstone {
+        script: String::new(),
+        ..tombstone_for(&s, None)
+    };
+    assert!(!legacy.matches(&s));
+    assert!(legacy.erases_bucket_data(&s));
+    let mut later = s.clone();
+    later.incarnation = 9;
+    let one = Tombstone {
+        script: "other".into(),
+        ..tombstone_for(&s, Some(s.incarnation))
+    };
+    assert!(one.erases_bucket_data(&s) && !one.erases_bucket_data(&later));
+    assert!(!legacy.erases_bucket_data(&stream(CELL, Some(CHILD))));
+    let cleared = Tombstone {
+        cleared_at_ms: Some(2),
+        ..legacy
+    };
+    assert!(!cleared.erases_bucket_data(&s));
+}
+
+#[test]
 fn tombstone_keys_are_one_path_segment_per_part() {
     let t = tombstone_for(&stream(CELL, Some("a/b c")), None);
     assert_eq!(

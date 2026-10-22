@@ -104,7 +104,9 @@ fn a_properties_file_applies_over_the_sinks_own() {
          \n\
          sasl.password=a=b==\n\
          compression.type=zstd\n\
-         acks=-1\n",
+         acks=-1\n\
+         request.required.acks=all\n\
+         enable.idempotence=true\n",
     )
     .unwrap();
     let settings = Settings::from_config(&config(&[
@@ -118,6 +120,7 @@ fn a_properties_file_applies_over_the_sinks_own() {
     assert_eq!(property(&settings, "sasl.password"), Some("a=b=="));
     assert_eq!(property(&settings, "compression.type"), Some("zstd"));
     assert_eq!(property(&settings, "acks"), Some("-1"));
+    assert_eq!(property(&settings, "request.required.acks"), Some("all"));
 }
 
 #[test]
@@ -125,6 +128,14 @@ fn a_properties_file_may_not_weaken_acks_or_be_malformed() {
     for (text, expected) in [
         ("acks=1\n", "acks must stay all"),
         ("acks = 0", "acks must stay all"),
+        (
+            "request.required.acks=1",
+            "request.required.acks must stay all",
+        ),
+        (
+            "enable.idempotence=false",
+            "enable.idempotence must stay true",
+        ),
         (
             "delivery.report.only.error=true",
             "delivery.report.only.error must stay false",

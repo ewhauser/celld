@@ -52,6 +52,19 @@ impl Tombstone {
             && self.incarnation.is_none_or(|i| i == stream.incarnation)
     }
 
+    /// Whether this tombstone erases the data repair and backfill would read
+    /// for `stream` from the fleet bucket. The bucket keys a cell by scope
+    /// alone, naming neither script nor class, so the scope's data is the
+    /// same whichever script a job stamps on it: a tombstone written under
+    /// another script (the legacy empty one, or the fleet's before a
+    /// redeploy) still erased it. The incarnation does tell the data apart.
+    pub fn erases_bucket_data(&self, stream: &StreamId) -> bool {
+        self.is_active()
+            && self.cell == stream.cell
+            && self.facet == stream.facet
+            && self.incarnation.is_none_or(|i| i == stream.incarnation)
+    }
+
     /// Whether this tombstone erases the bucket scope `scope`. The bucket
     /// names neither script nor incarnation, so any active tombstone for the
     /// same cell and facet covers the scope: the reconciler, repair and
@@ -147,11 +160,12 @@ async fn load_under(bucket: &Bucket, prefix: &str) -> anyhow::Result<Vec<Tombsto
     Ok(out)
 }
 
-/// Whether an active tombstone erases `stream`. For repair and backfill,
-/// which must skip tombstoned streams. Lists one cell's tombstones only.
+/// Whether an active tombstone erases `stream`'s bucket data. For repair
+/// and backfill, which must skip tombstoned streams. Lists one cell's
+/// tombstones only.
 pub async fn is_tombstoned(bucket: &Bucket, stream: &StreamId) -> anyhow::Result<bool> {
     let tombstones = load_under(bucket, &cell_prefix(&stream.cell)).await?;
-    Ok(tombstones.iter().any(|t| t.matches(stream)))
+    Ok(tombstones.iter().any(|t| t.erases_bucket_data(stream)))
 }
 
 /// Whether an active tombstone covers the bucket scope `scope` of `cell`.
