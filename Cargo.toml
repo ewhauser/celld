@@ -71,6 +71,16 @@ serde_yaml = "0.9"
 # build needs a C toolchain and nothing installed; default builds never
 # compile it.
 rdkafka = { version = "0.39", default-features = false, features = ["tokio", "libz-static", "ssl-vendored", "zstd"] }
+# Amazon MSK IAM authentication for those Kafka clients (celld-kafka-auth's
+# `client` feature): the SDK's default credential chain, SigV4 to presign the
+# token, and the SDK's HTTPS client on ring, which rustls already uses here,
+# rather than its default aws-lc.
+celld-kafka-auth = { path = "crates/kafka-auth" }
+aws-config = { version = "1.12", default-features = false, features = ["rt-tokio", "credentials-process", "sso"] }
+aws-credential-types = "1.3"
+aws-sigv4 = "1.6"
+aws-smithy-http-client = { version = "1.4", default-features = false, features = ["rustls-ring"] }
+aws-smithy-runtime-api = "1.18"
 chrono = { version = "0.4", default-features = false, features = ["std"] }
 ed25519-dalek = { version = "2", features = ["pkcs8"] }
 encoding_rs = "0.8"

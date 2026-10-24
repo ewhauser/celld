@@ -505,6 +505,18 @@ librdkafka properties applied over the sink's own, for security, SASL
 credentials, compression and batching. One topic per fleet, created by the
 operator with the partition count and replication the fleet needs.
 
+`CELLD_EXPORT_KAFKA_AUTH=aws-msk-iam`, and the loader's
+`EXPORT_KAFKA_AUTH`, sign in to Amazon MSK with IAM access control. librdkafka
+has no MSK IAM mechanism of its own, so the client speaks SASL/OAUTHBEARER
+and answers librdkafka's token refreshes from its client context
+(`celld-kafka-auth`): a SigV4 presign of `kafka-cluster:Connect`, as AWS's
+signers build it, with credentials from the AWS SDK's default chain,
+resolved on a small runtime of the context's own on the thread that polls
+the client. The region comes from the MSK broker names, else the SDK's. A
+token lives 15 minutes, or until its credentials expire if sooner, and
+librdkafka refreshes it before then. The properties file may not choose
+another mechanism or token source beside it.
+
 The producer runs with `acks=all` and idempotence, so a produce is
 acknowledged only once every in-sync replica has the message, and a retry
 neither duplicates nor reorders it within its partition. The properties
@@ -739,6 +751,7 @@ transaction's overshoot plus the resident stream count.
 | `CELLD_EXPORT_WRITER_ID` | the node's zone | blob-stream writer id. |
 | `CELLD_EXPORT_KAFKA_BROKERS` | unset | Kafka bootstrap servers, `host:port`. |
 | `CELLD_EXPORT_KAFKA_PROPERTIES` | unset | A file of librdkafka properties over the Kafka sink's own. |
+| `CELLD_EXPORT_KAFKA_AUTH` | `none` | `aws-msk-iam` signs in to Amazon MSK with IAM. |
 | `CELLD_EXPORT_RETRY_MS` | `30000` | blob-stream or Kafka delivery deadline before a record counts as dropped. |
 | `CELLD_EXPORT_RECONCILE` | `24h` | Reconciler interval, run by the loader deployment, not the node. |
 
@@ -875,6 +888,14 @@ A fleet outside AWS stops at step four with a consumer on the bucket sink.
   consumer sit behind their own Cargo features, share the topic sink and
   the consumer loop with blob-stream, and the loader still reads
   blob-stream unless told otherwise. A node still runs one sink.
+- **2026-10-24. Amazon MSK IAM through OAUTHBEARER, signed in process.**
+  librdkafka cannot speak `AWS_MSK_IAM`, and AWS publishes its MSK token
+  signers for Java, Go, Python and JavaScript but not Rust. The sink and the
+  loader sign the OAUTHBEARER tokens themselves, with `aws-sigv4` and the
+  SDK's default credential chain, held to botocore's signatures in tests,
+  rather than depend on a community signer crate. The SDK's HTTPS client runs on ring,
+  as the rest of celld's rustls does, so the Kafka builds gain no second
+  crypto library.
 
 ## Open questions
 

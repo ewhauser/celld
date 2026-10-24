@@ -21,6 +21,11 @@
 //! passes the revocation along and waits until the loop has landed and
 //! committed what it read from them, so the next owner starts where this
 //! member stopped.
+//!
+//! `EXPORT_KAFKA_AUTH=aws-msk-iam` signs in to Amazon MSK with IAM access
+//! control, as the nodes' `CELLD_EXPORT_KAFKA_AUTH` does: SASL/OAUTHBEARER
+//! over TLS, with tokens signed from the loader's AWS credentials on the
+//! poll thread, which serves librdkafka's token refreshes.
 
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -29,10 +34,14 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{anyhow, bail, Context as _};
+use celld_kafka_auth::client::Tokens;
+use rdkafka::client::OAuthToken;
 use rdkafka::consumer::{BaseConsumer, CommitMode, Consumer as _, ConsumerContext, Rebalance};
 use rdkafka::error::KafkaError;
 use rdkafka::{ClientConfig, ClientContext, Message as _, Offset, TopicPartitionList};
 use tokio::sync::{mpsc, oneshot};
+
+pub use celld_kafka_auth::Auth;
 
 use crate::source::{Next, Revoked, Source, DEFAULT_GROUP};
 
@@ -54,21 +63,25 @@ const POLL: Duration = Duration::from_millis(100);
 #[derive(Clone, Debug)]
 pub struct Settings {
     pub topic: String,
+    pub brokers: String,
+    pub auth: Auth,
     /// Every librdkafka property the consumer is created with, in order:
-    /// the loader's own, then the properties file's.
+    /// the loader's own, then the auth's, then the properties file's.
     pub properties: Vec<(String, String)>,
 }
 
 impl Settings {
     /// Settings for `brokers` and `topic`. `group` defaults to
     /// [`DEFAULT_GROUP`]; `member`, when given, is the client id brokers log
-    /// this loader as. `properties` names a file of librdkafka properties
-    /// applied over the loader's own.
+    /// this loader as. `auth` is how it signs in, and `properties` names a
+    /// file of librdkafka properties applied over the loader's own, which
+    /// may not undo the auth.
     pub fn new(
         brokers: &str,
         topic: Option<&str>,
         group: Option<&str>,
         member: Option<&str>,
+        auth: Auth,
         properties: Option<&Path>,
     ) -> anyhow::Result<Settings> {
         let mut all: Vec<(String, String)> = [
@@ -82,18 +95,24 @@ impl Settings {
             ("auto.offset.reset", "earliest"),
         ]
         .into_iter()
+        .chain(auth.properties().iter().copied())
         .map(|(name, value)| (name.to_string(), value.to_string()))
         .collect();
         if let Some(path) = properties {
             let text = std::fs::read_to_string(path)
                 .with_context(|| format!("read EXPORT_KAFKA_PROPERTIES {}", path.display()))?;
-            all.extend(
-                parse_properties(&text)
-                    .with_context(|| format!("EXPORT_KAFKA_PROPERTIES {}", path.display()))?,
-            );
+            let overrides = parse_properties(&text)
+                .with_context(|| format!("EXPORT_KAFKA_PROPERTIES {}", path.display()))?;
+            for (name, value) in &overrides {
+                auth.check_property(name, value)
+                    .with_context(|| format!("EXPORT_KAFKA_PROPERTIES {}", path.display()))?;
+            }
+            all.extend(overrides);
         }
         Ok(Settings {
             topic: topic.unwrap_or(DEFAULT_TOPIC).to_string(),
+            brokers: brokers.to_string(),
+            auth,
             properties: all,
         })
     }
@@ -140,13 +159,26 @@ enum Polled {
     Fatal(KafkaError),
 }
 
-/// Passes revocations to the loop and waits for it to let go.
+/// Passes revocations to the loop and waits for it to let go, and answers
+/// librdkafka's token refreshes when the auth signs its own.
 struct Context {
     topic: String,
     polled: mpsc::Sender<Polled>,
+    tokens: Tokens,
 }
 
-impl ClientContext for Context {}
+impl ClientContext for Context {
+    // librdkafka raises refreshes only for SASL/OAUTHBEARER with its default
+    // token method; see celld_kafka_auth::client::Context.
+    const ENABLE_REFRESH_OAUTH_TOKEN: bool = true;
+
+    fn generate_oauth_token(
+        &self,
+        _: Option<&str>,
+    ) -> Result<OAuthToken, Box<dyn std::error::Error>> {
+        self.tokens.generate()
+    }
+}
 
 impl ConsumerContext for Context {
     fn pre_rebalance(&self, _: &BaseConsumer<Self>, rebalance: &Rebalance<'_>) {
@@ -228,10 +260,13 @@ impl Source for KafkaSource {
         for (name, value) in &self.settings.properties {
             config.set(name, value);
         }
+        let tokens = Tokens::new(self.settings.auth, &self.settings.brokers)
+            .context("start the Kafka auth's token runtime")?;
         let consumer: BaseConsumer<Context> = config
             .create_with_context(Context {
                 topic: self.settings.topic.clone(),
                 polled: tx.clone(),
+                tokens,
             })
             .context("create the Kafka consumer")?;
         consumer

@@ -129,6 +129,10 @@ pub struct Config {
     /// properties, `name=value` per line, applied over the sink's own
     /// (security, SASL credentials, compression).
     pub kafka_properties: Option<std::path::PathBuf>,
+    /// `CELLD_EXPORT_KAFKA_AUTH`: `none` (the default), leaving
+    /// authentication to the properties file, or `aws-msk-iam`, signing in
+    /// to Amazon MSK with the node's AWS credentials.
+    pub kafka_auth: celld_kafka_auth::Auth,
     /// blob-stream and Kafka retry deadline before a record counts as
     /// dropped.
     pub retry: Duration,
@@ -231,6 +235,11 @@ impl Config {
             get("CELLD_EXPORT_KAFKA_PROPERTIES")?,
         )?
         .map(std::path::PathBuf::from);
+        let kafka_auth = match get("CELLD_EXPORT_KAFKA_AUTH")? {
+            None => celld_kafka_auth::Auth::None,
+            Some(value) => celld_kafka_auth::Auth::parse(&value)
+                .map_err(|e| anyhow!("CELLD_EXPORT_KAFKA_AUTH {e}"))?,
+        };
         let reconcile = match get("CELLD_EXPORT_RECONCILE")? {
             None => DEFAULT_RECONCILE,
             Some(value) => parse_interval("CELLD_EXPORT_RECONCILE", &value)?,
@@ -287,6 +296,7 @@ impl Config {
             partitions,
             kafka_brokers,
             kafka_properties,
+            kafka_auth,
             retry,
             reconcile,
         }))
@@ -579,6 +589,8 @@ mod tests {
     #[test]
     fn off_still_checks_values_but_not_cross_field_rules() {
         assert!(error(&[("CELLD_EXPORT_FLUSH_MS", "soon")]).contains("CELLD_EXPORT_FLUSH_MS"));
+        assert!(error(&[("CELLD_EXPORT_KAFKA_AUTH", "iam")])
+            .contains("CELLD_EXPORT_KAFKA_AUTH must be none or aws-msk-iam"));
         // blob-stream without brokers binds only an enabled node.
         assert!(config(&[("CELLD_EXPORT_SINK", "blob-stream")])
             .unwrap()
@@ -618,6 +630,7 @@ mod tests {
         assert_eq!(config.partitions, None);
         assert_eq!(config.kafka_brokers, None);
         assert_eq!(config.kafka_properties, None);
+        assert_eq!(config.kafka_auth, celld_kafka_auth::Auth::None);
         assert_eq!(config.retry, Duration::from_millis(30_000));
         assert_eq!(config.reconcile, Duration::from_secs(24 * 3600));
     }
@@ -646,6 +659,7 @@ mod tests {
                 "CELLD_EXPORT_KAFKA_PROPERTIES",
                 "/etc/celld/kafka.properties",
             ),
+            ("CELLD_EXPORT_KAFKA_AUTH", "aws-msk-iam"),
             ("CELLD_EXPORT_RETRY_MS", "9"),
             ("CELLD_EXPORT_RECONCILE", "6h"),
         ]);
@@ -689,6 +703,7 @@ mod tests {
             config.kafka_properties.as_deref(),
             Some(std::path::Path::new("/etc/celld/kafka.properties"))
         );
+        assert_eq!(config.kafka_auth, celld_kafka_auth::Auth::AwsMskIam);
         assert_eq!(config.retry, Duration::from_millis(9));
         assert_eq!(config.reconcile, Duration::from_secs(6 * 3600));
     }

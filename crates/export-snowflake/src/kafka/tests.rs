@@ -22,7 +22,15 @@ fn property<'a>(settings: &'a Settings, name: &str) -> Option<&'a str> {
 
 #[test]
 fn the_consumer_commits_only_what_the_loop_commits() {
-    let settings = Settings::new("k1:9092,k2:9092", None, None, Some("loader-0"), None).unwrap();
+    let settings = Settings::new(
+        "k1:9092,k2:9092",
+        None,
+        None,
+        Some("loader-0"),
+        Auth::None,
+        None,
+    )
+    .unwrap();
     assert_eq!(settings.topic, "celld-changes");
     assert_eq!(
         property(&settings, "bootstrap.servers"),
@@ -32,7 +40,8 @@ fn the_consumer_commits_only_what_the_loop_commits() {
     assert_eq!(property(&settings, "client.id"), Some("loader-0"));
     assert_eq!(property(&settings, "enable.auto.commit"), Some("false"));
     assert_eq!(property(&settings, "auto.offset.reset"), Some("earliest"));
-    let settings = Settings::new("k1:9092", Some("prod"), Some("wh"), None, None).unwrap();
+    let settings =
+        Settings::new("k1:9092", Some("prod"), Some("wh"), None, Auth::None, None).unwrap();
     assert_eq!(settings.topic, "prod");
     assert_eq!(property(&settings, "group.id"), Some("wh"));
 }
@@ -48,12 +57,45 @@ fn a_properties_file_applies_over_the_loaders_own() {
         "# MSK over TLS\nsecurity.protocol = SSL\n\n! note\nauto.offset.reset=latest\n",
     )
     .unwrap();
-    let settings = Settings::new("k1:9092", None, None, None, Some(&path)).unwrap();
+    let settings = Settings::new("k1:9092", None, None, None, Auth::None, Some(&path)).unwrap();
     std::fs::remove_file(&path).unwrap();
     assert_eq!(property(&settings, "security.protocol"), Some("SSL"));
     assert_eq!(property(&settings, "auto.offset.reset"), Some("latest"));
-    let missing = Settings::new("k1:9092", None, None, None, Some(&path)).unwrap_err();
+    let missing = Settings::new("k1:9092", None, None, None, Auth::None, Some(&path)).unwrap_err();
     assert!(format!("{missing:#}").contains("EXPORT_KAFKA_PROPERTIES"));
+}
+
+#[test]
+fn msk_iam_signs_in_over_tls_with_oauthbearer() {
+    let brokers = "b-1.prod.abc123.c2.kafka.us-east-1.amazonaws.com:9098";
+    let settings = Settings::new(brokers, None, None, None, Auth::None, None).unwrap();
+    assert_eq!(property(&settings, "sasl.mechanism"), None);
+    let settings = Settings::new(brokers, None, None, None, Auth::AwsMskIam, None).unwrap();
+    assert_eq!(settings.auth, Auth::AwsMskIam);
+    assert_eq!(settings.brokers, brokers);
+    assert_eq!(property(&settings, "security.protocol"), Some("SASL_SSL"));
+    assert_eq!(property(&settings, "sasl.mechanism"), Some("OAUTHBEARER"));
+
+    // A properties file may tune TLS but not sign in another way.
+    let path = std::env::temp_dir().join(format!(
+        "celld-export-loader-{}-msk.properties",
+        std::process::id()
+    ));
+    std::fs::write(&path, "ssl.ca.location=/etc/ssl/msk.pem\n").unwrap();
+    let settings = Settings::new(brokers, None, None, None, Auth::AwsMskIam, Some(&path)).unwrap();
+    assert_eq!(
+        property(&settings, "ssl.ca.location"),
+        Some("/etc/ssl/msk.pem")
+    );
+    std::fs::write(&path, "sasl.mechanism=SCRAM-SHA-512\n").unwrap();
+    let refused = Settings::new(brokers, None, None, None, Auth::AwsMskIam, Some(&path));
+    std::fs::remove_file(&path).unwrap();
+    let message = format!("{:#}", refused.unwrap_err());
+    assert!(
+        message.contains("EXPORT_KAFKA_PROPERTIES")
+            && message.contains("conflicts with aws-msk-iam"),
+        "{message}"
+    );
 }
 
 #[test]
@@ -219,8 +261,9 @@ struct Member {
 }
 
 fn member(brokers: &str, topic: &str, group: &str, linger: Duration) -> Member {
-    let source =
-        KafkaSource::new(Settings::new(brokers, Some(topic), Some(group), None, None).unwrap());
+    let source = KafkaSource::new(
+        Settings::new(brokers, Some(topic), Some(group), None, Auth::None, None).unwrap(),
+    );
     let landed = Landed::default();
     let lander = Arc::new(landed.clone());
     let events = Arc::new(Mutex::new(Vec::new()));
