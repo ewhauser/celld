@@ -44,11 +44,16 @@ the commit subject. The `PR title` check requires the `type: summary` or
   left out of the changelog.
 - Every release advances only the `-ewhauser.N` counter. The check rejects a
   breaking-change marker (`!`), because release-please would leave the
-  `0.6.2` base. Describe a break in the PR body. A `BREAKING CHANGE:` footer
+  `0.6.3` base. Describe a break in the PR body. A `BREAKING CHANGE:` footer
   in a commit body has the same effect, so do not use one.
 - After a rebase onto a new upstream release, set the new base version, such
-  as `0.6.3-ewhauser.0`, in `.release-please-manifest.json`,
-  `crates/celld/Cargo.toml`, and `Cargo.lock`.
+  as `0.6.4-ewhauser.0`, in `.release-please-manifest.json`,
+  `crates/celld/Cargo.toml`, and `Cargo.lock`. The rebase rewrites the
+  commits release-please last saw, so also point `bootstrap-sha` and
+  `last-release-sha` in `release-please-config.json` at the rebased commit of
+  the last release, and give the rebase commit a `Release-As:
+  0.6.4-ewhauser.1` footer. The last release PR must be `autorelease: tagged`
+  first.
 
 Merging the release PR pushes its commit to the `candidate` branch and starts
 the release workflow. The workflow builds the draft prerelease, and its notes
@@ -426,3 +431,26 @@ the socket, and each hung call left another dead tunnel in the pool.
 Rollout: nodes can roll from 0.6.2-ewhauser.2 or .3. There is no storage-format
 or protocol change. The six native artifacts passed the release build and
 checksum verification, and the macOS binary reported this version.
+
+## 0.6.3-ewhauser.1
+
+Based on upstream v0.6.3. It keeps every fork change through
+0.6.2-ewhauser.5. Upstream's v0.6.3 changes:
+
+- Outbound TLS no longer trusts the emSign ECC Root CA - G3 certificate or the
+  eight eMudhra intermediate CA certificates whose private keys are public
+  (webpki-roots 1.0.10, rustls-webpki 0.103.16).
+- rustls 0.23.46 fixes GHSA-2mjx-qc3c-rqvc, where a TLS 1.3 handshake message
+  was accepted across an encryption level boundary.
+- A node refuses to acquire a cell whose ownership record
+  (`cells/<cell>/own.json`) is missing while its LTX is still in the bucket,
+  instead of starting the cell at epoch 1 with an empty database. Requests
+  that need the record fail, and the node logs `celld ownership record lost`
+  at most once every 10 seconds per cell. `docs/guarantees.md` describes how
+  to restore the record.
+
+Rollout: nodes can roll from any 0.6.2-ewhauser build, and a rollback can roll
+too. Upgrade each node promptly for the TLS fixes. Until every node runs this
+build, an older node can still acquire a cell whose ownership record was lost
+and start it with an empty database. There is no storage-format or protocol
+change.
