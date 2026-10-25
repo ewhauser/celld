@@ -28,6 +28,11 @@
 //! weaken `acks`, move the delivery deadline, silence successful delivery
 //! reports, allow topic creation, or lower the message limit below a record.
 //!
+//! `CELLD_EXPORT_KAFKA_AUTH=aws-msk-iam` signs in to Amazon MSK with IAM
+//! access control instead of credentials in that file: the producer speaks
+//! SASL/OAUTHBEARER over TLS with tokens [`celld_kafka_auth`] signs from the
+//! node's AWS credentials, and the file may not choose another mechanism.
+//!
 //! The client is behind the `export-kafka` Cargo feature. Without it,
 //! [`start`] refuses, and a node configured for this sink does not start.
 
@@ -36,6 +41,7 @@ use crate::export_sink::ExportSink;
 use crate::export_sink::Outcome;
 use anyhow::bail;
 use anyhow::Context as _;
+use celld_kafka_auth::Auth;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::mpsc;
@@ -67,6 +73,7 @@ pub fn start(
         topic = %settings.topic,
         brokers = %settings.brokers,
         retry_ms = settings.retry.as_millis() as u64,
+        auth = settings.auth.name(),
         properties = ?config.kafka_properties,
         "export kafka sink on"
     );
@@ -105,8 +112,10 @@ pub struct Settings {
     pub topic: String,
     pub brokers: String,
     pub retry: Duration,
+    pub auth: Auth,
     /// Every librdkafka property the producer is created with, in the order
-    /// they are set: the sink's own, then the properties file's.
+    /// they are set: the sink's own, then the auth's, then the properties
+    /// file's.
     pub properties: Vec<(String, String)>,
 }
 
@@ -130,6 +139,7 @@ impl Settings {
             brokers,
             config.retry,
             config.max_record_bytes,
+            config.kafka_auth,
             overrides,
         )
     }
@@ -139,6 +149,7 @@ impl Settings {
         brokers: String,
         retry: Duration,
         max_record_bytes: usize,
+        auth: Auth,
         overrides: Vec<(String, String)>,
     ) -> anyhow::Result<Settings> {
         let message_max_bytes = max_record_bytes
@@ -151,6 +162,8 @@ impl Settings {
             );
         }
         for (name, value) in &overrides {
+            auth.check_property(name, value)
+                .map_err(|e| anyhow::anyhow!("CELLD_EXPORT_KAFKA_PROPERTIES: {e}"))?;
             if name == "message.max.bytes"
                 && value
                     .parse::<usize>()
@@ -182,12 +195,18 @@ impl Settings {
         let mut properties: Vec<(String, String)> = own
             .into_iter()
             .map(|(name, value)| (name.to_string(), value))
+            .chain(
+                auth.properties()
+                    .iter()
+                    .map(|&(name, value)| (name.to_string(), value.to_string())),
+            )
             .collect();
         properties.extend(overrides);
         Ok(Settings {
             topic,
             brokers,
             retry,
+            auth,
             properties,
         })
     }
@@ -262,6 +281,8 @@ mod client {
     use super::*;
     use crate::export_topic::Message;
     use crate::export_topic::Produce;
+    use celld_kafka_auth::client::Context;
+    use celld_kafka_auth::client::Tokens;
     use futures_util::future::BoxFuture;
     use futures_util::FutureExt as _;
     use rdkafka::error::KafkaError;
@@ -290,7 +311,13 @@ mod client {
         for (name, value) in &settings.properties {
             config.set(name, value);
         }
-        let producer: FutureProducer = config.create().context("create the Kafka producer")?;
+        // librdkafka asks the context for tokens on the producer's polling
+        // thread when the auth signs its own.
+        let tokens = Tokens::new(settings.auth, &settings.brokers)
+            .context("start the Kafka auth's token runtime")?;
+        let producer: FutureProducer<Context> = config
+            .create_with_context(Context::new(tokens))
+            .context("create the Kafka producer")?;
         let producer = Arc::new(producer);
         let topic = settings.topic.clone();
         let checked = producer.clone();
@@ -323,7 +350,7 @@ mod client {
     }
 
     struct Client {
-        producer: Arc<FutureProducer>,
+        producer: Arc<FutureProducer<Context>>,
         topic: String,
         retry: Duration,
     }
