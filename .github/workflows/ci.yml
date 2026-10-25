@@ -124,6 +124,11 @@ jobs:
           CELLD_TEST_KAFKA_BROKERS: localhost:9092
         run: cargo test --locked -p celld --features export-kafka --lib export_kafka
 
+      # The Kafka clients' MSK IAM signer and its librdkafka context, which
+      # the default test run builds without.
+      - name: Test, Kafka auth
+        run: cargo test --locked -p celld-kafka-auth --features client
+
       # Check fixtures and benchmark paths without timing gates on shared runners.
       - name: Smoke test export benchmarks
         run: |

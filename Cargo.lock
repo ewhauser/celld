@@ -1426,6 +1426,7 @@ dependencies = [
  "cbc",
  "celld-export-format",
  "celld-export-snowflake",
+ "celld-kafka-auth",
  "celld-logic",
  "celld-ltx",
  "chrono",
@@ -1516,6 +1517,7 @@ dependencies = [
  "blob-stream-proto",
  "blob-stream-types",
  "celld-export-format",
+ "celld-kafka-auth",
  "criterion",
  "getrandom 0.3.4",
  "pkcs8",
@@ -1532,6 +1534,22 @@ dependencies = [
  "tokio",
  "tokio-util",
  "ureq",
+]
+
+[[package]]
+name = "celld-kafka-auth"
+version = "0.0.0"
+dependencies = [
+ "aws-config",
+ "aws-credential-types",
+ "aws-sigv4",
+ "aws-smithy-http-client",
+ "aws-smithy-runtime-api",
+ "base64 0.22.1",
+ "rdkafka",
+ "thiserror 2.0.20",
+ "tokio",
+ "url",
 ]
 
 [[package]]

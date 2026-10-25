@@ -1,0 +1,51 @@
+# How the change export's Kafka clients authenticate: the node's Kafka sink
+# and the Snowflake loader's Kafka source share it. The default build is pure
+# (the auth setting, the properties it implies and refuses, the region an MSK
+# broker name carries) so celld's config can parse it without librdkafka. The
+# `client` feature adds the librdkafka context that signs Amazon MSK IAM
+# tokens with the AWS SDK's default credential chain.
+[package]
+name = "celld-kafka-auth"
+version = "0.0.0"
+edition = "2021"
+rust-version = "1.94.1"
+license = "Apache-2.0"
+publish = false
+
+[dependencies]
+thiserror.workspace = true
+aws-config = { workspace = true, optional = true }
+aws-credential-types = { workspace = true, optional = true }
+aws-sigv4 = { workspace = true, optional = true }
+aws-smithy-http-client = { workspace = true, optional = true }
+aws-smithy-runtime-api = { workspace = true, optional = true }
+base64 = { workspace = true, optional = true }
+rdkafka = { workspace = true, optional = true }
+tokio = { workspace = true, optional = true, features = ["rt", "time"] }
+url = { workspace = true, optional = true }
+
+[features]
+# The librdkafka client context and the MSK IAM token signer. It builds
+# librdkafka, like the sink and the loader source that enable it.
+client = [
+    "dep:aws-config",
+    "dep:aws-credential-types",
+    "dep:aws-sigv4",
+    "dep:aws-smithy-http-client",
+    "dep:aws-smithy-runtime-api",
+    "dep:base64",
+    "dep:rdkafka",
+    "dep:tokio",
+    "dep:url",
+]
+
+[dev-dependencies]
+base64.workspace = true
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+url.workspace = true
+
+# The credential chain end to end. It sets the AWS environment, so it runs
+# in a process of its own.
+[[test]]
+name = "credential_chain"
+required-features = ["client"]

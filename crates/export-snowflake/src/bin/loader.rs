@@ -54,6 +54,8 @@ settings (environment):
   EXPORT_KAFKA_BROKERS           run, kafka: bootstrap servers, host:port comma-separated
   EXPORT_KAFKA_TOPIC             run, kafka: the topic (default celld-changes)
   EXPORT_KAFKA_PROPERTIES        run, kafka: a file of librdkafka consumer properties (name=value)
+  EXPORT_KAFKA_AUTH              run, kafka: none (default) or aws-msk-iam, to sign in to Amazon MSK
+                                 with the loader's AWS credentials
   EXPORT_MEMBER_ID               run: this loader's stable member id (default $HOSTNAME)
   EXPORT_GROUP                   run: consumer group (default snowflake)
   EXPORT_SKIP                    run: messages to drop, as SOURCE/PARTITION/OFFSET (blob-stream/3/17,
@@ -407,13 +409,21 @@ impl Consumer {
             }
             #[cfg(feature = "kafka")]
             Transport::Kafka => {
+                use celld_export_snowflake::kafka::Auth;
                 let properties = std::env::var("EXPORT_KAFKA_PROPERTIES").ok();
+                let auth = match std::env::var("EXPORT_KAFKA_AUTH").ok() {
+                    None => Auth::None,
+                    Some(value) => {
+                        Auth::parse(&value).map_err(|e| format!("EXPORT_KAFKA_AUTH {e}"))?
+                    }
+                };
                 Ok(Consumer::Kafka(
                     celld_export_snowflake::kafka::Settings::new(
                         &env("EXPORT_KAFKA_BROKERS")?,
                         std::env::var("EXPORT_KAFKA_TOPIC").ok().as_deref(),
                         group,
                         member,
+                        auth,
                         properties.as_deref().map(std::path::Path::new),
                     )?,
                 ))

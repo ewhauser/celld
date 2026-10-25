@@ -180,6 +180,7 @@ the settings with export still off.
 | `CELLD_EXPORT_WRITER_ID` | the node's zone (`CELLD_ZONE`) | The zone whose writer this node produces as, when it differs from the node's zone. It must be one of `CELLD_EXPORT_ZONES`. |
 | `CELLD_EXPORT_KAFKA_BROKERS` | unset | Kafka bootstrap servers, comma-separated `host:port`. Required with the Kafka sink. |
 | `CELLD_EXPORT_KAFKA_PROPERTIES` | unset | A file of [librdkafka properties](https://github.com/confluentinc/librdkafka/blob/master/CONFIGURATION.md), one `name=value` per line, applied over the Kafka sink's own: TLS, SASL, compression, batching. It may not set `acks` (or `request.required.acks`) below `all`, turn off `enable.idempotence`, set `message.timeout.ms` (that is `CELLD_EXPORT_RETRY_MS`), turn on `delivery.report.only.error` or `allow.auto.create.topics`, or set `message.max.bytes` below `CELLD_EXPORT_MAX_RECORD_BYTES` plus 64 KiB. |
+| `CELLD_EXPORT_KAFKA_AUTH` | `none` | `none`, which leaves authentication to `CELLD_EXPORT_KAFKA_PROPERTIES`, or `aws-msk-iam`, which signs in to Amazon MSK with the node's AWS credentials. See [Amazon MSK with IAM](#amazon-msk-with-iam). |
 | `CELLD_EXPORT_RETRY_MS` | `30000` | How long the blob-stream or Kafka sink retries a record before it counts as dropped. |
 | `CELLD_EXPORT_RECONCILE` | `24h` | The interval of `celld export reconcile --schedule`, as `<n>s`, `<n>m`, `<n>h`, or `<n>d`. The node itself does not reconcile. |
 
@@ -312,9 +313,71 @@ sasl.password=...
 compression.type=zstd
 ```
 
-SASL `PLAIN` and `SCRAM` work over TLS; Kerberos (`GSSAPI`) and AWS MSK IAM
-authentication do not. The sink sets `compression.type=lz4` unless the
-file says otherwise.
+SASL `PLAIN` and `SCRAM` work over TLS, and so does Amazon MSK's IAM access
+control (below); Kerberos (`GSSAPI`) does not. The sink sets
+`compression.type=lz4` unless the file says otherwise.
+
+#### Amazon MSK with IAM
+
+For an MSK cluster with IAM access control, set
+`CELLD_EXPORT_KAFKA_AUTH=aws-msk-iam` and point the sink at the cluster's
+IAM bootstrap brokers (port 9098, or 9198 for public access):
+
+```sh
+CELLD_EXPORT_SINK=kafka
+CELLD_EXPORT_KAFKA_BROKERS=b-1.prod.abc123.c2.kafka.us-east-1.amazonaws.com:9098,b-2.prod.abc123.c2.kafka.us-east-1.amazonaws.com:9098
+CELLD_EXPORT_KAFKA_AUTH=aws-msk-iam
+```
+
+The producer then signs in with SASL/OAUTHBEARER over TLS, and each token
+is a SigV4-signed `kafka-cluster:Connect` request, as AWS's own MSK
+signers build it. The token is signed with the node's AWS credentials, from
+the AWS SDK's default chain: the `AWS_ACCESS_KEY_ID` environment, a
+profile (`AWS_PROFILE`, SSO included), web identity (EKS IRSA), ECS and EKS
+Pod Identity container credentials, then EC2 instance metadata. librdkafka
+asks for a new token before the last one's 15 minutes run out, or before
+the credentials expire if they expire first, and the credentials are
+resolved again each time, so rotated credentials are picked up.
+
+The signing region is the one in the broker names
+(`kafka.<region>.amazonaws.com`, or `kafka-serverless.<region>` for MSK
+Serverless). Brokers reached through names of your own take the region
+from `AWS_REGION` or the profile.
+
+The node's role needs `kafka-cluster:Connect` on the cluster,
+`kafka-cluster:DescribeTopic` and `kafka-cluster:WriteData` on the topic,
+and, for the idempotent producer, `kafka-cluster:WriteDataIdempotently` on
+the cluster:
+
+```json
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Effect": "Allow",
+      "Action": [
+        "kafka-cluster:Connect",
+        "kafka-cluster:WriteDataIdempotently"
+      ],
+      "Resource": "arn:aws:kafka:us-east-1:111122223333:cluster/prod/*"
+    },
+    {
+      "Effect": "Allow",
+      "Action": ["kafka-cluster:DescribeTopic", "kafka-cluster:WriteData"],
+      "Resource": "arn:aws:kafka:us-east-1:111122223333:topic/prod/*/celld-changes"
+    }
+  ]
+}
+```
+
+With IAM, `CELLD_EXPORT_KAFKA_PROPERTIES` is still read, for TLS and
+batching settings, but it may not set `security.protocol` to anything but
+`SASL_SSL`, `sasl.mechanism` to anything but `OAUTHBEARER`,
+`sasl.oauthbearer.method` to anything but `default`, or turn on
+`enable.sasl.oauthbearer.unsecure.jwt`. A node that cannot get credentials
+or a region logs the reason with librdkafka's authentication errors, and
+records are dropped by `CELLD_EXPORT_RETRY_MS` as for an unreachable
+cluster.
 
 On start, and after a failure, the sink fetches the topic's metadata
 before producing, so a missing topic or an unreachable cluster shows up in
@@ -539,7 +602,12 @@ with the topic, blob store, metadata store and broker discovery your
 brokers use, and AWS credentials that can read them.
 
 From Kafka, it needs the bootstrap servers, the topic, and any TLS or SASL
-settings, in a librdkafka properties file like the sink's.
+settings, in a librdkafka properties file like the sink's. For an MSK
+cluster with IAM access control, set `EXPORT_KAFKA_AUTH=aws-msk-iam`
+instead, as on the nodes ([Amazon MSK with IAM](#amazon-msk-with-iam)); the
+loader's role needs `kafka-cluster:Connect` on the cluster, `DescribeTopic`
+and `ReadData` on the topic, and `DescribeGroup` and `AlterGroup` on its
+consumer group.
 
 Then configure and run:
 
@@ -580,6 +648,7 @@ partitions between them.
 | `EXPORT_KAFKA_BROKERS` | `run` from Kafka | Bootstrap servers, comma-separated `host:port`. |
 | `EXPORT_KAFKA_TOPIC` | no | The Kafka topic. Default `celld-changes`, as the nodes' `CELLD_EXPORT_TOPIC`. |
 | `EXPORT_KAFKA_PROPERTIES` | no | A file of librdkafka consumer properties, `name=value` per line, applied over the loader's own. It may not turn on `enable.auto.commit`. |
+| `EXPORT_KAFKA_AUTH` | no | `none` (default), or `aws-msk-iam` to sign in to Amazon MSK with the loader's AWS credentials, as the nodes' `CELLD_EXPORT_KAFKA_AUTH`. |
 | `EXPORT_MEMBER_ID` | `run` | This loader's member id in the consumer group, stable across restarts. Default: `HOSTNAME`. Kafka uses it as the client id. |
 | `EXPORT_GROUP` | no | The consumer group. Default `snowflake`, or the config file's. |
 | `EXPORT_BATCH_RECORDS`, `EXPORT_BATCH_BYTES`, `EXPORT_BATCH_MS` | no | A batch lands at 10000 records, 8 MiB, or 5 seconds after its first record, whichever comes first. |
@@ -768,8 +837,8 @@ to the snapshots these commands write, as on a node, and so do
 `backfill` produce to the topic with `CELLD_EXPORT_BROKERS`,
 `CELLD_EXPORT_PARTITIONS`, `CELLD_EXPORT_TOPIC` and the writer's zone
 (`CELLD_EXPORT_WRITER_ID`, or `CELLD_ZONE` with `CELLD_EXPORT_ZONES`);
-with `kafka`, with `CELLD_EXPORT_KAFKA_BROKERS`, `CELLD_EXPORT_TOPIC` and
-`CELLD_EXPORT_KAFKA_PROPERTIES`.
+with `kafka`, with `CELLD_EXPORT_KAFKA_BROKERS`, `CELLD_EXPORT_TOPIC`,
+`CELLD_EXPORT_KAFKA_PROPERTIES` and `CELLD_EXPORT_KAFKA_AUTH`.
 
 #### repair
 

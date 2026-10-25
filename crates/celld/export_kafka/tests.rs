@@ -172,6 +172,58 @@ fn a_properties_file_may_not_weaken_acks_or_be_malformed() {
     );
 }
 
+#[test]
+fn msk_iam_signs_in_over_tls_with_oauthbearer() {
+    let plain =
+        Settings::from_config(&config(&[("CELLD_EXPORT_KAFKA_BROKERS", "k1:9092")])).unwrap();
+    assert_eq!(plain.auth, Auth::None);
+    assert_eq!(property(&plain, "security.protocol"), None);
+    assert_eq!(property(&plain, "sasl.mechanism"), None);
+
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("kafka.properties");
+    std::fs::write(&path, "ssl.ca.location=/etc/ssl/msk.pem\nlinger.ms=5\n").unwrap();
+    let iam = Settings::from_config(&config(&[
+        (
+            "CELLD_EXPORT_KAFKA_BROKERS",
+            "b-1.prod.abc123.c2.kafka.us-east-1.amazonaws.com:9098",
+        ),
+        ("CELLD_EXPORT_KAFKA_AUTH", "aws-msk-iam"),
+        ("CELLD_EXPORT_KAFKA_PROPERTIES", path.to_str().unwrap()),
+    ]))
+    .unwrap();
+    assert_eq!(iam.auth, Auth::AwsMskIam);
+    assert_eq!(property(&iam, "security.protocol"), Some("SASL_SSL"));
+    assert_eq!(property(&iam, "sasl.mechanism"), Some("OAUTHBEARER"));
+    // The file still tunes TLS and batching, and the sink's own rules stand.
+    assert_eq!(property(&iam, "ssl.ca.location"), Some("/etc/ssl/msk.pem"));
+    assert_eq!(property(&iam, "linger.ms"), Some("5"));
+    assert_eq!(property(&iam, "acks"), Some("all"));
+
+    // But it may not sign in some other way.
+    for text in [
+        "sasl.mechanism=SCRAM-SHA-512\n",
+        "security.protocol=SSL\n",
+        "sasl.oauthbearer.method=oidc\n",
+    ] {
+        std::fs::write(&path, text).unwrap();
+        let message = format!(
+            "{:#}",
+            Settings::from_config(&config(&[
+                ("CELLD_EXPORT_KAFKA_BROKERS", "k1:9098"),
+                ("CELLD_EXPORT_KAFKA_AUTH", "aws-msk-iam"),
+                ("CELLD_EXPORT_KAFKA_PROPERTIES", path.to_str().unwrap()),
+            ]))
+            .unwrap_err()
+        );
+        assert!(
+            message.contains("CELLD_EXPORT_KAFKA_PROPERTIES")
+                && message.contains("conflicts with aws-msk-iam"),
+            "{text:?}: {message}"
+        );
+    }
+}
+
 #[cfg(not(feature = "export-kafka"))]
 #[tokio::test]
 async fn a_build_without_the_feature_refuses_the_sink() {
@@ -389,6 +441,7 @@ mod client {
             brokers.clone(),
             Duration::from_secs(2),
             crate::export::DEFAULT_MAX_RECORD_BYTES,
+            Auth::None,
             vec![("delivery.report.only.error".into(), "true".into())],
         )
         .unwrap();
