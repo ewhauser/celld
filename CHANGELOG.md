@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.6.3-ewhauser.1](https://github.com/ewhauser/celld/compare/v0.6.3-ewhauser.0...v0.6.3-ewhauser.1) (2026-10-25)
+
+
+### Bug Fixes
+
+* rebase onto upstream v0.6.3 ([e9b0d45](https://github.com/ewhauser/celld/commit/e9b0d455df5f48fd6848db292605eb00a565130e))
+
 ## [0.6.2-ewhauser.5](https://github.com/ewhauser/celld/compare/v0.6.2-ewhauser.4...v0.6.2-ewhauser.5) (2026-10-25)
 
 
